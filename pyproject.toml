@@ -6,6 +6,7 @@ dependencies = ["pyusb>=1.2"]
 
 [project.scripts]
 foci-trace = "foci_trace.cli:main"
+foci-trace-analyze = "foci_trace.analyze:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
