@@ -29,12 +29,18 @@ def live_summary_enabled(summary_hz: float) -> bool:
     return summary_hz > 0
 
 
+def warmup_enabled(warmup_s: float) -> bool:
+    """Return true when capture should drain stale trace frames first."""
+    return warmup_s > 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Capture trace frames from all connected trace devices."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True)
     parser.add_argument("--duration-s", type=float, default=0.0)
     parser.add_argument("--packet-size", type=int, default=4096)
+    parser.add_argument("--warmup-s", type=float, default=2.0)
     parser.add_argument("--summary-hz", type=float, default=4.0)
     args = parser.parse_args(argv)
 
@@ -46,9 +52,6 @@ def main(argv: list[str] | None = None) -> int:
     summary = LiveSummary()
     assemblers = [FrameAssembler() for _ in devices]
     endpoints = [trace_endpoint(dev) for dev in devices]
-    start_unix_ns = time.time_ns()
-    start_mono_ns = time.monotonic_ns()
-    deadline = time.monotonic() + args.duration_s if args.duration_s > 0 else None
     summary_enabled = live_summary_enabled(args.summary_hz)
     summary_interval_ns = int(1_000_000_000 / args.summary_hz) if summary_enabled else 0
     last_summary_ns = 0
@@ -56,6 +59,28 @@ def main(argv: list[str] | None = None) -> int:
     for dev in devices:
         usb.util.claim_interface(dev, TRACE_INTERFACE)
     try:
+        if warmup_enabled(args.warmup_s):
+            warmup_deadline = time.monotonic() + args.warmup_s
+            while time.monotonic() < warmup_deadline:
+                for index, dev in enumerate(devices):
+                    endpoint_address, max_packet_size = endpoints[index]
+                    try:
+                        data = bytes(
+                            dev.read(
+                                endpoint_address,
+                                bulk_read_size(args.packet_size, max_packet_size),
+                                timeout=10,
+                            )
+                        )
+                    except Exception:
+                        continue
+                    if data:
+                        _ = assemblers[index].feed(data)
+            assemblers = [FrameAssembler() for _ in devices]
+
+        start_unix_ns = time.time_ns()
+        start_mono_ns = time.monotonic_ns()
+        deadline = time.monotonic() + args.duration_s if args.duration_s > 0 else None
         with open(args.output, "wb") as output:
             writer = CaptureWriter(output, start_unix_ns, start_mono_ns)
             for index, dev in enumerate(devices):

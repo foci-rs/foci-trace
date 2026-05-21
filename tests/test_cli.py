@@ -46,3 +46,11 @@ def test_zero_summary_rate_disables_live_summary_decode() -> None:
     assert not live_summary_enabled(0.0)
     assert not live_summary_enabled(-1.0)
     assert live_summary_enabled(1.0)
+
+
+def test_positive_warmup_enables_pre_capture_drain() -> None:
+    from foci_trace.cli import warmup_enabled
+
+    assert not warmup_enabled(0.0)
+    assert not warmup_enabled(-1.0)
+    assert warmup_enabled(0.5)
