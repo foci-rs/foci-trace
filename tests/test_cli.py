@@ -15,7 +15,7 @@ if "usb" not in sys.modules:
     sys.modules["usb.core"] = usb_core
     sys.modules["usb.util"] = usb_util
 
-from foci_trace.cli import bulk_read_size, should_render_summary
+from foci_trace.cli import bulk_read_size, live_summary_enabled, should_render_summary
 
 
 def test_bulk_read_size_is_not_clamped_to_endpoint_packet_size() -> None:
@@ -40,3 +40,9 @@ def test_summary_rendering_is_rate_limited() -> None:
         last_render_ns=1_000_000_000,
         interval_ns=interval_ns,
     )
+
+
+def test_zero_summary_rate_disables_live_summary_decode() -> None:
+    assert not live_summary_enabled(0.0)
+    assert not live_summary_enabled(-1.0)
+    assert live_summary_enabled(1.0)

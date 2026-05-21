@@ -24,6 +24,11 @@ def should_render_summary(now_ns: int, last_render_ns: int, interval_ns: int) ->
     return last_render_ns == 0 or now_ns - last_render_ns >= interval_ns
 
 
+def live_summary_enabled(summary_hz: float) -> bool:
+    """Return true when frames should be decoded for the live summary."""
+    return summary_hz > 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Capture trace frames from all connected trace devices."""
     parser = argparse.ArgumentParser()
@@ -44,7 +49,8 @@ def main(argv: list[str] | None = None) -> int:
     start_unix_ns = time.time_ns()
     start_mono_ns = time.monotonic_ns()
     deadline = time.monotonic() + args.duration_s if args.duration_s > 0 else None
-    summary_interval_ns = int(1_000_000_000 / args.summary_hz) if args.summary_hz > 0 else 0
+    summary_enabled = live_summary_enabled(args.summary_hz)
+    summary_interval_ns = int(1_000_000_000 / args.summary_hz) if summary_enabled else 0
     last_summary_ns = 0
 
     for dev in devices:
@@ -81,11 +87,12 @@ def main(argv: list[str] | None = None) -> int:
                     now = time.monotonic_ns()
                     for frame_data in assemblers[index].feed(data):
                         writer.write_firmware_frame(index, now, frame_data)
-                        try:
-                            summary.observe(index, now, decode_frame(frame_data))
-                        except DecodeError:
-                            continue
-                if summary_interval_ns and should_render_summary(
+                        if summary_enabled:
+                            try:
+                                summary.observe(index, now, decode_frame(frame_data))
+                            except DecodeError:
+                                continue
+                if summary_enabled and should_render_summary(
                     time.monotonic_ns(),
                     last_summary_ns,
                     summary_interval_ns,
@@ -95,7 +102,8 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         for dev in devices:
             usb.util.release_interface(dev, TRACE_INTERFACE)
-    print(summary.render())
+    if summary_enabled:
+        print(summary.render())
     return 0
 
 
