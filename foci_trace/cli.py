@@ -6,10 +6,12 @@ import argparse
 import sys
 import time
 
+import usb.util
+
 from .capture_file import CaptureWriter
 from .protocol import DecodeError, FrameAssembler, decode_frame
 from .summary import LiveSummary
-from .usb import device_info, find_trace_devices
+from .usb import TRACE_INTERFACE, device_info, find_trace_devices, trace_endpoint
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -27,39 +29,53 @@ def main(argv: list[str] | None = None) -> int:
 
     summary = LiveSummary()
     assemblers = [FrameAssembler() for _ in devices]
+    endpoints = [trace_endpoint(dev) for dev in devices]
     start_unix_ns = time.time_ns()
     start_mono_ns = time.monotonic_ns()
     deadline = time.monotonic() + args.duration_s if args.duration_s > 0 else None
 
-    with open(args.output, "wb") as output:
-        writer = CaptureWriter(output, start_unix_ns, start_mono_ns)
-        for index, dev in enumerate(devices):
-            info = device_info(dev)
-            writer.write_device_table(
-                index,
-                time.monotonic_ns(),
-                info.path,
-                info.product,
-                info.serial,
-                b"",
-            )
-
-        while deadline is None or time.monotonic() < deadline:
+    for dev in devices:
+        usb.util.claim_interface(dev, TRACE_INTERFACE)
+    try:
+        with open(args.output, "wb") as output:
+            writer = CaptureWriter(output, start_unix_ns, start_mono_ns)
             for index, dev in enumerate(devices):
-                try:
-                    data = bytes(dev.read(0x84, args.packet_size, timeout=10))
-                except Exception:
-                    continue
-                if not data:
-                    continue
-                now = time.monotonic_ns()
-                for frame_data in assemblers[index].feed(data):
-                    writer.write_firmware_frame(index, now, frame_data)
+                info = device_info(dev)
+                writer.write_device_table(
+                    index,
+                    time.monotonic_ns(),
+                    info.path,
+                    info.product,
+                    info.serial,
+                    b"",
+                )
+
+            while deadline is None or time.monotonic() < deadline:
+                for index, dev in enumerate(devices):
+                    endpoint_address, max_packet_size = endpoints[index]
                     try:
-                        summary.observe(index, now, decode_frame(frame_data))
-                    except DecodeError:
+                        data = bytes(
+                            dev.read(
+                                endpoint_address,
+                                min(args.packet_size, max_packet_size),
+                                timeout=10,
+                            )
+                        )
+                    except Exception:
                         continue
-            print(summary.render(), end="\r", flush=True)
+                    if not data:
+                        continue
+                    now = time.monotonic_ns()
+                    for frame_data in assemblers[index].feed(data):
+                        writer.write_firmware_frame(index, now, frame_data)
+                        try:
+                            summary.observe(index, now, decode_frame(frame_data))
+                        except DecodeError:
+                            continue
+                print(summary.render(), end="\r", flush=True)
+    finally:
+        for dev in devices:
+            usb.util.release_interface(dev, TRACE_INTERFACE)
     print(summary.render())
     return 0
 
