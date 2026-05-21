@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import sys
 import time
 
@@ -34,6 +35,13 @@ def warmup_enabled(warmup_s: float) -> bool:
     return warmup_s > 0
 
 
+def notify_recording_started(output_path: str, ready_file: str | None) -> None:
+    """Notify operators and automation that post-warmup recording has started."""
+    if ready_file:
+        Path(ready_file).write_text(f"{output_path}\n", encoding="utf-8")
+    print(f"recording started: {output_path}", flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Capture trace frames from all connected trace devices."""
     parser = argparse.ArgumentParser()
@@ -42,6 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--packet-size", type=int, default=4096)
     parser.add_argument("--warmup-s", type=float, default=2.0)
     parser.add_argument("--summary-hz", type=float, default=4.0)
+    parser.add_argument("--ready-file")
     args = parser.parse_args(argv)
 
     devices = find_trace_devices()
@@ -77,6 +86,8 @@ def main(argv: list[str] | None = None) -> int:
                     if data:
                         _ = assemblers[index].feed(data)
             assemblers = [FrameAssembler() for _ in devices]
+
+        notify_recording_started(args.output, args.ready_file)
 
         start_unix_ns = time.time_ns()
         start_mono_ns = time.monotonic_ns()

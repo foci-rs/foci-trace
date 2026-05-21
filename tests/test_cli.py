@@ -15,7 +15,12 @@ if "usb" not in sys.modules:
     sys.modules["usb.core"] = usb_core
     sys.modules["usb.util"] = usb_util
 
-from foci_trace.cli import bulk_read_size, live_summary_enabled, should_render_summary
+from foci_trace.cli import (
+    bulk_read_size,
+    live_summary_enabled,
+    notify_recording_started,
+    should_render_summary,
+)
 
 
 def test_bulk_read_size_is_not_clamped_to_endpoint_packet_size() -> None:
@@ -54,3 +59,12 @@ def test_positive_warmup_enables_pre_capture_drain() -> None:
     assert not warmup_enabled(0.0)
     assert not warmup_enabled(-1.0)
     assert warmup_enabled(0.5)
+
+
+def test_notify_recording_started_prints_and_writes_ready_file(tmp_path, capsys) -> None:
+    ready_file = tmp_path / "trace.ready"
+
+    notify_recording_started("/tmp/capture.bin", str(ready_file))
+
+    assert ready_file.read_text(encoding="utf-8") == "/tmp/capture.bin\n"
+    assert capsys.readouterr().out == "recording started: /tmp/capture.bin\n"
