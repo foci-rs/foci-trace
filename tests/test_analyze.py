@@ -4,6 +4,7 @@ import struct
 from foci_trace.analyze import format_summary, summarize_capture
 from foci_trace.capture_file import CaptureWriter
 from foci_trace.protocol import (
+    FRAME_TYPE_CONTROL_DETAIL,
     FRAME_TYPE_CRITICAL,
     FRAME_TYPE_METADATA,
     FRAME_TYPE_STATUS,
@@ -88,8 +89,11 @@ def _critical_payload(
     velocity_error: int,
     foc_uq_ud: int,
     foc_uq_ud_limited: int,
+    accel_offset: int = 0,
+    accel_gain: int = 0,
+    accel_flags: int = 0,
 ) -> bytes:
-    return struct.pack(
+    payload = struct.pack(
         "<iiiiiiiBBHIiQQIIIII",
         100,
         98,
@@ -110,7 +114,59 @@ def _critical_payload(
         0x0005_0006,
         foc_uq_ud,
         foc_uq_ud_limited,
-    ) + (b"\x00" * 8)
+    )
+    return payload + struct.pack("<iHBB", accel_offset, accel_gain, accel_flags, 0)
+
+
+def _pack_i16_pair(low: int, high: int) -> int:
+    return (low & 0xFFFF) | ((high & 0xFFFF) << 16)
+
+
+def _critical_motion_payload(
+    step_position: int,
+    tmc_position_actual: int,
+    torque_actual: int,
+    uq_limited: int,
+    accel_offset: int = 0,
+    accel_gain: int = 0,
+    accel_flags: int = 0,
+) -> bytes:
+    payload = struct.pack(
+        "<iiiiiiiBBHIiQQIIIII",
+        step_position,
+        tmc_position_actual,
+        step_position - tmc_position_actual,
+        30,
+        20,
+        4,
+        10,
+        0x80,
+        0,
+        3,
+        7,
+        -5,
+        1,
+        2,
+        0,
+        0,
+        _pack_i16_pair(0, torque_actual),
+        _pack_i16_pair(0, uq_limited),
+        _pack_i16_pair(0, uq_limited),
+    )
+    return payload + struct.pack("<iHBB", accel_offset, accel_gain, accel_flags, 0)
+
+
+def _control_detail_payload(torque_cmd: int, voltage_limit: int, torque_limit: int) -> bytes:
+    return struct.pack(
+        "<IIIIIII",
+        torque_cmd & 0xFFFF_FFFF,
+        0,
+        0,
+        0,
+        _pack_i16_pair(voltage_limit, voltage_limit),
+        _pack_i16_pair(0, torque_limit),
+        500000,
+    )
 
 
 def test_summarize_capture_reports_mapping_gaps_status_and_steady_ranges() -> None:
@@ -134,26 +190,26 @@ def test_summarize_capture_reports_mapping_gaps_status_and_steady_ranges() -> No
         130,
         _header(
             FRAME_TYPE_CRITICAL,
-            _critical_payload(3, -4, 0xFFFE_0001, 0x0002_0003),
+            _critical_payload(3, -4, 0xFFFE_0001, 0x0002_0003, -19, 2000, 0x03),
             3,
             84_000_000 * 2,
             1,
             0,
         )
-        + _critical_payload(3, -4, 0xFFFE_0001, 0x0002_0003),
+        + _critical_payload(3, -4, 0xFFFE_0001, 0x0002_0003, -19, 2000, 0x03),
     )
     writer.write_firmware_frame(
         0,
         140,
         _header(
             FRAME_TYPE_CRITICAL,
-            _critical_payload(-7, 8, 0x0004_FFFC, 0x0001_FFFE),
+            _critical_payload(-7, 8, 0x0004_FFFC, 0x0001_FFFE, 21, 2000, 0x03),
             5,
             84_000_000 * 3,
             1,
             0,
         )
-        + _critical_payload(-7, 8, 0x0004_FFFC, 0x0001_FFFE),
+        + _critical_payload(-7, 8, 0x0004_FFFC, 0x0001_FFFE, 21, 2000, 0x03),
     )
     writer.write_firmware_frame(
         0,
@@ -181,9 +237,83 @@ def test_summarize_capture_reports_mapping_gaps_status_and_steady_ranges() -> No
     assert report.ranges["uq"] == (-2, 4)
     assert report.ranges["ud_delta"] == (-2, -2)
     assert report.ranges["uq_delta"] == (-4, 3)
+    assert report.ranges["accel_ff_offset"] == (-19, 21)
+    assert report.ranges["accel_ff_gain"] == (2000, 2000)
 
     text = format_summary(reports)
     assert "dev0 1-50 FOCI OpenFFBoard (trace) serial=ABC" in text
     assert "missing=1" in text
     assert "status_delta dropped=3 endpoint=7 spi=0 watchdog=0" in text
     assert "steady>=1.5s samples=2 voltage_diff=2" in text
+    assert "accel_ff=-19..21 gain=2000..2000 flags=0x03" in text
+
+
+def test_summarize_capture_reports_motion_segments() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+
+    clock = 84_000_000
+    critical_samples = [
+        (0, 0, 0, 0, 1000),
+        (1, clock // 1000, 10, 20, 2000),
+        (3, (clock // 1000) * 2, 20, 38, 3000),
+        (4, (clock // 1000) * 3, 30, 60, 4000),
+    ]
+    for seq, timestamp, step, actual, uq_limited in critical_samples:
+        payload = _critical_motion_payload(
+            step,
+            actual,
+            100 + step,
+            uq_limited,
+            accel_offset=step - 15,
+            accel_gain=2000,
+            accel_flags=0x03,
+        )
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_CRITICAL, payload, seq, timestamp, 1, 0) + payload,
+        )
+
+    for seq, timestamp, torque_cmd in (
+        (5, clock // 1000, 2816),
+        (6, (clock // 1000) * 2, -2816),
+    ):
+        payload = _control_detail_payload(torque_cmd, voltage_limit=4000, torque_limit=2816)
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_CONTROL_DETAIL, payload, seq, timestamp, 1, 0) + payload,
+        )
+
+    reports = summarize_capture(
+        io.BytesIO(output.getvalue()),
+        steady_after_s=0,
+        motion_gap_s=0.01,
+        motion_min_steps=5,
+    )
+
+    assert len(reports) == 1
+    assert len(reports[0].motion_segments) == 1
+    segment = reports[0].motion_segments[0]
+    assert segment.step_delta == 30
+    assert segment.duration_s == 0.003
+    assert segment.critical_samples == 4
+    assert segment.control_detail_samples == 2
+    assert segment.fitted_error_rms_steps > 0
+    assert segment.fitted_error_peak_steps > 0
+    assert segment.actual_torque_range == (100, 130)
+    assert segment.uq_limited_range == (1000, 4000)
+    assert segment.voltage_rail_samples == 1
+    assert segment.torque_command_range == (-2816, 2816)
+    assert segment.torque_command_saturated_samples == 2
+    assert segment.actual_to_command_abs_median is not None
+    assert segment.accel_feedforward_offset_range == (-15, 15)
+    assert segment.accel_feedforward_gain_range == (2000, 2000)
+    assert segment.accel_feedforward_flags == 0x03
+
+    text = format_summary(reports)
+    assert "motion0 delta=30 duration=0.003s" in text
+    assert "torque_cmd=-2816..2816 saturated=2/2" in text
+    assert "accel_ff=-15..15 gain=2000..2000 flags=0x03" in text
