@@ -1,5 +1,5 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -67,13 +67,6 @@ pub fn run_list(args: ListArgs) -> Result<(), RecordError> {
             device.endpoint_address,
             device.max_packet_size
         );
-        if let Err(err) = device.handle.release_interface(device.interface_number) {
-            eprintln!(
-                "warning: failed to release interface {} on {}: {err}",
-                device.interface_number,
-                device.info.path()
-            );
-        }
     }
 
     Ok(())
@@ -94,7 +87,7 @@ pub fn run_record(args: RecordArgs) -> Result<(), RecordError> {
         writer.write_device_table(
             u16::try_from(index).expect("trace device index fits u16"),
             clock.host_recv_ns()?,
-            &device.info.path(),
+            device.info.path(),
             &device.info.product,
             &device.info.serial,
             b"",
@@ -110,7 +103,7 @@ pub fn run_record(args: RecordArgs) -> Result<(), RecordError> {
     for (index, device) in devices.into_iter().enumerate() {
         let tx = tx.clone();
         let clock = clock.clone();
-        let packet_size = args.packet_size.max(usize::from(device.max_packet_size));
+        let packet_size = args.packet_size.max(device.max_packet_size);
         handles.push(thread::spawn(move || {
             read_device_loop(
                 u16::try_from(index).expect("trace device index fits u16"),
@@ -190,11 +183,9 @@ fn warmup(devices: &mut [OpenTraceDevice], packet_size: usize, warmup_s: f64) {
     let mut scratch = vec![0u8; packet_size];
     while Instant::now() < deadline {
         for device in devices.iter_mut() {
-            let _ = device.handle.read_bulk(
-                device.endpoint_address,
-                &mut scratch,
-                Duration::from_millis(10),
-            );
+            if let Ok(mut reader) = device.bulk_reader(packet_size, Duration::from_millis(10)) {
+                let _ = reader.read(&mut scratch);
+            }
         }
     }
 }
@@ -210,15 +201,18 @@ fn read_device_loop(
     let mut assembler = FrameAssembler::new();
     let mut scratch = vec![0u8; packet_size];
     let mut counters = ReaderCounters::default();
+    let mut reader = match device.bulk_reader(packet_size, Duration::from_millis(10)) {
+        Ok(reader) => reader,
+        Err(_) => {
+            counters.io_errors += 1;
+            return counters;
+        }
+    };
 
     while deadline.is_none_or(|value| Instant::now() < value) {
-        let read = match device.handle.read_bulk(
-            device.endpoint_address,
-            &mut scratch,
-            Duration::from_millis(10),
-        ) {
+        let read = match reader.read(&mut scratch) {
             Ok(read) => read,
-            Err(rusb::Error::Timeout) => continue,
+            Err(err) if err.kind() == io::ErrorKind::TimedOut => continue,
             Err(_) => {
                 counters.io_errors += 1;
                 continue;
@@ -253,13 +247,6 @@ fn read_device_loop(
     }
 
     counters.parser_resync_bytes += assembler.take_discarded_bytes();
-    if device
-        .handle
-        .release_interface(device.interface_number)
-        .is_err()
-    {
-        counters.io_errors += 1;
-    }
 
     counters
 }

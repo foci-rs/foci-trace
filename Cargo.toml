@@ -17,7 +17,7 @@ bytes = "1"
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
 libc = "0.2"
-rusb = "0.9"
+nusb = "0.2"
 thiserror = "2"
 
 [dev-dependencies]
