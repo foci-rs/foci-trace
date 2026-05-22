@@ -19,8 +19,14 @@ from foci_trace.cli import (
     bulk_read_size,
     live_summary_enabled,
     notify_recording_started,
+    select_trace_devices,
     should_render_summary,
 )
+
+
+class FakeInfo:
+    def __init__(self, serial: str) -> None:
+        self.serial = serial
 
 
 def test_bulk_read_size_is_not_clamped_to_endpoint_packet_size() -> None:
@@ -68,3 +74,34 @@ def test_notify_recording_started_prints_and_writes_ready_file(tmp_path, capsys)
 
     assert ready_file.read_text(encoding="utf-8") == "/tmp/capture.bin\n"
     assert capsys.readouterr().out == "recording started: /tmp/capture.bin\n"
+
+
+def test_select_trace_devices_returns_all_devices_without_serial_filter() -> None:
+    devices = [object(), object()]
+
+    assert select_trace_devices(devices, [], lambda _dev: FakeInfo("")) == devices
+
+
+def test_select_trace_devices_filters_by_exact_serial() -> None:
+    first = object()
+    second = object()
+    serials = {first: "AAA", second: "BBB"}
+
+    selected = select_trace_devices(
+        [first, second],
+        ["BBB"],
+        lambda dev: FakeInfo(serials[dev]),
+    )
+
+    assert selected == [second]
+
+
+def test_select_trace_devices_rejects_missing_serial() -> None:
+    devices = [object()]
+
+    try:
+        select_trace_devices(devices, ["missing"], lambda _dev: FakeInfo("present"))
+    except ValueError as exc:
+        assert "missing" in str(exc)
+    else:
+        raise AssertionError("missing serial was accepted")

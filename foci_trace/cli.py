@@ -6,13 +6,14 @@ import argparse
 from pathlib import Path
 import sys
 import time
+from typing import Callable
 
 import usb.util
 
 from .capture_file import CaptureWriter
 from .protocol import DecodeError, FrameAssembler, decode_frame
 from .summary import LiveSummary
-from .usb import TRACE_INTERFACE, device_info, find_trace_devices, trace_endpoint
+from .usb import TRACE_INTERFACE, TraceDeviceInfo, device_info, find_trace_devices, trace_endpoint
 
 
 def bulk_read_size(requested_size: int, endpoint_packet_size: int) -> int:
@@ -42,6 +43,24 @@ def notify_recording_started(output_path: str, ready_file: str | None) -> None:
     print(f"recording started: {output_path}", flush=True)
 
 
+def select_trace_devices(
+    devices: list[object],
+    requested_serials: list[str],
+    info_for: Callable[[object], TraceDeviceInfo],
+) -> list[object]:
+    """Return devices matching requested serial numbers, preserving device order."""
+    if not requested_serials:
+        return devices
+
+    requested = set(requested_serials)
+    selected = [dev for dev in devices if info_for(dev).serial in requested]
+    found = {info_for(dev).serial for dev in selected}
+    missing = sorted(requested - found)
+    if missing:
+        raise ValueError(f"trace serial(s) not found: {', '.join(missing)}")
+    return selected
+
+
 def main(argv: list[str] | None = None) -> int:
     """Capture trace frames from all connected trace devices."""
     parser = argparse.ArgumentParser()
@@ -51,9 +70,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--warmup-s", type=float, default=2.0)
     parser.add_argument("--summary-hz", type=float, default=4.0)
     parser.add_argument("--ready-file")
+    parser.add_argument("--serial", action="append", default=[])
     args = parser.parse_args(argv)
 
     devices = find_trace_devices()
+    try:
+        devices = select_trace_devices(devices, args.serial, device_info)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     if not devices:
         print("no FOCI trace devices found", file=sys.stderr)
         return 2
