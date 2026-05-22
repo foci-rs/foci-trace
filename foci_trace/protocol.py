@@ -7,7 +7,8 @@ import struct
 from typing import Any
 
 FRAME_MAGIC = 0x43525446
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
+SUPPORTED_PROTOCOL_VERSIONS = (1, PROTOCOL_VERSION)
 HEADER_LEN = 32
 
 FRAME_TYPE_CRITICAL = 1
@@ -67,7 +68,7 @@ class FrameAssembler:
             _magic, version, header_len, _frame_type, _flags, payload_len = struct.unpack_from(
                 "<IBBBBH", self._buffer, 0
             )
-            if version != PROTOCOL_VERSION or header_len != HEADER_LEN:
+            if version not in SUPPORTED_PROTOCOL_VERSIONS or header_len != HEADER_LEN:
                 raise DecodeError("unsupported frame header while assembling")
             frame_len = header_len + payload_len
             if len(self._buffer) < frame_len:
@@ -96,7 +97,7 @@ def decode_frame(data: bytes) -> Frame:
     ) = struct.unpack_from("<IBBBBHBBIQII", data, 0)
     if magic != FRAME_MAGIC:
         raise DecodeError("bad magic")
-    if version != PROTOCOL_VERSION:
+    if version not in SUPPORTED_PROTOCOL_VERSIONS:
         raise DecodeError(f"unsupported protocol version {version}")
     if header_len != HEADER_LEN:
         raise DecodeError(f"unsupported header length {header_len}")
@@ -117,13 +118,15 @@ def decode_frame(data: bytes) -> Frame:
         boot_id=boot_id,
     )
     return Frame(
-        header=header, payload=_decode_payload(frame_type, raw_payload), raw_payload=raw_payload
+        header=header,
+        payload=_decode_payload(version, frame_type, raw_payload),
+        raw_payload=raw_payload,
     )
 
 
-def _decode_payload(frame_type: int, payload: bytes) -> dict[str, Any]:
+def _decode_payload(version: int, frame_type: int, payload: bytes) -> dict[str, Any]:
     if frame_type == FRAME_TYPE_CRITICAL:
-        return _decode_critical(payload)
+        return _decode_critical(version, payload)
     if frame_type == FRAME_TYPE_CONTROL_DETAIL:
         return _decode_control_detail(payload)
     if frame_type == FRAME_TYPE_STATUS:
@@ -140,9 +143,14 @@ def _require(payload: bytes, size: int, name: str) -> None:
         raise DecodeError(f"{name} payload too short")
 
 
-def _decode_critical(payload: bytes) -> dict[str, Any]:
+def _decode_critical(version: int, payload: bytes) -> dict[str, Any]:
     _require(payload, 84, "critical")
     values = struct.unpack_from("<iiiiiiiBBHIiQQIIIII", payload, 0)
+    accel_offset = 0
+    accel_gain = 0
+    accel_flags = 0
+    if version >= 2:
+        accel_offset, accel_gain, accel_flags, _reserved = struct.unpack_from("<iHBB", payload, 76)
     return {
         "step_position": values[0],
         "tmc_position_actual": values[1],
@@ -163,6 +171,9 @@ def _decode_critical(payload: bytes) -> dict[str, Any]:
         "pid_torque_flux_actual": values[16],
         "interim_foc_uq_ud": values[17],
         "interim_foc_uq_ud_limited": values[18],
+        "cached_accel_torque_offset": accel_offset,
+        "accel_feedforward_gain_permille": accel_gain,
+        "accel_feedforward_flags": accel_flags,
     }
 
 

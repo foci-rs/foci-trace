@@ -12,11 +12,13 @@ from foci_trace.protocol import (
 )
 
 
-def _header(frame_type: int, payload: bytes, seq: int = 1) -> bytes:
+def _header(
+    frame_type: int, payload: bytes, seq: int = 1, version: int = PROTOCOL_VERSION
+) -> bytes:
     return struct.pack(
         "<IBBBBHBBI Q I I".replace(" ", ""),
         0x43525446,
-        PROTOCOL_VERSION,
+        version,
         32,
         frame_type,
         0,
@@ -38,7 +40,9 @@ def test_decode_critical_offsets() -> None:
     payload[30:32] = struct.pack("<H", 9)
     payload[40:48] = struct.pack("<Q", 12)
     payload[48:56] = struct.pack("<Q", 13)
-    payload[76:84] = b"\x00" * 8
+    payload[76:80] = struct.pack("<i", -19)
+    payload[80:82] = struct.pack("<H", 2000)
+    payload[82] = 0x03
 
     frame = decode_frame(_header(FRAME_TYPE_CRITICAL, payload) + payload)
 
@@ -48,6 +52,22 @@ def test_decode_critical_offsets() -> None:
     assert frame.payload["timer_queue_depth"] == 9
     assert frame.payload["last_served_step_tick"] == 12
     assert frame.payload["last_klipper_command_service_tick"] == 13
+    assert frame.payload["cached_accel_torque_offset"] == -19
+    assert frame.payload["accel_feedforward_gain_permille"] == 2000
+    assert frame.payload["accel_feedforward_flags"] == 0x03
+
+
+def test_decode_v1_critical_treats_accel_feedforward_fields_as_zero() -> None:
+    payload = bytearray(84)
+    payload[0:4] = struct.pack("<i", 5)
+    payload[76:84] = b"\xaa" * 8
+
+    frame = decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=1) + payload)
+
+    assert frame.payload["step_position"] == 5
+    assert frame.payload["cached_accel_torque_offset"] == 0
+    assert frame.payload["accel_feedforward_gain_permille"] == 0
+    assert frame.payload["accel_feedforward_flags"] == 0
 
 
 def test_decode_metadata_strings_and_labels() -> None:
