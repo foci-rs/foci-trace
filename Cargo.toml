@@ -1,0 +1,25 @@
+[package]
+name = "foci-trace"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Host-side FOCI USB trace capture and analysis tooling"
+repository = "https://github.com/mjonuschat/foci-trace"
+
+[workspace]
+
+[[bin]]
+name = "foci-trace-capture"
+path = "src/main.rs"
+
+[dependencies]
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+crossbeam-channel = "0.5"
+libc = "0.2"
+rusb = "0.9"
+thiserror = "2"
+
+[dev-dependencies]
+assert_cmd = "2"
+tempfile = "3"
