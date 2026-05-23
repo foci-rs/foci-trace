@@ -478,9 +478,64 @@ def test_summarize_capture_reports_current_authority_windows() -> None:
 
     text = format_summary(reports)
     assert "authority near_limit=3 sign=3/3" in text
-    assert "actual/cmd=0.28 target/cmd=1.00 actual/target=0.28" in text
+    assert "actual/target=0.28" in text
+    assert "actual/cmd=" not in text
+    assert "target/cmd=" not in text
     assert "uq_lim=-3000..1200 uq_delta=-600..0 uq/limit=0.97 rail=1/3" in text
     assert "iq/actual=1.02 adc0_delta=-20..20 adc1_delta=-30..30" in text
+
+
+def test_motion_summary_distinguishes_critical_target_from_sparse_detail_command() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+
+    clock = 84_000_000
+    for seq, timestamp, step, torque_target in (
+        (1, clock // 1000, 0, 2816),
+        (2, (clock // 1000) * 2, 10, 2200),
+        (3, (clock // 1000) * 3, 20, -2816),
+        (4, (clock // 1000) * 4, 30, -2100),
+    ):
+        payload = _critical_motion_payload(
+            step,
+            step,
+            torque_actual=700,
+            uq_limited=1200,
+            torque_target=torque_target,
+        )
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_CRITICAL, payload, seq, timestamp, 1, 0) + payload,
+        )
+
+    detail = _control_detail_payload(100, voltage_limit=3000, torque_limit=2816)
+    writer.write_firmware_frame(
+        0,
+        clock // 1000,
+        _header(FRAME_TYPE_CONTROL_DETAIL, detail, 5, clock // 1000, 1, 0) + detail,
+    )
+
+    reports = summarize_capture(
+        io.BytesIO(output.getvalue()),
+        steady_after_s=0,
+        motion_gap_s=0.01,
+        motion_min_steps=5,
+    )
+
+    segment = reports[0].motion_segments[0]
+    assert segment.torque_target_range == (-2816, 2816)
+    assert segment.torque_command_range == (100, 100)
+    assert segment.current_authority is not None
+    assert segment.current_authority.near_limit_samples == 2
+    assert segment.current_authority.actual_to_target_abs_median == 0.249
+
+    text = format_summary(reports)
+    assert "torque_target=-2816..2816" in text
+    assert "detail_torque_cmd=100..100" in text
+    assert "actual/cmd=" not in text
+    assert "target/cmd=" not in text
 
 
 def test_summarize_capture_flags_sparse_motion_trace_windows() -> None:

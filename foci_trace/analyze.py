@@ -70,6 +70,7 @@ class MotionSegmentReport:
     fitted_error_rms_steps: float
     fitted_error_peak_steps: float
     actual_torque_range: tuple[int, int]
+    torque_target_range: tuple[int, int]
     uq_limited_range: tuple[int, int]
     voltage_rail_samples: int
     torque_command_range: tuple[int, int] | None
@@ -564,15 +565,11 @@ def _current_authority_report(
     if torque_limit <= 0:
         return None
     threshold = int(torque_limit * 0.8)
-    near_limit_samples: list[
-        tuple[_CriticalObservation, _ControlDetailObservation | None]
-    ] = []
+    near_limit_samples: list[tuple[_CriticalObservation, _ControlDetailObservation | None]] = []
     for sample in segment_samples:
         if abs(sample.torque_target) < threshold:
             continue
         detail = _nearest_control_detail(segment_details, sample.timestamp_ticks)
-        if detail is not None and abs(detail.torque_command) < threshold:
-            continue
         near_limit_samples.append((sample, detail))
     if not near_limit_samples:
         return None
@@ -659,6 +656,7 @@ def _finalize_motion_segments(
         step_delta = segment_samples[-1].step_position - segment_samples[0].step_position
         rms, peak = _fitted_error_stats(segment_samples)
         torque_values = [sample.actual_torque for sample in segment_samples]
+        torque_target_values = [sample.torque_target for sample in segment_samples]
         uq_limited_values = [sample.uq_limited for sample in segment_samples]
         segment_current_paths = [
             sample for sample in current_paths if start_tick <= sample.timestamp_ticks <= end_tick
@@ -667,12 +665,8 @@ def _finalize_motion_segments(
         foc_id_range = _optional_range([sample.foc_id for sample in segment_current_paths])
         foc_iux_range = _optional_range([sample.foc_iux for sample in segment_current_paths])
         foc_iwy_range = _optional_range([sample.foc_iwy for sample in segment_current_paths])
-        adc_i0_raw_range = _optional_range(
-            [sample.adc_i0_raw for sample in segment_current_paths]
-        )
-        adc_i1_raw_range = _optional_range(
-            [sample.adc_i1_raw for sample in segment_current_paths]
-        )
+        adc_i0_raw_range = _optional_range([sample.adc_i0_raw for sample in segment_current_paths])
+        adc_i1_raw_range = _optional_range([sample.adc_i1_raw for sample in segment_current_paths])
         current_authority = _current_authority_report(
             segment_samples, segment_details, segment_current_paths
         )
@@ -742,6 +736,7 @@ def _finalize_motion_segments(
                 fitted_error_rms_steps=rms,
                 fitted_error_peak_steps=peak,
                 actual_torque_range=_range(torque_values),
+                torque_target_range=_range(torque_target_values),
                 uq_limited_range=_range(uq_limited_values),
                 voltage_rail_samples=voltage_rail_samples,
                 torque_command_range=_range(torque_commands) if torque_commands else None,
@@ -910,8 +905,10 @@ def format_summary(reports: list[DeviceReport]) -> str:
                 "  motion{idx} delta={delta} duration={duration:.3f}s "
                 "critical={critical} control_detail={detail} "
                 "fit_rms={rms:.1f} fit_peak={peak:.1f} "
-                "torque={torque_lo}..{torque_hi} uq_limited={uq_lo}..{uq_hi} "
-                "uq_rail={rail}/{critical} torque_cmd={cmd} "
+                "torque={torque_lo}..{torque_hi} "
+                "torque_target={target_lo}..{target_hi} "
+                "uq_limited={uq_lo}..{uq_hi} "
+                "uq_rail={rail}/{critical} detail_torque_cmd={cmd} "
                 "saturated={sat}/{detail} actual_cmd_median={ratio} "
                 "iq={iq} id={id} iux={iux} iwy={iwy} "
                 "adc0_raw={adc0} adc1_raw={adc1} "
@@ -926,6 +923,8 @@ def format_summary(reports: list[DeviceReport]) -> str:
                     peak=segment.fitted_error_peak_steps,
                     torque_lo=segment.actual_torque_range[0],
                     torque_hi=segment.actual_torque_range[1],
+                    target_lo=segment.torque_target_range[0],
+                    target_hi=segment.torque_target_range[1],
                     uq_lo=segment.uq_limited_range[0],
                     uq_hi=segment.uq_limited_range[1],
                     rail=segment.voltage_rail_samples,
@@ -949,9 +948,7 @@ def format_summary(reports: list[DeviceReport]) -> str:
                 lines.append(
                     "    trace_gap critical={critical} detail={detail} current={current}".format(
                         critical=_optional_milliseconds_text(segment.critical_max_gap_s),
-                        detail=_optional_milliseconds_text(
-                            segment.control_detail_max_gap_s
-                        ),
+                        detail=_optional_milliseconds_text(segment.control_detail_max_gap_s),
                         current=_optional_milliseconds_text(segment.current_path_max_gap_s),
                     )
                 )
@@ -959,21 +956,12 @@ def format_summary(reports: list[DeviceReport]) -> str:
             if authority is not None:
                 lines.append(
                     "    authority near_limit={near} sign={sign}/{near} "
-                    "actual/cmd={actual_cmd} target/cmd={target_cmd} "
                     "actual/target={actual_target} uq_lim={uq_lim} "
                     "uq_delta={uq_delta} uq/limit={uq_limit} rail={rail}/{near} "
                     "iq/actual={iq_actual} adc0_delta={adc0} adc1_delta={adc1}".format(
                         near=authority.near_limit_samples,
                         sign=authority.sign_agreement_samples,
-                        actual_cmd=_optional_ratio_text(
-                            authority.actual_to_command_abs_median
-                        ),
-                        target_cmd=_optional_ratio_text(
-                            authority.target_to_command_abs_median
-                        ),
-                        actual_target=_optional_ratio_text(
-                            authority.actual_to_target_abs_median
-                        ),
+                        actual_target=_optional_ratio_text(authority.actual_to_target_abs_median),
                         uq_lim=_optional_range_text(authority.uq_limited_range),
                         uq_delta=_optional_range_text(authority.uq_delta_range),
                         uq_limit=_optional_ratio_text(authority.uq_to_limit_abs_median),
