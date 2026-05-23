@@ -317,3 +317,32 @@ def test_summarize_capture_reports_motion_segments() -> None:
     assert "motion0 delta=30 duration=0.003s" in text
     assert "torque_cmd=-2816..2816 saturated=2/2" in text
     assert "accel_ff=-15..15 gain=2000..2000 flags=0x03" in text
+
+
+def test_summarize_capture_does_not_bridge_motion_across_timestamp_gap() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+
+    clock = 84_000_000
+    samples = [
+        (1, 0, 20000, 20000),
+        (250000, clock * 250, 0, 0),
+    ]
+    for seq, timestamp, step, actual in samples:
+        payload = _critical_motion_payload(step, actual, 100, 1000)
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_CRITICAL, payload, seq, timestamp, 1, 0) + payload,
+        )
+
+    reports = summarize_capture(
+        io.BytesIO(output.getvalue()),
+        steady_after_s=0,
+        motion_gap_s=0.08,
+        motion_min_steps=1000,
+    )
+
+    assert reports[0].missing_frames == 249998
+    assert reports[0].motion_segments == []

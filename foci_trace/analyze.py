@@ -295,6 +295,20 @@ def _motion_groups(
     previous_index: int | None = None
     for idx in change_indices:
         timestamp = observations[idx].timestamp_ticks
+        adjacent_gap = timestamp - observations[idx - 1].timestamp_ticks
+        if adjacent_gap > gap_ticks:
+            if group_start is not None and previous_index is not None:
+                start = max(0, group_start - 1)
+                end = previous_index
+                if (
+                    abs(observations[end].step_position - observations[start].step_position)
+                    >= min_steps
+                ):
+                    groups.append((start, end))
+            group_start = None
+            previous_timestamp = None
+            previous_index = None
+            continue
         if (
             group_start is not None
             and previous_timestamp is not None
