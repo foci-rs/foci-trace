@@ -6,6 +6,7 @@ from foci_trace.capture_file import CaptureWriter
 from foci_trace.protocol import (
     FRAME_TYPE_CONTROL_DETAIL,
     FRAME_TYPE_CRITICAL,
+    FRAME_TYPE_CURRENT_PATH,
     FRAME_TYPE_METADATA,
     FRAME_TYPE_STATUS,
     PROTOCOL_VERSION,
@@ -19,11 +20,12 @@ def _header(
     ts: int,
     source_kind: int,
     source_index: int,
+    version: int = PROTOCOL_VERSION,
 ) -> bytes:
     return struct.pack(
         "<IBBBBHBBI Q I I".replace(" ", ""),
         0x43525446,
-        PROTOCOL_VERSION,
+        version,
         32,
         frame_type,
         0,
@@ -111,14 +113,27 @@ def _critical_payload(
         2,
         0,
         0x0003_0004,
-        0x0005_0006,
+        0x0006_0005,
         foc_uq_ud,
         foc_uq_ud_limited,
     )
     return payload + struct.pack("<iHBB", accel_offset, accel_gain, accel_flags, 0)
 
 
+def _current_path_payload(
+    foc_iq_id: int,
+    foc_iwy_iux: int,
+    adc_i1_i0: int,
+    sample_flags: int = 0,
+) -> bytes:
+    return struct.pack("<BBBBIII", sample_flags, 0, 0, 0, foc_iq_id, foc_iwy_iux, adc_i1_i0)
+
+
 def _pack_i16_pair(low: int, high: int) -> int:
+    return (low & 0xFFFF) | ((high & 0xFFFF) << 16)
+
+
+def _pack_u16_pair(low: int, high: int) -> int:
     return (low & 0xFFFF) | ((high & 0xFFFF) << 16)
 
 
@@ -149,7 +164,7 @@ def _critical_motion_payload(
         2,
         0,
         0,
-        _pack_i16_pair(0, torque_actual),
+        _pack_i16_pair(torque_actual, 0),
         _pack_i16_pair(0, uq_limited),
         _pack_i16_pair(0, uq_limited),
     )
@@ -246,6 +261,48 @@ def test_summarize_capture_reports_mapping_gaps_status_and_steady_ranges() -> No
     assert "status_delta dropped=3 endpoint=7 spi=0 watchdog=0" in text
     assert "steady>=1.5s samples=2 voltage_diff=2" in text
     assert "accel_ff=-19..21 gain=2000..2000 flags=0x03" in text
+
+
+def test_summarize_capture_reports_current_signal_path_ranges() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+
+    first = _current_path_payload(
+        foc_iq_id=_pack_i16_pair(-11, 22),
+        foc_iwy_iux=_pack_i16_pair(-55, 66),
+        adc_i1_i0=_pack_u16_pair(32700, 33100),
+    )
+    second = _current_path_payload(
+        foc_iq_id=_pack_i16_pair(33, -44),
+        foc_iwy_iux=_pack_i16_pair(77, -88),
+        adc_i1_i0=_pack_u16_pair(32750, 33150),
+    )
+    writer.write_firmware_frame(
+        0,
+        110,
+        _header(FRAME_TYPE_CURRENT_PATH, first, 1, 84_000_000 * 2, 1, 0) + first,
+    )
+    writer.write_firmware_frame(
+        0,
+        120,
+        _header(FRAME_TYPE_CURRENT_PATH, second, 2, 84_000_000 * 3, 1, 0) + second,
+    )
+
+    reports = summarize_capture(io.BytesIO(output.getvalue()), steady_after_s=0)
+
+    report = reports[0]
+    assert report.ranges["foc_iq"] == (-44, 22)
+    assert report.ranges["foc_id"] == (-11, 33)
+    assert report.ranges["foc_iux"] == (-55, 77)
+    assert report.ranges["foc_iwy"] == (-88, 66)
+    assert report.ranges["adc_i0_raw"] == (32700, 32750)
+    assert report.ranges["adc_i1_raw"] == (33100, 33150)
+
+    text = format_summary(reports)
+    assert "iq=-44..22 id=-11..33" in text
+    assert "iux=-55..77 iwy=-88..66" in text
+    assert "adc0_raw=32700..32750 adc1_raw=33100..33150" in text
 
 
 def test_summarize_capture_reports_motion_segments() -> None:

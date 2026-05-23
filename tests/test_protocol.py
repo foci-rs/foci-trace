@@ -4,6 +4,7 @@ import pytest
 
 from foci_trace.protocol import (
     FRAME_TYPE_CRITICAL,
+    FRAME_TYPE_CURRENT_PATH,
     FRAME_TYPE_METADATA,
     PROTOCOL_VERSION,
     DecodeError,
@@ -55,6 +56,62 @@ def test_decode_critical_offsets() -> None:
     assert frame.payload["cached_accel_torque_offset"] == -19
     assert frame.payload["accel_feedforward_gain_permille"] == 2000
     assert frame.payload["accel_feedforward_flags"] == 0x03
+    assert "interim_foc_iq_id" not in frame.payload
+
+
+def test_decode_v3_critical_current_tracking_fields() -> None:
+    payload = bytearray(84)
+    payload[60:64] = struct.pack("<i", -1234)
+    payload[64:68] = struct.pack("<I", 0x0ABC_FEDC)
+
+    frame = decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=3) + payload)
+
+    assert frame.payload["interim_pidin_target_torque"] == -1234
+    assert frame.payload["interim_pid_torque_target_actual"] == 0x0ABC_FEDC
+    assert "pid_torque_flux_target" not in frame.payload
+
+
+def test_decode_v4_critical_current_signal_path_fields() -> None:
+    payload = bytearray(96)
+    payload[60:64] = struct.pack("<i", -1234)
+    payload[64:68] = struct.pack("<I", 0x0ABC_FEDC)
+    payload[84:88] = struct.pack("<I", 0x1122_3344)
+    payload[88:92] = struct.pack("<I", 0x5566_7788)
+    payload[92:96] = struct.pack("<I", 0x99AA_BBCC)
+
+    frame = decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=4) + payload)
+
+    assert frame.payload["interim_pidin_target_torque"] == -1234
+    assert frame.payload["interim_pid_torque_target_actual"] == 0x0ABC_FEDC
+    assert frame.payload["interim_foc_iq_id"] == 0x1122_3344
+    assert frame.payload["interim_foc_iwy_iux"] == 0x5566_7788
+    assert frame.payload["interim_adc_i1_i0"] == 0x99AA_BBCC
+
+
+def test_decode_v5_current_path_fields() -> None:
+    payload = bytearray(16)
+    payload[0] = 0x02
+    payload[4:8] = struct.pack("<I", 0x1122_3344)
+    payload[8:12] = struct.pack("<I", 0x5566_7788)
+    payload[12:16] = struct.pack("<I", 0x99AA_BBCC)
+
+    frame = decode_frame(_header(FRAME_TYPE_CURRENT_PATH, payload, version=5) + payload)
+
+    assert frame.payload["sample_flags"] == 0x02
+    assert frame.payload["interim_foc_iq_id"] == 0x1122_3344
+    assert frame.payload["interim_foc_iwy_iux"] == 0x5566_7788
+    assert frame.payload["interim_adc_i1_i0"] == 0x99AA_BBCC
+
+
+def test_decode_v2_critical_keeps_legacy_torque_fields() -> None:
+    payload = bytearray(84)
+    payload[60:64] = struct.pack("<I", 0x1122_3344)
+    payload[64:68] = struct.pack("<I", 0x5566_7788)
+
+    frame = decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=2) + payload)
+
+    assert frame.payload["pid_torque_flux_target"] == 0x1122_3344
+    assert frame.payload["pid_torque_flux_actual"] == 0x5566_7788
 
 
 def test_decode_v1_critical_treats_accel_feedforward_fields_as_zero() -> None:

@@ -7,8 +7,8 @@ import struct
 from typing import Any
 
 FRAME_MAGIC = 0x43525446
-PROTOCOL_VERSION = 2
-SUPPORTED_PROTOCOL_VERSIONS = (1, PROTOCOL_VERSION)
+PROTOCOL_VERSION = 5
+SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, PROTOCOL_VERSION)
 HEADER_LEN = 32
 
 FRAME_TYPE_CRITICAL = 1
@@ -16,6 +16,7 @@ FRAME_TYPE_CONTROL_DETAIL = 2
 FRAME_TYPE_STATUS = 3
 FRAME_TYPE_EVENT = 4
 FRAME_TYPE_METADATA = 5
+FRAME_TYPE_CURRENT_PATH = 6
 
 
 class DecodeError(ValueError):
@@ -135,6 +136,8 @@ def _decode_payload(version: int, frame_type: int, payload: bytes) -> dict[str, 
         return _decode_event(payload)
     if frame_type == FRAME_TYPE_METADATA:
         return _decode_metadata(payload)
+    if frame_type == FRAME_TYPE_CURRENT_PATH:
+        return _decode_current_path(payload)
     return {"raw": payload}
 
 
@@ -143,15 +146,20 @@ def _require(payload: bytes, size: int, name: str) -> None:
         raise DecodeError(f"{name} payload too short")
 
 
+def _i32(value: int) -> int:
+    value &= 0xFFFF_FFFF
+    return value - 0x1_0000_0000 if value & 0x8000_0000 else value
+
+
 def _decode_critical(version: int, payload: bytes) -> dict[str, Any]:
-    _require(payload, 84, "critical")
+    _require(payload, 96 if version == 4 else 84, "critical")
     values = struct.unpack_from("<iiiiiiiBBHIiQQIIIII", payload, 0)
     accel_offset = 0
     accel_gain = 0
     accel_flags = 0
     if version >= 2:
         accel_offset, accel_gain, accel_flags, _reserved = struct.unpack_from("<iHBB", payload, 76)
-    return {
+    decoded = {
         "step_position": values[0],
         "tmc_position_actual": values[1],
         "position_error": values[2],
@@ -167,13 +175,37 @@ def _decode_critical(version: int, payload: bytes) -> dict[str, Any]:
         "last_served_step_tick": values[12],
         "last_klipper_command_service_tick": values[13],
         "missed_or_deferred_step_counter": values[14],
-        "pid_torque_flux_target": values[15],
-        "pid_torque_flux_actual": values[16],
         "interim_foc_uq_ud": values[17],
         "interim_foc_uq_ud_limited": values[18],
         "cached_accel_torque_offset": accel_offset,
         "accel_feedforward_gain_permille": accel_gain,
         "accel_feedforward_flags": accel_flags,
+    }
+    if version >= 3:
+        decoded["interim_pidin_target_torque"] = _i32(values[15])
+        decoded["interim_pid_torque_target_actual"] = values[16]
+    else:
+        decoded["pid_torque_flux_target"] = values[15]
+        decoded["pid_torque_flux_actual"] = values[16]
+    if version == 4:
+        (
+            decoded["interim_foc_iq_id"],
+            decoded["interim_foc_iwy_iux"],
+            decoded["interim_adc_i1_i0"],
+        ) = struct.unpack_from("<III", payload, 84)
+    return decoded
+
+
+def _decode_current_path(payload: bytes) -> dict[str, Any]:
+    _require(payload, 16, "current-path")
+    sample_flags, _r0, _r1, _r2, foc_iq_id, foc_iwy_iux, adc_i1_i0 = struct.unpack_from(
+        "<BBBBIII", payload, 0
+    )
+    return {
+        "sample_flags": sample_flags,
+        "interim_foc_iq_id": foc_iq_id,
+        "interim_foc_iwy_iux": foc_iwy_iux,
+        "interim_adc_i1_i0": adc_i1_i0,
     }
 
 

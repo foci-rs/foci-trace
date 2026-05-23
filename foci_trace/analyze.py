@@ -19,6 +19,7 @@ from .capture_file import (
 from .protocol import (
     FRAME_TYPE_CONTROL_DETAIL,
     FRAME_TYPE_CRITICAL,
+    FRAME_TYPE_CURRENT_PATH,
     FRAME_TYPE_METADATA,
     FRAME_TYPE_STATUS,
     DecodeError,
@@ -48,6 +49,12 @@ class MotionSegmentReport:
     torque_command_range: tuple[int, int] | None
     torque_command_saturated_samples: int
     actual_to_command_abs_median: float | None
+    foc_iq_range: tuple[int, int] | None
+    foc_id_range: tuple[int, int] | None
+    foc_iux_range: tuple[int, int] | None
+    foc_iwy_range: tuple[int, int] | None
+    adc_i0_raw_range: tuple[int, int] | None
+    adc_i1_raw_range: tuple[int, int] | None
     accel_feedforward_offset_range: tuple[int, int]
     accel_feedforward_gain_range: tuple[int, int]
     accel_feedforward_flags: int
@@ -88,6 +95,17 @@ class _CriticalObservation:
 
 
 @dataclass(frozen=True)
+class _CurrentPathObservation:
+    timestamp_ticks: int
+    foc_iq: int
+    foc_id: int
+    foc_iux: int
+    foc_iwy: int
+    adc_i0_raw: int
+    adc_i1_raw: int
+
+
+@dataclass(frozen=True)
 class _ControlDetailObservation:
     timestamp_ticks: int
     torque_command: int
@@ -104,6 +122,7 @@ class _DeviceState:
     first_status_by_source: dict[tuple[int, int], dict[str, int]] = field(default_factory=dict)
     last_status_by_source: dict[tuple[int, int], dict[str, int]] = field(default_factory=dict)
     critical_observations: list[_CriticalObservation] = field(default_factory=list)
+    current_path_observations: list[_CurrentPathObservation] = field(default_factory=list)
     control_detail_observations: list[_ControlDetailObservation] = field(default_factory=list)
 
 
@@ -119,6 +138,10 @@ def _signed_i32(value: int) -> int:
 
 def _split_i16_pair(value: int) -> tuple[int, int]:
     return _signed_i16(value), _signed_i16(value >> 16)
+
+
+def _split_u16_pair(value: int) -> tuple[int, int]:
+    return value & 0xFFFF, (value >> 16) & 0xFFFF
 
 
 def _update_range(ranges: dict[str, tuple[int, int]], name: str, value: int) -> None:
@@ -200,9 +223,32 @@ def _observe_critical(
     timestamp_ticks: int,
     steady_after_s: float,
 ) -> None:
-    actual_flux, actual_torque = _split_i16_pair(int(payload["pid_torque_flux_actual"]))
+    actual_flux: int | None = None
+    torque_target: int | None = None
+    if "interim_pid_torque_target_actual" in payload:
+        actual_torque, torque_target = _split_i16_pair(
+            int(payload["interim_pid_torque_target_actual"])
+        )
+    else:
+        actual_flux, actual_torque = _split_i16_pair(int(payload["pid_torque_flux_actual"]))
+        _flux_target, torque_target = _split_i16_pair(int(payload["pid_torque_flux_target"]))
     ud, uq = _split_i16_pair(int(payload["interim_foc_uq_ud"]))
     ud_limited, uq_limited = _split_i16_pair(int(payload["interim_foc_uq_ud_limited"]))
+    if "interim_foc_iq_id" in payload:
+        foc_id, foc_iq = _split_i16_pair(int(payload["interim_foc_iq_id"]))
+        foc_iux, foc_iwy = _split_i16_pair(int(payload["interim_foc_iwy_iux"]))
+        adc_i0_raw, adc_i1_raw = _split_u16_pair(int(payload["interim_adc_i1_i0"]))
+        _observe_current_path_values(
+            state,
+            timestamp_ticks,
+            steady_after_s,
+            foc_iq,
+            foc_id,
+            foc_iux,
+            foc_iwy,
+            adc_i0_raw,
+            adc_i1_raw,
+        )
     state.critical_observations.append(
         _CriticalObservation(
             timestamp_ticks=timestamp_ticks,
@@ -225,8 +271,8 @@ def _observe_critical(
         _update_range(report.ranges, name, int(payload[name]))
 
     for name, value in (
-        ("actual_flux", actual_flux),
         ("actual_torque", actual_torque),
+        ("torque_target", torque_target),
         ("ud", ud),
         ("uq", uq),
         ("ud_limited", ud_limited),
@@ -237,7 +283,67 @@ def _observe_critical(
         ("accel_ff_gain", int(payload["accel_feedforward_gain_permille"])),
         ("accel_ff_flags", int(payload["accel_feedforward_flags"])),
     ):
-        _update_range(report.ranges, name, value)
+        if value is not None:
+            _update_range(report.ranges, name, value)
+    if actual_flux is not None:
+        _update_range(report.ranges, "actual_flux", actual_flux)
+
+
+def _observe_current_path_values(
+    state: _DeviceState,
+    timestamp_ticks: int,
+    steady_after_s: float,
+    foc_iq: int,
+    foc_id: int,
+    foc_iux: int,
+    foc_iwy: int,
+    adc_i0_raw: int,
+    adc_i1_raw: int,
+) -> None:
+    state.current_path_observations.append(
+        _CurrentPathObservation(
+            timestamp_ticks=timestamp_ticks,
+            foc_iq=foc_iq,
+            foc_id=foc_id,
+            foc_iux=foc_iux,
+            foc_iwy=foc_iwy,
+            adc_i0_raw=adc_i0_raw,
+            adc_i1_raw=adc_i1_raw,
+        )
+    )
+    if _relative_seconds(state, timestamp_ticks) < steady_after_s:
+        return
+    for name, value in (
+        ("foc_iq", foc_iq),
+        ("foc_id", foc_id),
+        ("foc_iux", foc_iux),
+        ("foc_iwy", foc_iwy),
+        ("adc_i0_raw", adc_i0_raw),
+        ("adc_i1_raw", adc_i1_raw),
+    ):
+        _update_range(state.report.ranges, name, value)
+
+
+def _observe_current_path(
+    state: _DeviceState,
+    payload: dict[str, object],
+    timestamp_ticks: int,
+    steady_after_s: float,
+) -> None:
+    foc_id, foc_iq = _split_i16_pair(int(payload["interim_foc_iq_id"]))
+    foc_iux, foc_iwy = _split_i16_pair(int(payload["interim_foc_iwy_iux"]))
+    adc_i0_raw, adc_i1_raw = _split_u16_pair(int(payload["interim_adc_i1_i0"]))
+    _observe_current_path_values(
+        state,
+        timestamp_ticks,
+        steady_after_s,
+        foc_iq,
+        foc_id,
+        foc_iux,
+        foc_iwy,
+        adc_i0_raw,
+        adc_i1_raw,
+    )
 
 
 def _observe_control_detail(
@@ -365,6 +471,11 @@ def _range(values: list[int]) -> tuple[int, int]:
     return min(values), max(values)
 
 
+def _optional_range(values: list[int | None]) -> tuple[int, int] | None:
+    present = [value for value in values if value is not None]
+    return _range(present) if present else None
+
+
 def _nearest_critical(
     samples: list[_CriticalObservation], timestamp_ticks: int
 ) -> _CriticalObservation:
@@ -375,6 +486,9 @@ def _finalize_motion_segments(
     state: _DeviceState, motion_gap_s: float, motion_min_steps: int
 ) -> None:
     observations = sorted(state.critical_observations, key=lambda sample: sample.timestamp_ticks)
+    current_paths = sorted(
+        state.current_path_observations, key=lambda sample: sample.timestamp_ticks
+    )
     details = sorted(state.control_detail_observations, key=lambda sample: sample.timestamp_ticks)
     for segment_index, (start_idx, end_idx) in enumerate(
         _motion_groups(observations, state.clock_hz, motion_gap_s, motion_min_steps)
@@ -389,6 +503,19 @@ def _finalize_motion_segments(
         rms, peak = _fitted_error_stats(segment_samples)
         torque_values = [sample.actual_torque for sample in segment_samples]
         uq_limited_values = [sample.uq_limited for sample in segment_samples]
+        segment_current_paths = [
+            sample for sample in current_paths if start_tick <= sample.timestamp_ticks <= end_tick
+        ]
+        foc_iq_range = _optional_range([sample.foc_iq for sample in segment_current_paths])
+        foc_id_range = _optional_range([sample.foc_id for sample in segment_current_paths])
+        foc_iux_range = _optional_range([sample.foc_iux for sample in segment_current_paths])
+        foc_iwy_range = _optional_range([sample.foc_iwy for sample in segment_current_paths])
+        adc_i0_raw_range = _optional_range(
+            [sample.adc_i0_raw for sample in segment_current_paths]
+        )
+        adc_i1_raw_range = _optional_range(
+            [sample.adc_i1_raw for sample in segment_current_paths]
+        )
         accel_offsets = [sample.accel_feedforward_offset for sample in segment_samples]
         accel_gains = [sample.accel_feedforward_gain for sample in segment_samples]
         accel_flags = 0
@@ -433,6 +560,12 @@ def _finalize_motion_segments(
                 torque_command_range=_range(torque_commands) if torque_commands else None,
                 torque_command_saturated_samples=len(saturated_details),
                 actual_to_command_abs_median=median(ratios) if ratios else None,
+                foc_iq_range=foc_iq_range,
+                foc_id_range=foc_id_range,
+                foc_iux_range=foc_iux_range,
+                foc_iwy_range=foc_iwy_range,
+                adc_i0_raw_range=adc_i0_raw_range,
+                adc_i1_raw_range=adc_i1_raw_range,
                 accel_feedforward_offset_range=_range(accel_offsets),
                 accel_feedforward_gain_range=_range(accel_gains),
                 accel_feedforward_flags=accel_flags,
@@ -477,6 +610,8 @@ def summarize_capture(
             _observe_status(state, (header.source_kind, header.source_index), frame.payload)
         elif header.frame_type == FRAME_TYPE_CRITICAL:
             _observe_critical(state, frame.payload, header.timestamp_ticks, steady_after_s)
+        elif header.frame_type == FRAME_TYPE_CURRENT_PATH:
+            _observe_current_path(state, frame.payload, header.timestamp_ticks, steady_after_s)
         elif header.frame_type == FRAME_TYPE_CONTROL_DETAIL:
             _observe_control_detail(state, frame.payload, header.timestamp_ticks)
 
@@ -491,6 +626,12 @@ def _range_text(ranges: dict[str, tuple[int, int]], name: str) -> str:
         return "n/a"
     lo, hi = ranges[name]
     return f"{lo}..{hi}"
+
+
+def _optional_range_text(value: tuple[int, int] | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value[0]}..{value[1]}"
 
 
 def format_summary(reports: list[DeviceReport]) -> str:
@@ -529,6 +670,8 @@ def format_summary(reports: list[DeviceReport]) -> str:
             "  steady>={after:g}s samples={samples} voltage_diff={limited} "
             "pos={pos} vel={vel} torque={torque} flux={flux} "
             "ud={ud} uq={uq} ud_delta={ud_delta} uq_delta={uq_delta} "
+            "iq={iq} id={id} iux={iux} iwy={iwy} "
+            "adc0_raw={adc0} adc1_raw={adc1} "
             "accel_ff={accel} gain={gain} flags=0x{flags:02x}".format(
                 after=report.steady_after_s,
                 samples=report.steady_samples,
@@ -541,6 +684,12 @@ def format_summary(reports: list[DeviceReport]) -> str:
                 uq=_range_text(report.ranges, "uq"),
                 ud_delta=_range_text(report.ranges, "ud_delta"),
                 uq_delta=_range_text(report.ranges, "uq_delta"),
+                iq=_range_text(report.ranges, "foc_iq"),
+                id=_range_text(report.ranges, "foc_id"),
+                iux=_range_text(report.ranges, "foc_iux"),
+                iwy=_range_text(report.ranges, "foc_iwy"),
+                adc0=_range_text(report.ranges, "adc_i0_raw"),
+                adc1=_range_text(report.ranges, "adc_i1_raw"),
                 accel=_range_text(report.ranges, "accel_ff_offset"),
                 gain=_range_text(report.ranges, "accel_ff_gain"),
                 flags=report.ranges.get("accel_ff_flags", (0, 0))[1],
@@ -564,6 +713,8 @@ def format_summary(reports: list[DeviceReport]) -> str:
                 "torque={torque_lo}..{torque_hi} uq_limited={uq_lo}..{uq_hi} "
                 "uq_rail={rail}/{critical} torque_cmd={cmd} "
                 "saturated={sat}/{detail} actual_cmd_median={ratio} "
+                "iq={iq} id={id} iux={iux} iwy={iwy} "
+                "adc0_raw={adc0} adc1_raw={adc1} "
                 "accel_ff={accel_lo}..{accel_hi} gain={gain_lo}..{gain_hi} "
                 "flags=0x{flags:02x}".format(
                     idx=segment.segment_index,
@@ -581,6 +732,12 @@ def format_summary(reports: list[DeviceReport]) -> str:
                     cmd=command_range,
                     sat=segment.torque_command_saturated_samples,
                     ratio=ratio,
+                    iq=_optional_range_text(segment.foc_iq_range),
+                    id=_optional_range_text(segment.foc_id_range),
+                    iux=_optional_range_text(segment.foc_iux_range),
+                    iwy=_optional_range_text(segment.foc_iwy_range),
+                    adc0=_optional_range_text(segment.adc_i0_raw_range),
+                    adc1=_optional_range_text(segment.adc_i1_raw_range),
                     accel_lo=segment.accel_feedforward_offset_range[0],
                     accel_hi=segment.accel_feedforward_offset_range[1],
                     gain_lo=segment.accel_feedforward_gain_range[0],
