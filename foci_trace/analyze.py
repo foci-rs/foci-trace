@@ -41,6 +41,10 @@ class CurrentAuthorityReport:
     target_to_command_abs_median: float | None
     actual_to_target_abs_median: float | None
     iq_to_actual_abs_median: float | None
+    uq_limited_range: tuple[int, int]
+    uq_delta_range: tuple[int, int]
+    uq_to_limit_abs_median: float | None
+    voltage_rail_samples: int
     # Raw ADC movement around the segment median, not calibrated current.
     adc_i0_delta_range: tuple[int, int] | None
     adc_i1_delta_range: tuple[int, int] | None
@@ -105,6 +109,7 @@ class _CriticalObservation:
     tmc_position_actual: int
     torque_target: int
     actual_torque: int
+    uq_requested: int
     uq_limited: int
     accel_feedforward_offset: int
     accel_feedforward_gain: int
@@ -273,6 +278,7 @@ def _observe_critical(
             tmc_position_actual=int(payload["tmc_position_actual"]),
             torque_target=torque_target if torque_target is not None else 0,
             actual_torque=actual_torque,
+            uq_requested=uq,
             uq_limited=uq_limited,
             accel_feedforward_offset=int(payload["cached_accel_torque_offset"]),
             accel_feedforward_gain=int(payload["accel_feedforward_gain_permille"]),
@@ -559,16 +565,28 @@ def _current_authority_report(
     target_to_command: list[float] = []
     actual_to_target: list[float] = []
     iq_to_actual: list[float] = []
+    uq_to_limit: list[float] = []
+    uq_limited_values: list[int] = []
+    uq_delta_values: list[int] = []
     adc_i0_deltas: list[int] = []
     adc_i1_deltas: list[int] = []
     sign_agreement = 0
     adc_i0_baseline = _median_int([sample.adc_i0_raw for sample in segment_current_paths])
     adc_i1_baseline = _median_int([sample.adc_i1_raw for sample in segment_current_paths])
+    voltage_limit = max((detail.voltage_limit for detail in segment_details), default=0)
+    voltage_threshold = int(voltage_limit * 0.98)
+    voltage_rail_samples = 0
 
     for critical, detail in near_limit_samples:
         command = detail.torque_command if detail is not None else critical.torque_target
         actual = critical.actual_torque
         target = critical.torque_target
+        uq_limited_values.append(critical.uq_limited)
+        uq_delta_values.append(critical.uq_requested - critical.uq_limited)
+        if voltage_limit > 0:
+            uq_to_limit.append(abs(critical.uq_limited) / voltage_limit)
+        if voltage_threshold > 0 and abs(critical.uq_limited) >= voltage_threshold:
+            voltage_rail_samples += 1
         if command != 0:
             actual_to_command.append(abs(actual) / abs(command))
             target_to_command.append(abs(target) / abs(command))
@@ -595,6 +613,10 @@ def _current_authority_report(
         target_to_command_abs_median=_rounded_median(target_to_command),
         actual_to_target_abs_median=_rounded_median(actual_to_target),
         iq_to_actual_abs_median=_rounded_median(iq_to_actual),
+        uq_limited_range=_range(uq_limited_values),
+        uq_delta_range=_range(uq_delta_values),
+        uq_to_limit_abs_median=_rounded_median(uq_to_limit),
+        voltage_rail_samples=voltage_rail_samples,
         adc_i0_delta_range=_optional_range(adc_i0_deltas),
         adc_i1_delta_range=_optional_range(adc_i1_deltas),
     )
@@ -878,8 +900,9 @@ def format_summary(reports: list[DeviceReport]) -> str:
                 lines.append(
                     "    authority near_limit={near} sign={sign}/{near} "
                     "actual/cmd={actual_cmd} target/cmd={target_cmd} "
-                    "actual/target={actual_target} iq/actual={iq_actual} "
-                    "adc0_delta={adc0} adc1_delta={adc1}".format(
+                    "actual/target={actual_target} uq_lim={uq_lim} "
+                    "uq_delta={uq_delta} uq/limit={uq_limit} rail={rail}/{near} "
+                    "iq/actual={iq_actual} adc0_delta={adc0} adc1_delta={adc1}".format(
                         near=authority.near_limit_samples,
                         sign=authority.sign_agreement_samples,
                         actual_cmd=_optional_ratio_text(
@@ -891,6 +914,10 @@ def format_summary(reports: list[DeviceReport]) -> str:
                         actual_target=_optional_ratio_text(
                             authority.actual_to_target_abs_median
                         ),
+                        uq_lim=_optional_range_text(authority.uq_limited_range),
+                        uq_delta=_optional_range_text(authority.uq_delta_range),
+                        uq_limit=_optional_ratio_text(authority.uq_to_limit_abs_median),
+                        rail=authority.voltage_rail_samples,
                         iq_actual=_optional_ratio_text(authority.iq_to_actual_abs_median),
                         adc0=_optional_range_text(authority.adc_i0_delta_range),
                         adc1=_optional_range_text(authority.adc_i1_delta_range),

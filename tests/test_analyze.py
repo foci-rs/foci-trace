@@ -143,10 +143,13 @@ def _critical_motion_payload(
     torque_actual: int,
     uq_limited: int,
     torque_target: int = 0,
+    uq_requested: int | None = None,
     accel_offset: int = 0,
     accel_gain: int = 0,
     accel_flags: int = 0,
 ) -> bytes:
+    if uq_requested is None:
+        uq_requested = uq_limited
     payload = struct.pack(
         "<iiiiiiiBBHIiQQIIIII",
         step_position,
@@ -166,7 +169,7 @@ def _critical_motion_payload(
         0,
         0,
         _pack_i16_pair(torque_actual, torque_target),
-        _pack_i16_pair(0, uq_limited),
+        _pack_i16_pair(0, uq_requested),
         _pack_i16_pair(0, uq_limited),
     )
     return payload + struct.pack("<iHBB", accel_offset, accel_gain, accel_flags, 0)
@@ -384,10 +387,10 @@ def test_summarize_capture_reports_current_authority_windows() -> None:
 
     clock = 84_000_000
     critical_samples = [
-        (1, clock // 1000, 0, 0, 900, 2800, 1200),
-        (2, (clock // 1000) * 2, 10, 10, 1000, 1400, 1400),
-        (3, (clock // 1000) * 3, 20, 20, -800, -2816, -2750),
-        (4, (clock // 1000) * 4, 30, 30, -700, -2600, -2790),
+        (1, clock // 1000, 0, 0, 900, 2800, 1200, 1200),
+        (2, (clock // 1000) * 2, 10, 10, 1000, 1400, 1400, 1400),
+        (3, (clock // 1000) * 3, 20, 20, -800, -2816, -3000, -3600),
+        (4, (clock // 1000) * 4, 30, 30, -700, -2600, -2900, -3300),
     ]
     for (
         seq,
@@ -397,6 +400,7 @@ def test_summarize_capture_reports_current_authority_windows() -> None:
         torque_actual,
         torque_target,
         uq_limited,
+        uq_requested,
     ) in critical_samples:
         payload = _critical_motion_payload(
             step,
@@ -404,6 +408,7 @@ def test_summarize_capture_reports_current_authority_windows() -> None:
             torque_actual,
             uq_limited,
             torque_target=torque_target,
+            uq_requested=uq_requested,
         )
         writer.write_firmware_frame(
             0,
@@ -464,12 +469,17 @@ def test_summarize_capture_reports_current_authority_windows() -> None:
     assert authority.target_to_command_abs_median == 1.0
     assert authority.actual_to_target_abs_median == 0.284
     assert authority.iq_to_actual_abs_median == 1.018
+    assert authority.uq_limited_range == (-3000, 1200)
+    assert authority.uq_delta_range == (-600, 0)
+    assert authority.uq_to_limit_abs_median == 0.967
+    assert authority.voltage_rail_samples == 1
     assert authority.adc_i0_delta_range == (-20, 20)
     assert authority.adc_i1_delta_range == (-30, 30)
 
     text = format_summary(reports)
     assert "authority near_limit=3 sign=3/3" in text
     assert "actual/cmd=0.28 target/cmd=1.00 actual/target=0.28" in text
+    assert "uq_lim=-3000..1200 uq_delta=-600..0 uq/limit=0.97 rail=1/3" in text
     assert "iq/actual=1.02 adc0_delta=-20..20 adc1_delta=-30..30" in text
 
 
