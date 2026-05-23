@@ -32,6 +32,21 @@ DEFAULT_MOTION_MIN_STEPS = 1000
 
 
 @dataclass
+class CurrentAuthorityReport:
+    """Near-limit current-authority summary for one motion segment."""
+
+    near_limit_samples: int
+    sign_agreement_samples: int
+    actual_to_command_abs_median: float | None
+    target_to_command_abs_median: float | None
+    actual_to_target_abs_median: float | None
+    iq_to_actual_abs_median: float | None
+    # Raw ADC movement around the segment median, not calibrated current.
+    adc_i0_delta_range: tuple[int, int] | None
+    adc_i1_delta_range: tuple[int, int] | None
+
+
+@dataclass
 class MotionSegmentReport:
     """Motion-focused summary for one contiguous stepper segment."""
 
@@ -55,6 +70,7 @@ class MotionSegmentReport:
     foc_iwy_range: tuple[int, int] | None
     adc_i0_raw_range: tuple[int, int] | None
     adc_i1_raw_range: tuple[int, int] | None
+    current_authority: CurrentAuthorityReport | None
     accel_feedforward_offset_range: tuple[int, int]
     accel_feedforward_gain_range: tuple[int, int]
     accel_feedforward_flags: int
@@ -87,6 +103,7 @@ class _CriticalObservation:
     timestamp_ticks: int
     step_position: int
     tmc_position_actual: int
+    torque_target: int
     actual_torque: int
     uq_limited: int
     accel_feedforward_offset: int
@@ -254,6 +271,7 @@ def _observe_critical(
             timestamp_ticks=timestamp_ticks,
             step_position=int(payload["step_position"]),
             tmc_position_actual=int(payload["tmc_position_actual"]),
+            torque_target=torque_target if torque_target is not None else 0,
             actual_torque=actual_torque,
             uq_limited=uq_limited,
             accel_feedforward_offset=int(payload["cached_accel_torque_offset"]),
@@ -482,6 +500,106 @@ def _nearest_critical(
     return min(samples, key=lambda sample: abs(sample.timestamp_ticks - timestamp_ticks))
 
 
+def _nearest_current_path(
+    samples: list[_CurrentPathObservation], timestamp_ticks: int
+) -> _CurrentPathObservation | None:
+    if not samples:
+        return None
+    return min(samples, key=lambda sample: abs(sample.timestamp_ticks - timestamp_ticks))
+
+
+def _nearest_control_detail(
+    samples: list[_ControlDetailObservation], timestamp_ticks: int
+) -> _ControlDetailObservation | None:
+    if not samples:
+        return None
+    return min(samples, key=lambda sample: abs(sample.timestamp_ticks - timestamp_ticks))
+
+
+def _sign_matches(left: int, right: int) -> bool:
+    return (left < 0 and right < 0) or (left > 0 and right > 0) or (left == 0 and right == 0)
+
+
+def _rounded_median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return round(median(values), 3)
+
+
+def _median_int(values: list[int]) -> int | None:
+    if not values:
+        return None
+    return int(round(median(values)))
+
+
+def _current_authority_report(
+    segment_samples: list[_CriticalObservation],
+    segment_details: list[_ControlDetailObservation],
+    segment_current_paths: list[_CurrentPathObservation],
+) -> CurrentAuthorityReport | None:
+    torque_limit = max((detail.torque_limit for detail in segment_details), default=0)
+    if torque_limit <= 0:
+        return None
+    threshold = int(torque_limit * 0.8)
+    near_limit_samples: list[
+        tuple[_CriticalObservation, _ControlDetailObservation | None]
+    ] = []
+    for sample in segment_samples:
+        if abs(sample.torque_target) < threshold:
+            continue
+        detail = _nearest_control_detail(segment_details, sample.timestamp_ticks)
+        if detail is not None and abs(detail.torque_command) < threshold:
+            continue
+        near_limit_samples.append((sample, detail))
+    if not near_limit_samples:
+        return None
+    near_limit_timestamps = {sample.timestamp_ticks for sample, _detail in near_limit_samples}
+
+    actual_to_command: list[float] = []
+    target_to_command: list[float] = []
+    actual_to_target: list[float] = []
+    iq_to_actual: list[float] = []
+    adc_i0_deltas: list[int] = []
+    adc_i1_deltas: list[int] = []
+    sign_agreement = 0
+    adc_i0_baseline = _median_int([sample.adc_i0_raw for sample in segment_current_paths])
+    adc_i1_baseline = _median_int([sample.adc_i1_raw for sample in segment_current_paths])
+
+    for critical, detail in near_limit_samples:
+        command = detail.torque_command if detail is not None else critical.torque_target
+        actual = critical.actual_torque
+        target = critical.torque_target
+        if command != 0:
+            actual_to_command.append(abs(actual) / abs(command))
+            target_to_command.append(abs(target) / abs(command))
+        if target != 0:
+            actual_to_target.append(abs(actual) / abs(target))
+        if _sign_matches(actual, target):
+            sign_agreement += 1
+
+    for current_path in segment_current_paths:
+        critical = _nearest_critical(segment_samples, current_path.timestamp_ticks)
+        if critical.timestamp_ticks not in near_limit_timestamps:
+            continue
+        if critical.actual_torque != 0:
+            iq_to_actual.append(abs(current_path.foc_iq) / abs(critical.actual_torque))
+        if adc_i0_baseline is not None:
+            adc_i0_deltas.append(current_path.adc_i0_raw - adc_i0_baseline)
+        if adc_i1_baseline is not None:
+            adc_i1_deltas.append(current_path.adc_i1_raw - adc_i1_baseline)
+
+    return CurrentAuthorityReport(
+        near_limit_samples=len(near_limit_samples),
+        sign_agreement_samples=sign_agreement,
+        actual_to_command_abs_median=_rounded_median(actual_to_command),
+        target_to_command_abs_median=_rounded_median(target_to_command),
+        actual_to_target_abs_median=_rounded_median(actual_to_target),
+        iq_to_actual_abs_median=_rounded_median(iq_to_actual),
+        adc_i0_delta_range=_optional_range(adc_i0_deltas),
+        adc_i1_delta_range=_optional_range(adc_i1_deltas),
+    )
+
+
 def _finalize_motion_segments(
     state: _DeviceState, motion_gap_s: float, motion_min_steps: int
 ) -> None:
@@ -515,6 +633,9 @@ def _finalize_motion_segments(
         )
         adc_i1_raw_range = _optional_range(
             [sample.adc_i1_raw for sample in segment_current_paths]
+        )
+        current_authority = _current_authority_report(
+            segment_samples, segment_details, segment_current_paths
         )
         accel_offsets = [sample.accel_feedforward_offset for sample in segment_samples]
         accel_gains = [sample.accel_feedforward_gain for sample in segment_samples]
@@ -566,6 +687,7 @@ def _finalize_motion_segments(
                 foc_iwy_range=foc_iwy_range,
                 adc_i0_raw_range=adc_i0_raw_range,
                 adc_i1_raw_range=adc_i1_raw_range,
+                current_authority=current_authority,
                 accel_feedforward_offset_range=_range(accel_offsets),
                 accel_feedforward_gain_range=_range(accel_gains),
                 accel_feedforward_flags=accel_flags,
@@ -632,6 +754,12 @@ def _optional_range_text(value: tuple[int, int] | None) -> str:
     if value is None:
         return "n/a"
     return f"{value[0]}..{value[1]}"
+
+
+def _optional_ratio_text(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.2f}"
 
 
 def format_summary(reports: list[DeviceReport]) -> str:
@@ -745,6 +873,29 @@ def format_summary(reports: list[DeviceReport]) -> str:
                     flags=segment.accel_feedforward_flags,
                 )
             )
+            authority = segment.current_authority
+            if authority is not None:
+                lines.append(
+                    "    authority near_limit={near} sign={sign}/{near} "
+                    "actual/cmd={actual_cmd} target/cmd={target_cmd} "
+                    "actual/target={actual_target} iq/actual={iq_actual} "
+                    "adc0_delta={adc0} adc1_delta={adc1}".format(
+                        near=authority.near_limit_samples,
+                        sign=authority.sign_agreement_samples,
+                        actual_cmd=_optional_ratio_text(
+                            authority.actual_to_command_abs_median
+                        ),
+                        target_cmd=_optional_ratio_text(
+                            authority.target_to_command_abs_median
+                        ),
+                        actual_target=_optional_ratio_text(
+                            authority.actual_to_target_abs_median
+                        ),
+                        iq_actual=_optional_ratio_text(authority.iq_to_actual_abs_median),
+                        adc0=_optional_range_text(authority.adc_i0_delta_range),
+                        adc1=_optional_range_text(authority.adc_i1_delta_range),
+                    )
+                )
     return "\n".join(lines)
 
 

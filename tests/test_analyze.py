@@ -142,6 +142,7 @@ def _critical_motion_payload(
     tmc_position_actual: int,
     torque_actual: int,
     uq_limited: int,
+    torque_target: int = 0,
     accel_offset: int = 0,
     accel_gain: int = 0,
     accel_flags: int = 0,
@@ -164,7 +165,7 @@ def _critical_motion_payload(
         2,
         0,
         0,
-        _pack_i16_pair(torque_actual, 0),
+        _pack_i16_pair(torque_actual, torque_target),
         _pack_i16_pair(0, uq_limited),
         _pack_i16_pair(0, uq_limited),
     )
@@ -374,6 +375,102 @@ def test_summarize_capture_reports_motion_segments() -> None:
     assert "motion0 delta=30 duration=0.003s" in text
     assert "torque_cmd=-2816..2816 saturated=2/2" in text
     assert "accel_ff=-15..15 gain=2000..2000 flags=0x03" in text
+
+
+def test_summarize_capture_reports_current_authority_windows() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+
+    clock = 84_000_000
+    critical_samples = [
+        (1, clock // 1000, 0, 0, 900, 2800, 1200),
+        (2, (clock // 1000) * 2, 10, 10, 1000, 1400, 1400),
+        (3, (clock // 1000) * 3, 20, 20, -800, -2816, -2750),
+        (4, (clock // 1000) * 4, 30, 30, -700, -2600, -2790),
+    ]
+    for (
+        seq,
+        timestamp,
+        step,
+        actual,
+        torque_actual,
+        torque_target,
+        uq_limited,
+    ) in critical_samples:
+        payload = _critical_motion_payload(
+            step,
+            actual,
+            torque_actual,
+            uq_limited,
+            torque_target=torque_target,
+        )
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_CRITICAL, payload, seq, timestamp, 1, 0) + payload,
+        )
+
+    current_paths = [
+        (
+            5,
+            clock // 1000,
+            _pack_i16_pair(20, 910),
+            _pack_i16_pair(-100, 120),
+            _pack_u16_pair(32700, 33100),
+        ),
+        (
+            6,
+            (clock // 1000) * 3,
+            _pack_i16_pair(-30, -820),
+            _pack_i16_pair(-90, 130),
+            _pack_u16_pair(32740, 33160),
+        ),
+    ]
+    for seq, timestamp, iq_id, iwy_iux, adc_i1_i0 in current_paths:
+        payload = _current_path_payload(iq_id, iwy_iux, adc_i1_i0)
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_CURRENT_PATH, payload, seq, timestamp, 1, 0) + payload,
+        )
+
+    for seq, timestamp, torque_cmd in (
+        (7, clock // 1000, 2800),
+        (8, (clock // 1000) * 2, 1400),
+        (9, (clock // 1000) * 3, -2816),
+        (10, (clock // 1000) * 4, -2600),
+    ):
+        payload = _control_detail_payload(torque_cmd, voltage_limit=3000, torque_limit=2816)
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_CONTROL_DETAIL, payload, seq, timestamp, 1, 0) + payload,
+        )
+
+    reports = summarize_capture(
+        io.BytesIO(output.getvalue()),
+        steady_after_s=0,
+        motion_gap_s=0.01,
+        motion_min_steps=5,
+    )
+
+    segment = reports[0].motion_segments[0]
+    authority = segment.current_authority
+    assert authority is not None
+    assert authority.near_limit_samples == 3
+    assert authority.sign_agreement_samples == 3
+    assert authority.actual_to_command_abs_median == 0.284
+    assert authority.target_to_command_abs_median == 1.0
+    assert authority.actual_to_target_abs_median == 0.284
+    assert authority.iq_to_actual_abs_median == 1.018
+    assert authority.adc_i0_delta_range == (-20, 20)
+    assert authority.adc_i1_delta_range == (-30, 30)
+
+    text = format_summary(reports)
+    assert "authority near_limit=3 sign=3/3" in text
+    assert "actual/cmd=0.28 target/cmd=1.00 actual/target=0.28" in text
+    assert "iq/actual=1.02 adc0_delta=-20..20 adc1_delta=-30..30" in text
 
 
 def test_summarize_capture_does_not_bridge_motion_across_timestamp_gap() -> None:
