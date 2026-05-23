@@ -1,10 +1,12 @@
 use std::fs;
+use std::time::Duration;
 
 use bytes::Bytes;
 use foci_trace::capture_file::CaptureWriter;
 use foci_trace::clock::CaptureClock;
 use foci_trace::record::{
-    CapturedFrame, HostCounters, create_capture_output, drain_writer, write_ready_file,
+    CapturedFrame, HostCounters, ReaderStartup, create_capture_output, drain_writer,
+    wait_for_reader_startups_then_write_ready, write_ready_file,
 };
 
 #[test]
@@ -35,6 +37,36 @@ fn ready_file_contains_capture_path() {
     let output = temp.path().join("capture.bin");
 
     write_ready_file(Some(&ready), &output).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(ready).unwrap(),
+        format!("{}\n", output.display())
+    );
+}
+
+#[test]
+fn ready_file_waits_for_reader_startup() {
+    let temp = tempfile::tempdir().unwrap();
+    let ready = temp.path().join("capture.ready");
+    let output = temp.path().join("capture.bin");
+    let ready_for_thread = ready.clone();
+    let output_for_thread = output.clone();
+    let (tx, rx) = crossbeam_channel::bounded(1);
+
+    let handle = std::thread::spawn(move || {
+        wait_for_reader_startups_then_write_ready(
+            rx,
+            1,
+            Some(&ready_for_thread),
+            &output_for_thread,
+        )
+    });
+
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(!ready.exists());
+
+    tx.send(ReaderStartup::Started).unwrap();
+    handle.join().unwrap().unwrap();
 
     assert_eq!(
         fs::read_to_string(ready).unwrap(),

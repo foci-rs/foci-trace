@@ -26,6 +26,8 @@ pub enum RecordError {
     Usb(#[from] UsbTraceError),
     #[error("no FOCI trace devices found")]
     NoTraceDevices,
+    #[error("trace reader failed to start")]
+    TraceReaderStartupFailed,
 }
 
 #[derive(Debug)]
@@ -42,6 +44,12 @@ pub struct HostCounters {
     pub parser_errors: u64,
     pub parser_resync_bytes: u64,
     pub io_errors: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReaderStartup {
+    Started,
+    Failed,
 }
 
 #[derive(Debug, Default)]
@@ -94,14 +102,15 @@ pub fn run_record(args: RecordArgs) -> Result<(), RecordError> {
         )?;
     }
 
-    write_ready_file(args.ready_file.as_deref(), &args.output)?;
-
     let (tx, rx) = crossbeam_channel::bounded(4096);
+    let (startup_tx, startup_rx) = crossbeam_channel::bounded(devices.len());
     let deadline =
         (args.duration_s > 0.0).then(|| Instant::now() + Duration::from_secs_f64(args.duration_s));
+    let reader_count = devices.len();
     let mut handles = Vec::new();
     for (index, device) in devices.into_iter().enumerate() {
         let tx = tx.clone();
+        let startup_tx = startup_tx.clone();
         let clock = clock.clone();
         let packet_size = args.packet_size.max(device.max_packet_size);
         handles.push(thread::spawn(move || {
@@ -112,10 +121,19 @@ pub fn run_record(args: RecordArgs) -> Result<(), RecordError> {
                 deadline,
                 clock,
                 tx,
+                startup_tx,
             )
         }));
     }
     drop(tx);
+    drop(startup_tx);
+
+    wait_for_reader_startups_then_write_ready(
+        startup_rx,
+        reader_count,
+        args.ready_file.as_deref(),
+        &args.output,
+    )?;
 
     let mut counters = HostCounters::default();
     let writer_result = drain_writer(rx, &mut writer, &mut counters);
@@ -162,6 +180,24 @@ pub fn write_ready_file(ready_file: Option<&Path>, output: &Path) -> io::Result<
     Ok(())
 }
 
+pub fn wait_for_reader_startups_then_write_ready(
+    startup_rx: Receiver<ReaderStartup>,
+    expected_readers: usize,
+    ready_file: Option<&Path>,
+    output: &Path,
+) -> Result<(), RecordError> {
+    for _ in 0..expected_readers {
+        match startup_rx.recv() {
+            Ok(ReaderStartup::Started) => {}
+            Ok(ReaderStartup::Failed) | Err(_) => {
+                return Err(RecordError::TraceReaderStartupFailed);
+            }
+        }
+    }
+    write_ready_file(ready_file, output)?;
+    Ok(())
+}
+
 fn create_parent_dir(path: &Path) -> io::Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -197,13 +233,18 @@ fn read_device_loop(
     deadline: Option<Instant>,
     clock: CaptureClock,
     tx: Sender<CapturedFrame>,
+    startup_tx: Sender<ReaderStartup>,
 ) -> ReaderCounters {
     let mut assembler = FrameAssembler::new();
     let mut scratch = vec![0u8; packet_size];
     let mut counters = ReaderCounters::default();
     let mut reader = match device.bulk_reader(packet_size, Duration::from_millis(10)) {
-        Ok(reader) => reader,
+        Ok(reader) => {
+            let _ = startup_tx.send(ReaderStartup::Started);
+            reader
+        }
         Err(_) => {
+            let _ = startup_tx.send(ReaderStartup::Failed);
             counters.io_errors += 1;
             return counters;
         }
