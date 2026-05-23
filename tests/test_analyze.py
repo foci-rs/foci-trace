@@ -464,6 +464,8 @@ def test_summarize_capture_reports_current_authority_windows() -> None:
     authority = segment.current_authority
     assert authority is not None
     assert authority.near_limit_samples == 3
+    assert authority.near_limit_sample_coverage == 0.75
+    assert authority.near_limit_longest_run_s == 0.001
     assert authority.sign_agreement_samples == 3
     assert authority.actual_to_command_abs_median == 0.284
     assert authority.target_to_command_abs_median == 1.0
@@ -478,6 +480,7 @@ def test_summarize_capture_reports_current_authority_windows() -> None:
 
     text = format_summary(reports)
     assert "authority near_limit=3 sign=3/3" in text
+    assert "coverage=75.0% longest=1.0ms" in text
     assert "actual/target=0.28" in text
     assert "actual/cmd=" not in text
     assert "target/cmd=" not in text

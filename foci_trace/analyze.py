@@ -39,6 +39,8 @@ class CurrentAuthorityReport:
     """Near-limit current-authority summary for one motion segment."""
 
     near_limit_samples: int
+    near_limit_sample_coverage: float
+    near_limit_longest_run_s: float
     sign_agreement_samples: int
     actual_to_command_abs_median: float | None
     target_to_command_abs_median: float | None
@@ -560,6 +562,7 @@ def _current_authority_report(
     segment_samples: list[_CriticalObservation],
     segment_details: list[_ControlDetailObservation],
     segment_current_paths: list[_CurrentPathObservation],
+    clock_hz: int,
 ) -> CurrentAuthorityReport | None:
     torque_limit = max((detail.torque_limit for detail in segment_details), default=0)
     if torque_limit <= 0:
@@ -574,6 +577,10 @@ def _current_authority_report(
     if not near_limit_samples:
         return None
     near_limit_timestamps = {sample.timestamp_ticks for sample, _detail in near_limit_samples}
+    near_limit_sample_coverage = len(near_limit_samples) / len(segment_samples)
+    near_limit_longest_run_s = _near_limit_longest_run_s(
+        segment_samples, near_limit_timestamps, clock_hz
+    )
 
     actual_to_command: list[float] = []
     target_to_command: list[float] = []
@@ -622,6 +629,8 @@ def _current_authority_report(
 
     return CurrentAuthorityReport(
         near_limit_samples=len(near_limit_samples),
+        near_limit_sample_coverage=near_limit_sample_coverage,
+        near_limit_longest_run_s=near_limit_longest_run_s,
         sign_agreement_samples=sign_agreement,
         actual_to_command_abs_median=_rounded_median(actual_to_command),
         target_to_command_abs_median=_rounded_median(target_to_command),
@@ -634,6 +643,45 @@ def _current_authority_report(
         adc_i0_delta_range=_optional_range(adc_i0_deltas),
         adc_i1_delta_range=_optional_range(adc_i1_deltas),
     )
+
+
+def _near_limit_longest_run_s(
+    segment_samples: list[_CriticalObservation],
+    near_limit_timestamps: set[int],
+    clock_hz: int,
+) -> float:
+    """Return the longest consecutive near-limit run in seconds."""
+    if clock_hz <= 0:
+        return 0.0
+    longest_start: int | None = None
+    longest_end: int | None = None
+    current_start: int | None = None
+    current_end: int | None = None
+    for sample in segment_samples:
+        if sample.timestamp_ticks in near_limit_timestamps:
+            if current_start is None:
+                current_start = sample.timestamp_ticks
+            current_end = sample.timestamp_ticks
+            continue
+        if current_start is not None and current_end is not None:
+            if (
+                longest_start is None
+                or current_end - current_start > (longest_end or 0) - longest_start
+            ):
+                longest_start = current_start
+                longest_end = current_end
+        current_start = None
+        current_end = None
+    if current_start is not None and current_end is not None:
+        if (
+            longest_start is None
+            or current_end - current_start > (longest_end or 0) - longest_start
+        ):
+            longest_start = current_start
+            longest_end = current_end
+    if longest_start is None or longest_end is None:
+        return 0.0
+    return (longest_end - longest_start) / clock_hz
 
 
 def _finalize_motion_segments(
@@ -668,7 +716,7 @@ def _finalize_motion_segments(
         adc_i0_raw_range = _optional_range([sample.adc_i0_raw for sample in segment_current_paths])
         adc_i1_raw_range = _optional_range([sample.adc_i1_raw for sample in segment_current_paths])
         current_authority = _current_authority_report(
-            segment_samples, segment_details, segment_current_paths
+            segment_samples, segment_details, segment_current_paths, state.clock_hz
         )
         critical_max_gap_s = (
             _max_timestamp_gap_s(
@@ -956,11 +1004,16 @@ def format_summary(reports: list[DeviceReport]) -> str:
             if authority is not None:
                 lines.append(
                     "    authority near_limit={near} sign={sign}/{near} "
+                    "coverage={coverage:.1f}% longest={longest} "
                     "actual/target={actual_target} uq_lim={uq_lim} "
                     "uq_delta={uq_delta} uq/limit={uq_limit} rail={rail}/{near} "
                     "iq/actual={iq_actual} adc0_delta={adc0} adc1_delta={adc1}".format(
                         near=authority.near_limit_samples,
                         sign=authority.sign_agreement_samples,
+                        coverage=authority.near_limit_sample_coverage * 100.0,
+                        longest=_optional_milliseconds_text(
+                            authority.near_limit_longest_run_s
+                        ),
                         actual_target=_optional_ratio_text(authority.actual_to_target_abs_median),
                         uq_lim=_optional_range_text(authority.uq_limited_range),
                         uq_delta=_optional_range_text(authority.uq_delta_range),
