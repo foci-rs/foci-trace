@@ -483,6 +483,54 @@ def test_summarize_capture_reports_current_authority_windows() -> None:
     assert "iq/actual=1.02 adc0_delta=-20..20 adc1_delta=-30..30" in text
 
 
+def test_summarize_capture_flags_sparse_motion_trace_windows() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+
+    clock = 84_000_000
+    critical_samples = [
+        (1, 0, 0),
+        (2, clock // 1000, 10),
+        (3, (clock // 1000) * 51, 500),
+        (4, (clock // 1000) * 52, 510),
+    ]
+    for seq, timestamp, step in critical_samples:
+        payload = _critical_motion_payload(step, step, 100, 1000)
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_CRITICAL, payload, seq, timestamp, 1, 0) + payload,
+        )
+
+    for seq, timestamp in (
+        (5, 0),
+        (6, clock // 1000),
+        (7, (clock // 1000) * 51),
+    ):
+        payload = _control_detail_payload(100, voltage_limit=3000, torque_limit=2816)
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_CONTROL_DETAIL, payload, seq, timestamp, 1, 0) + payload,
+        )
+
+    reports = summarize_capture(
+        io.BytesIO(output.getvalue()),
+        steady_after_s=0,
+        motion_gap_s=0.1,
+        motion_min_steps=5,
+    )
+
+    segment = reports[0].motion_segments[0]
+    assert segment.critical_max_gap_s == 0.05
+    assert segment.control_detail_max_gap_s == 0.05
+    assert segment.trace_gap_suspect
+
+    text = format_summary(reports)
+    assert "trace_gap critical=50.0ms detail=50.0ms current=n/a" in text
+
+
 def test_summarize_capture_does_not_bridge_motion_across_timestamp_gap() -> None:
     output = io.BytesIO()
     writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)

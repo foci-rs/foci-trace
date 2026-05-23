@@ -29,6 +29,9 @@ from .protocol import (
 DEFAULT_CLOCK_HZ = 84_000_000
 DEFAULT_MOTION_GAP_S = 0.08
 DEFAULT_MOTION_MIN_STEPS = 1000
+CRITICAL_GAP_SUSPECT_S = 0.005
+CONTROL_DETAIL_GAP_SUSPECT_S = 0.020
+CURRENT_PATH_GAP_SUSPECT_S = 0.050
 
 
 @dataclass
@@ -60,6 +63,10 @@ class MotionSegmentReport:
     step_delta: int
     critical_samples: int
     control_detail_samples: int
+    critical_max_gap_s: float
+    control_detail_max_gap_s: float | None
+    current_path_max_gap_s: float | None
+    trace_gap_suspect: bool
     fitted_error_rms_steps: float
     fitted_error_peak_steps: float
     actual_torque_range: tuple[int, int]
@@ -500,6 +507,16 @@ def _optional_range(values: list[int | None]) -> tuple[int, int] | None:
     return _range(present) if present else None
 
 
+def _max_timestamp_gap_s(timestamps: list[int], clock_hz: int) -> float | None:
+    if len(timestamps) < 2:
+        return None
+    sorted_timestamps = sorted(timestamps)
+    return max(
+        (sorted_timestamps[idx] - sorted_timestamps[idx - 1]) / clock_hz
+        for idx in range(1, len(sorted_timestamps))
+    )
+
+
 def _nearest_critical(
     samples: list[_CriticalObservation], timestamp_ticks: int
 ) -> _CriticalObservation:
@@ -659,6 +676,29 @@ def _finalize_motion_segments(
         current_authority = _current_authority_report(
             segment_samples, segment_details, segment_current_paths
         )
+        critical_max_gap_s = (
+            _max_timestamp_gap_s(
+                [sample.timestamp_ticks for sample in segment_samples], state.clock_hz
+            )
+            or 0.0
+        )
+        control_detail_max_gap_s = _max_timestamp_gap_s(
+            [sample.timestamp_ticks for sample in segment_details], state.clock_hz
+        )
+        current_path_max_gap_s = _max_timestamp_gap_s(
+            [sample.timestamp_ticks for sample in segment_current_paths], state.clock_hz
+        )
+        trace_gap_suspect = (
+            critical_max_gap_s > CRITICAL_GAP_SUSPECT_S
+            or (
+                control_detail_max_gap_s is not None
+                and control_detail_max_gap_s > CONTROL_DETAIL_GAP_SUSPECT_S
+            )
+            or (
+                current_path_max_gap_s is not None
+                and current_path_max_gap_s > CURRENT_PATH_GAP_SUSPECT_S
+            )
+        )
         accel_offsets = [sample.accel_feedforward_offset for sample in segment_samples]
         accel_gains = [sample.accel_feedforward_gain for sample in segment_samples]
         accel_flags = 0
@@ -695,6 +735,10 @@ def _finalize_motion_segments(
                 step_delta=step_delta,
                 critical_samples=len(segment_samples),
                 control_detail_samples=len(segment_details),
+                critical_max_gap_s=critical_max_gap_s,
+                control_detail_max_gap_s=control_detail_max_gap_s,
+                current_path_max_gap_s=current_path_max_gap_s,
+                trace_gap_suspect=trace_gap_suspect,
                 fitted_error_rms_steps=rms,
                 fitted_error_peak_steps=peak,
                 actual_torque_range=_range(torque_values),
@@ -782,6 +826,12 @@ def _optional_ratio_text(value: float | None) -> str:
     if value is None:
         return "n/a"
     return f"{value:.2f}"
+
+
+def _optional_milliseconds_text(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value * 1000:.1f}ms"
 
 
 def format_summary(reports: list[DeviceReport]) -> str:
@@ -895,6 +945,16 @@ def format_summary(reports: list[DeviceReport]) -> str:
                     flags=segment.accel_feedforward_flags,
                 )
             )
+            if segment.trace_gap_suspect:
+                lines.append(
+                    "    trace_gap critical={critical} detail={detail} current={current}".format(
+                        critical=_optional_milliseconds_text(segment.critical_max_gap_s),
+                        detail=_optional_milliseconds_text(
+                            segment.control_detail_max_gap_s
+                        ),
+                        current=_optional_milliseconds_text(segment.current_path_max_gap_s),
+                    )
+                )
             authority = segment.current_authority
             if authority is not None:
                 lines.append(
