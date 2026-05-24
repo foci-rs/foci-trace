@@ -380,6 +380,79 @@ def test_summarize_capture_reports_motion_segments() -> None:
     assert "accel_ff=-15..15 gain=2000..2000 flags=0x03" in text
 
 
+def test_motion_summary_can_include_phase_split() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+
+    clock = 84_000_000
+    samples = [
+        (1, 0, 0, 0, 500, 2200, 1000),
+        (2, clock * 25 // 1000, 2000, 1800, 600, 2600, 1600),
+        (3, clock * 75 // 1000, 5000, 5100, 700, 500, 1200),
+        (4, clock * 125 // 1000, 8000, 7900, 650, 400, 1000),
+        (5, clock * 175 // 1000, 11000, 10800, -500, -2500, -1800),
+        (6, clock * 225 // 1000, 14000, 13600, -550, -2600, -1700),
+        (7, clock * 300 // 1000, 14000, 13700, 100, 0, 100),
+        (8, clock * 450 // 1000, 14000, 13800, 50, 0, 80),
+    ]
+    for seq, timestamp, step, actual, torque_actual, torque_target, uq_limited in samples:
+        payload = _critical_motion_payload(
+            step,
+            actual,
+            torque_actual=torque_actual,
+            torque_target=torque_target,
+            uq_limited=uq_limited,
+        )
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_CRITICAL, payload, seq, timestamp, 1, 0) + payload,
+        )
+
+    for seq, timestamp in (
+        (9, 0),
+        (10, clock * 75 // 1000),
+        (11, clock * 175 // 1000),
+    ):
+        payload = _control_detail_payload(100, voltage_limit=3000, torque_limit=2816)
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_CONTROL_DETAIL, payload, seq, timestamp, 1, 0) + payload,
+        )
+
+    reports = summarize_capture(
+        io.BytesIO(output.getvalue()),
+        steady_after_s=0,
+        motion_gap_s=0.1,
+        motion_min_steps=1000,
+    )
+
+    segment = reports[0].motion_segments[0]
+    assert [phase.name for phase in segment.phase_reports] == [
+        "entry_0_50ms",
+        "cruise_mid",
+        "exit_last50ms",
+        "post_0_500ms",
+    ]
+    assert segment.phase_reports[0].critical_samples == 2
+    assert segment.phase_reports[1].critical_samples == 2
+    assert segment.phase_reports[2].critical_samples == 2
+    assert segment.phase_reports[3].critical_samples == 2
+
+    default_text = format_summary(reports)
+    assert "phase entry_0_50ms" not in default_text
+
+    phase_text = format_summary(reports, include_phase_split=True)
+    assert "phase entry_0_50ms samples=2" in phase_text
+    assert "phase cruise_mid samples=2" in phase_text
+    assert "phase exit_last50ms samples=2" in phase_text
+    assert "phase post_0_500ms samples=2" in phase_text
+    assert "actual/target=" in phase_text
+    assert "uq/limit=" in phase_text
+
+
 def test_summarize_capture_reports_current_authority_windows() -> None:
     output = io.BytesIO()
     writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)

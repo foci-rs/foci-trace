@@ -32,6 +32,9 @@ DEFAULT_MOTION_MIN_STEPS = 1000
 CRITICAL_GAP_SUSPECT_S = 0.005
 CONTROL_DETAIL_GAP_SUSPECT_S = 0.020
 CURRENT_PATH_GAP_SUSPECT_S = 0.050
+PHASE_EDGE_WINDOW_S = 0.050
+PHASE_POST_WINDOW_S = 0.500
+PHASE_TARGET_MIN_ABS = 100
 
 
 @dataclass
@@ -53,6 +56,24 @@ class CurrentAuthorityReport:
     # Raw ADC movement around the segment median, not calibrated current.
     adc_i0_delta_range: tuple[int, int] | None
     adc_i1_delta_range: tuple[int, int] | None
+
+
+@dataclass
+class MotionPhaseReport:
+    """Phase-focused summary for one motion segment bucket."""
+
+    name: str
+    critical_samples: int
+    fitted_error_rms_steps: float
+    fitted_error_peak_steps: float
+    fitted_error_median_steps: float
+    fitted_error_final_steps: float
+    actual_torque_range: tuple[int, int]
+    torque_target_range: tuple[int, int]
+    actual_to_target_abs_median: float | None
+    uq_to_limit_abs_median: float | None
+    uq_to_limit_abs_peak: float | None
+    voltage_rail_samples: int
 
 
 @dataclass
@@ -88,6 +109,7 @@ class MotionSegmentReport:
     accel_feedforward_offset_range: tuple[int, int]
     accel_feedforward_gain_range: tuple[int, int]
     accel_feedforward_flags: int
+    phase_reports: list[MotionPhaseReport] = field(default_factory=list)
 
 
 @dataclass
@@ -143,6 +165,12 @@ class _ControlDetailObservation:
     torque_command: int
     voltage_limit: int
     torque_limit: int
+
+
+@dataclass(frozen=True)
+class _FittedTransform:
+    slope: float
+    intercept: float
 
 
 @dataclass
@@ -474,31 +502,48 @@ def _motion_groups(
     return groups
 
 
-def _fitted_error_stats(samples: list[_CriticalObservation]) -> tuple[float, float]:
+def _fitted_transform(samples: list[_CriticalObservation]) -> _FittedTransform | None:
     if len(samples) < 2:
-        return 0.0, 0.0
+        return None
     step_values = [sample.step_position for sample in samples]
     actual_values = [sample.tmc_position_actual for sample in samples]
     mean_step = sum(step_values) / len(step_values)
     mean_actual = sum(actual_values) / len(actual_values)
     variance = sum((step - mean_step) ** 2 for step in step_values)
     if variance == 0:
-        return 0.0, 0.0
+        return None
     covariance = sum(
         (step - mean_step) * (actual - mean_actual)
         for step, actual in zip(step_values, actual_values, strict=True)
     )
     slope = covariance / variance
     if abs(slope) < 1e-9:
-        return 0.0, 0.0
+        return None
     intercept = mean_actual - slope * mean_step
-    residuals = [
-        step - ((actual - intercept) / slope)
-        for step, actual in zip(step_values, actual_values, strict=True)
-    ]
+    return _FittedTransform(slope=slope, intercept=intercept)
+
+
+def _fitted_residual(
+    sample: _CriticalObservation, transform: _FittedTransform, command_position: int | None = None
+) -> float:
+    commanded = sample.step_position if command_position is None else command_position
+    return commanded - ((sample.tmc_position_actual - transform.intercept) / transform.slope)
+
+
+def _residual_stats(residuals: list[float]) -> tuple[float, float]:
+    if not residuals:
+        return 0.0, 0.0
     rms = math.sqrt(sum(residual * residual for residual in residuals) / len(residuals))
     peak = max(abs(residual) for residual in residuals)
     return rms, peak
+
+
+def _fitted_error_stats(samples: list[_CriticalObservation]) -> tuple[float, float]:
+    transform = _fitted_transform(samples)
+    if transform is None:
+        return 0.0, 0.0
+    residuals = [_fitted_residual(sample, transform) for sample in samples]
+    return _residual_stats(residuals)
 
 
 def _range(values: list[int]) -> tuple[int, int]:
@@ -684,6 +729,107 @@ def _near_limit_longest_run_s(
     return (longest_end - longest_start) / clock_hz
 
 
+def _motion_phase_reports(
+    observations: list[_CriticalObservation],
+    segment_samples: list[_CriticalObservation],
+    transform: _FittedTransform | None,
+    clock_hz: int,
+    voltage_limit: int,
+    next_segment_start_tick: int | None,
+) -> list[MotionPhaseReport]:
+    if transform is None or clock_hz <= 0:
+        return []
+    start_tick = segment_samples[0].timestamp_ticks
+    end_tick = segment_samples[-1].timestamp_ticks
+    edge_ticks = int(PHASE_EDGE_WINDOW_S * clock_hz)
+    post_ticks = int(PHASE_POST_WINDOW_S * clock_hz)
+    split_specs = [
+        (
+            "entry_0_50ms",
+            segment_samples,
+            start_tick,
+            min(end_tick, start_tick + edge_ticks),
+            None,
+            False,
+        ),
+        (
+            "cruise_mid",
+            segment_samples,
+            min(end_tick, start_tick + edge_ticks),
+            max(start_tick, end_tick - edge_ticks),
+            None,
+            False,
+        ),
+        (
+            "exit_last50ms",
+            segment_samples,
+            max(start_tick, end_tick - edge_ticks),
+            end_tick,
+            None,
+            True,
+        ),
+    ]
+    post_end_tick = end_tick + post_ticks
+    if next_segment_start_tick is not None:
+        post_end_tick = min(post_end_tick, next_segment_start_tick - 1)
+    split_specs.append(
+        (
+            "post_0_500ms",
+            observations,
+            end_tick + 1,
+            post_end_tick,
+            segment_samples[-1].step_position,
+            True,
+        )
+    )
+
+    reports: list[MotionPhaseReport] = []
+    for name, source_samples, start, end, command_position, include_end in split_specs:
+        if end < start:
+            continue
+        if include_end:
+            samples = [
+                sample for sample in source_samples if start <= sample.timestamp_ticks <= end
+            ]
+        else:
+            samples = [sample for sample in source_samples if start <= sample.timestamp_ticks < end]
+        if not samples:
+            continue
+        residuals = [_fitted_residual(sample, transform, command_position) for sample in samples]
+        rms, peak = _residual_stats(residuals)
+        actual_to_target = [
+            abs(sample.actual_torque) / abs(sample.torque_target)
+            for sample in samples
+            if abs(sample.torque_target) >= PHASE_TARGET_MIN_ABS
+        ]
+        uq_to_limit = [
+            abs(sample.uq_limited) / voltage_limit for sample in samples if voltage_limit > 0
+        ]
+        voltage_threshold = int(voltage_limit * 0.98)
+        voltage_rail_samples = (
+            sum(abs(sample.uq_limited) >= voltage_threshold for sample in samples)
+            if voltage_threshold > 0
+            else 0
+        )
+        reports.append(
+            MotionPhaseReport(
+                name=name,
+                critical_samples=len(samples),
+                fitted_error_rms_steps=rms,
+                fitted_error_peak_steps=peak,
+                fitted_error_median_steps=median(residuals),
+                fitted_error_final_steps=residuals[-1],
+                actual_torque_range=_range([sample.actual_torque for sample in samples]),
+                torque_target_range=_range([sample.torque_target for sample in samples]),
+                actual_to_target_abs_median=_rounded_median(actual_to_target),
+                uq_to_limit_abs_median=_rounded_median(uq_to_limit),
+                uq_to_limit_abs_peak=max(uq_to_limit) if uq_to_limit else None,
+                voltage_rail_samples=voltage_rail_samples,
+            )
+        )
+    return reports
+
+
 def _finalize_motion_segments(
     state: _DeviceState, motion_gap_s: float, motion_min_steps: int
 ) -> None:
@@ -692,9 +838,8 @@ def _finalize_motion_segments(
         state.current_path_observations, key=lambda sample: sample.timestamp_ticks
     )
     details = sorted(state.control_detail_observations, key=lambda sample: sample.timestamp_ticks)
-    for segment_index, (start_idx, end_idx) in enumerate(
-        _motion_groups(observations, state.clock_hz, motion_gap_s, motion_min_steps)
-    ):
+    groups = _motion_groups(observations, state.clock_hz, motion_gap_s, motion_min_steps)
+    for segment_index, (start_idx, end_idx) in enumerate(groups):
         segment_samples = observations[start_idx : end_idx + 1]
         start_tick = segment_samples[0].timestamp_ticks
         end_tick = segment_samples[-1].timestamp_ticks
@@ -769,6 +914,20 @@ def _finalize_motion_segments(
             for detail in saturated_details
             if detail.torque_command != 0
         ]
+        next_start_tick = (
+            observations[groups[segment_index + 1][0]].timestamp_ticks
+            if segment_index + 1 < len(groups)
+            else None
+        )
+        transform = _fitted_transform(segment_samples)
+        phase_reports = _motion_phase_reports(
+            observations,
+            segment_samples,
+            transform,
+            state.clock_hz,
+            voltage_limit,
+            next_start_tick,
+        )
         state.report.motion_segments.append(
             MotionSegmentReport(
                 segment_index=segment_index,
@@ -800,6 +959,7 @@ def _finalize_motion_segments(
                 accel_feedforward_offset_range=_range(accel_offsets),
                 accel_feedforward_gain_range=_range(accel_gains),
                 accel_feedforward_flags=accel_flags,
+                phase_reports=phase_reports,
             )
         )
 
@@ -877,7 +1037,7 @@ def _optional_milliseconds_text(value: float | None) -> str:
     return f"{value * 1000:.1f}ms"
 
 
-def format_summary(reports: list[DeviceReport]) -> str:
+def format_summary(reports: list[DeviceReport], *, include_phase_split: bool = False) -> str:
     """Format capture summaries for operator review."""
     lines: list[str] = []
     for report in reports:
@@ -1011,9 +1171,7 @@ def format_summary(reports: list[DeviceReport]) -> str:
                         near=authority.near_limit_samples,
                         sign=authority.sign_agreement_samples,
                         coverage=authority.near_limit_sample_coverage * 100.0,
-                        longest=_optional_milliseconds_text(
-                            authority.near_limit_longest_run_s
-                        ),
+                        longest=_optional_milliseconds_text(authority.near_limit_longest_run_s),
                         actual_target=_optional_ratio_text(authority.actual_to_target_abs_median),
                         uq_lim=_optional_range_text(authority.uq_limited_range),
                         uq_delta=_optional_range_text(authority.uq_delta_range),
@@ -1024,6 +1182,32 @@ def format_summary(reports: list[DeviceReport]) -> str:
                         adc1=_optional_range_text(authority.adc_i1_delta_range),
                     )
                 )
+            if include_phase_split:
+                for phase in segment.phase_reports:
+                    lines.append(
+                        "    phase {name} samples={samples} "
+                        "fit_rms={rms:.1f} fit_peak={peak:.1f} "
+                        "residual_med={median:.1f} residual_final={final:.1f} "
+                        "torque={torque_lo}..{torque_hi} "
+                        "torque_target={target_lo}..{target_hi} "
+                        "actual/target={actual_target} "
+                        "uq/limit={uq_median}..{uq_peak} rail={rail}/{samples}".format(
+                            name=phase.name,
+                            samples=phase.critical_samples,
+                            rms=phase.fitted_error_rms_steps,
+                            peak=phase.fitted_error_peak_steps,
+                            median=phase.fitted_error_median_steps,
+                            final=phase.fitted_error_final_steps,
+                            torque_lo=phase.actual_torque_range[0],
+                            torque_hi=phase.actual_torque_range[1],
+                            target_lo=phase.torque_target_range[0],
+                            target_hi=phase.torque_target_range[1],
+                            actual_target=_optional_ratio_text(phase.actual_to_target_abs_median),
+                            uq_median=_optional_ratio_text(phase.uq_to_limit_abs_median),
+                            uq_peak=_optional_ratio_text(phase.uq_to_limit_abs_peak),
+                            rail=phase.voltage_rail_samples,
+                        )
+                    )
     return "\n".join(lines)
 
 
@@ -1034,6 +1218,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--steady-after-s", type=float, default=10.0)
     parser.add_argument("--motion-gap-s", type=float, default=DEFAULT_MOTION_GAP_S)
     parser.add_argument("--motion-min-steps", type=int, default=DEFAULT_MOTION_MIN_STEPS)
+    parser.add_argument(
+        "--phase-split",
+        action="store_true",
+        help="include entry/cruise/exit/post-move phase metrics for motion segments",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -1047,7 +1236,7 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(f"failed to read {args.capture}: {exc}", file=sys.stderr)
         return 2
-    print(format_summary(reports))
+    print(format_summary(reports, include_phase_split=args.phase_split))
     return 0
 
 
