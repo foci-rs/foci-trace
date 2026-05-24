@@ -175,6 +175,48 @@ def _critical_motion_payload(
     return payload + struct.pack("<iHBB", accel_offset, accel_gain, accel_flags, 0)
 
 
+def _critical_payload_v4(
+    *,
+    step_position: int,
+    tmc_position_actual: int,
+    torque_actual: int,
+    torque_target: int,
+    target_velocity: int,
+    cached_velocity_offset: int,
+    foc_uq_ud: int,
+    foc_uq_ud_limited: int,
+    foc_iq_id: int,
+    accel_offset: int,
+    accel_gain: int,
+    accel_flags: int,
+) -> bytes:
+    payload = struct.pack(
+        "<iiiiiiiBBHIiQQIIIII",
+        step_position,
+        tmc_position_actual,
+        step_position - tmc_position_actual,
+        target_velocity,
+        20,
+        cached_velocity_offset,
+        10,
+        0x80,
+        0,
+        3,
+        7,
+        -5,
+        1,
+        2,
+        0,
+        0,
+        _pack_i16_pair(torque_actual, torque_target),
+        foc_uq_ud,
+        foc_uq_ud_limited,
+    )
+    payload += struct.pack("<iHBB", accel_offset, accel_gain, accel_flags, 0)
+    payload += struct.pack("<III", foc_iq_id, _pack_i16_pair(0, 0), _pack_u16_pair(32000, 32100))
+    return payload
+
+
 def _control_detail_payload(torque_cmd: int, voltage_limit: int, torque_limit: int) -> bytes:
     return struct.pack(
         "<IIIIIII",
@@ -451,6 +493,164 @@ def test_motion_summary_can_include_phase_split() -> None:
     assert "phase post_0_500ms samples=2" in phase_text
     assert "actual/target=" in phase_text
     assert "uq/limit=" in phase_text
+
+
+def test_motion_summary_can_include_feedforward_audit() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+
+    clock = 84_000_000
+    detail = _control_detail_payload(1200, voltage_limit=29000, torque_limit=2816)
+    writer.write_firmware_frame(
+        0,
+        0,
+        _header(FRAME_TYPE_CONTROL_DETAIL, detail, 1, 0, 1, 0) + detail,
+    )
+
+    samples = [
+        (2, 0, 0, 0, 400, 800, 600, 540, 18000, 17000, 300, 0x03),
+        (3, clock * 20 // 1000, 600, 580, 300, 700, 500, 450, 15000, 14000, 280, 0x03),
+        (4, clock * 60 // 1000, 1200, 1188, 80, 100, 80, 70, 4000, 3900, 0, 0x01),
+        (
+            5,
+            clock * 120 // 1000,
+            1800,
+            1790,
+            -350,
+            -850,
+            -600,
+            -540,
+            -16000,
+            -15000,
+            -260,
+            0x03,
+        ),
+        (
+            6,
+            clock * 160 // 1000,
+            2400,
+            2410,
+            -420,
+            -900,
+            -650,
+            -580,
+            -18000,
+            -17000,
+            -320,
+            0x03,
+        ),
+        (7, clock * 180 // 1000, 2400, 2415, 20, 0, 0, 0, 100, 80, 0, 0x00),
+        (8, clock * 260 // 1000, 2400, 2412, 0, 0, 0, 0, 0, 0, 0, 0x00),
+    ]
+    for (
+        seq,
+        timestamp,
+        step,
+        actual,
+        torque_actual,
+        torque_target,
+        target_velocity,
+        velocity_ff,
+        uq,
+        uq_limited,
+        accel,
+        flags,
+    ) in samples:
+        payload = _critical_payload_v4(
+            step_position=step,
+            tmc_position_actual=actual,
+            torque_actual=torque_actual,
+            torque_target=torque_target,
+            target_velocity=target_velocity,
+            cached_velocity_offset=velocity_ff,
+            foc_uq_ud=_pack_i16_pair(0, uq),
+            foc_uq_ud_limited=_pack_i16_pair(0, uq_limited),
+            foc_iq_id=_pack_i16_pair(0, torque_actual),
+            accel_offset=accel,
+            accel_gain=500 if accel else 0,
+            accel_flags=flags,
+        )
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_CRITICAL, payload, seq, timestamp, 1, 0, version=4) + payload,
+        )
+
+    reports = summarize_capture(
+        io.BytesIO(output.getvalue()),
+        steady_after_s=0,
+        motion_gap_s=0.1,
+        motion_min_steps=100,
+    )
+    text = format_summary(reports, include_phase_split=True, include_feedforward_audit=True)
+
+    assert "ff_audit" in text
+    assert "accel_ff=280..300" in text
+    assert "accel_sign=2/2" in text
+    assert "velocity_ff=450..540" in text
+    assert "velocity_sign=2/2" in text
+    assert "iq/torque=" in text
+    assert "post_discriminator=settling_possible" in text
+
+
+def test_feedforward_audit_uses_separate_current_path_frames() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+
+    clock = 84_000_000
+    for seq, timestamp, step, torque_actual in (
+        (1, 0, 0, 400),
+        (2, clock * 20 // 1000, 400, 300),
+        (3, clock * 60 // 1000, 800, 100),
+        (4, clock * 120 // 1000, 1200, 100),
+    ):
+        payload = _critical_motion_payload(
+            step,
+            step,
+            torque_actual=torque_actual,
+            torque_target=800,
+            uq_limited=1000,
+        )
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_CRITICAL, payload, seq, timestamp, 1, 0) + payload,
+        )
+
+    for seq, timestamp, torque_current in (
+        (5, 0, 800),
+        (6, clock * 20 // 1000, 600),
+    ):
+        payload = _current_path_payload(
+            _pack_i16_pair(0, torque_current),
+            _pack_i16_pair(0, 0),
+            _pack_u16_pair(32000, 32100),
+        )
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_CURRENT_PATH, payload, seq, timestamp, 1, 0) + payload,
+        )
+
+    detail = _control_detail_payload(1200, voltage_limit=29000, torque_limit=2816)
+    writer.write_firmware_frame(
+        0,
+        0,
+        _header(FRAME_TYPE_CONTROL_DETAIL, detail, 7, 0, 1, 0) + detail,
+    )
+
+    reports = summarize_capture(
+        io.BytesIO(output.getvalue()),
+        steady_after_s=0,
+        motion_gap_s=0.1,
+        motion_min_steps=100,
+    )
+    text = format_summary(reports, include_phase_split=True, include_feedforward_audit=True)
+
+    assert "phase entry_0_50ms" in text
+    assert "iq/torque=2.00" in text
 
 
 def test_summarize_capture_reports_current_authority_windows() -> None:

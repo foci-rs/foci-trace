@@ -74,6 +74,18 @@ class MotionPhaseReport:
     uq_to_limit_abs_median: float | None
     uq_to_limit_abs_peak: float | None
     voltage_rail_samples: int
+    accel_feedforward_offset_range: tuple[int, int]
+    accel_feedforward_nonzero_samples: int
+    accel_feedforward_sign_agreement_samples: int
+    accel_feedforward_sign_comparable_samples: int
+    velocity_feedforward_offset_range: tuple[int, int]
+    velocity_feedforward_nonzero_samples: int
+    velocity_feedforward_sign_agreement_samples: int
+    velocity_feedforward_sign_comparable_samples: int
+    target_velocity_range: tuple[int, int]
+    iq_to_actual_abs_median: float | None
+    uq_limited_range: tuple[int, int]
+    post_discriminator: str | None = None
 
 
 @dataclass
@@ -146,6 +158,10 @@ class _CriticalObservation:
     accel_feedforward_offset: int
     accel_feedforward_gain: int
     accel_feedforward_flags: int
+    foc_iq: int | None
+    foc_id: int | None
+    target_velocity: int
+    cached_velocity_offset: int
 
 
 @dataclass(frozen=True)
@@ -285,6 +301,8 @@ def _observe_critical(
 ) -> None:
     actual_flux: int | None = None
     torque_target: int | None = None
+    foc_iq: int | None = None
+    foc_id: int | None = None
     if "interim_pid_torque_target_actual" in payload:
         actual_torque, torque_target = _split_i16_pair(
             int(payload["interim_pid_torque_target_actual"])
@@ -321,6 +339,10 @@ def _observe_critical(
             accel_feedforward_offset=int(payload["cached_accel_torque_offset"]),
             accel_feedforward_gain=int(payload["accel_feedforward_gain_permille"]),
             accel_feedforward_flags=int(payload["accel_feedforward_flags"]),
+            foc_iq=foc_iq,
+            foc_id=foc_id,
+            target_velocity=int(payload["target_velocity"]),
+            cached_velocity_offset=int(payload["cached_pid_velocity_offset"]),
         )
     )
     if _relative_seconds(state, timestamp_ticks) < steady_after_s:
@@ -591,6 +613,23 @@ def _sign_matches(left: int, right: int) -> bool:
     return (left < 0 and right < 0) or (left > 0 and right > 0) or (left == 0 and right == 0)
 
 
+def _same_nonzero_sign(left: int, right: int) -> bool:
+    return (left < 0 and right < 0) or (left > 0 and right > 0)
+
+
+def _post_move_discriminator(samples: list[_CriticalObservation]) -> str | None:
+    if not samples:
+        return None
+    active_torque = [
+        sample
+        for sample in samples
+        if abs(sample.actual_torque) >= PHASE_TARGET_MIN_ABS or abs(sample.uq_limited) >= 500
+    ]
+    if active_torque:
+        return "loop_active"
+    return "settling_possible"
+
+
 def _rounded_median(values: list[float]) -> float | None:
     if not values:
         return None
@@ -731,6 +770,7 @@ def _near_limit_longest_run_s(
 
 def _motion_phase_reports(
     observations: list[_CriticalObservation],
+    current_paths: list[_CurrentPathObservation],
     segment_samples: list[_CriticalObservation],
     transform: _FittedTransform | None,
     clock_hz: int,
@@ -791,8 +831,14 @@ def _motion_phase_reports(
             samples = [
                 sample for sample in source_samples if start <= sample.timestamp_ticks <= end
             ]
+            phase_current_paths = [
+                sample for sample in current_paths if start <= sample.timestamp_ticks <= end
+            ]
         else:
             samples = [sample for sample in source_samples if start <= sample.timestamp_ticks < end]
+            phase_current_paths = [
+                sample for sample in current_paths if start <= sample.timestamp_ticks < end
+            ]
         if not samples:
             continue
         residuals = [_fitted_residual(sample, transform, command_position) for sample in samples]
@@ -811,6 +857,39 @@ def _motion_phase_reports(
             if voltage_threshold > 0
             else 0
         )
+        accel_offsets = [sample.accel_feedforward_offset for sample in samples]
+        nonzero_offsets = [offset for offset in accel_offsets if offset != 0]
+        accel_sign_candidates = [
+            sample
+            for sample in samples
+            if sample.accel_feedforward_offset != 0 and sample.torque_target != 0
+        ]
+        accel_sign_agreement = sum(
+            _same_nonzero_sign(sample.accel_feedforward_offset, sample.torque_target)
+            for sample in accel_sign_candidates
+        )
+        velocity_offsets = [sample.cached_velocity_offset for sample in samples]
+        nonzero_velocity_offsets = [offset for offset in velocity_offsets if offset != 0]
+        velocity_sign_candidates = [
+            sample
+            for sample in samples
+            if sample.cached_velocity_offset != 0 and sample.target_velocity != 0
+        ]
+        velocity_sign_agreement = sum(
+            _same_nonzero_sign(sample.cached_velocity_offset, sample.target_velocity)
+            for sample in velocity_sign_candidates
+        )
+        iq_to_actual = [
+            abs(sample.foc_iq) / abs(sample.actual_torque)
+            for sample in samples
+            if sample.foc_iq is not None and sample.actual_torque != 0
+        ]
+        if not iq_to_actual:
+            for current_path in phase_current_paths:
+                critical = _nearest_critical(samples, current_path.timestamp_ticks)
+                if critical.actual_torque != 0:
+                    iq_to_actual.append(abs(current_path.foc_iq) / abs(critical.actual_torque))
+        post_discriminator = _post_move_discriminator(samples) if name == "post_0_500ms" else None
         reports.append(
             MotionPhaseReport(
                 name=name,
@@ -825,6 +904,18 @@ def _motion_phase_reports(
                 uq_to_limit_abs_median=_rounded_median(uq_to_limit),
                 uq_to_limit_abs_peak=max(uq_to_limit) if uq_to_limit else None,
                 voltage_rail_samples=voltage_rail_samples,
+                accel_feedforward_offset_range=_range(accel_offsets),
+                accel_feedforward_nonzero_samples=len(nonzero_offsets),
+                accel_feedforward_sign_agreement_samples=accel_sign_agreement,
+                accel_feedforward_sign_comparable_samples=len(accel_sign_candidates),
+                velocity_feedforward_offset_range=_range(velocity_offsets),
+                velocity_feedforward_nonzero_samples=len(nonzero_velocity_offsets),
+                velocity_feedforward_sign_agreement_samples=velocity_sign_agreement,
+                velocity_feedforward_sign_comparable_samples=len(velocity_sign_candidates),
+                target_velocity_range=_range([sample.target_velocity for sample in samples]),
+                iq_to_actual_abs_median=_rounded_median(iq_to_actual),
+                uq_limited_range=_range([sample.uq_limited for sample in samples]),
+                post_discriminator=post_discriminator,
             )
         )
     return reports
@@ -922,6 +1013,7 @@ def _finalize_motion_segments(
         transform = _fitted_transform(segment_samples)
         phase_reports = _motion_phase_reports(
             observations,
+            current_paths,
             segment_samples,
             transform,
             state.clock_hz,
@@ -1037,7 +1129,12 @@ def _optional_milliseconds_text(value: float | None) -> str:
     return f"{value * 1000:.1f}ms"
 
 
-def format_summary(reports: list[DeviceReport], *, include_phase_split: bool = False) -> str:
+def format_summary(
+    reports: list[DeviceReport],
+    *,
+    include_phase_split: bool = False,
+    include_feedforward_audit: bool = False,
+) -> str:
     """Format capture summaries for operator review."""
     lines: list[str] = []
     for report in reports:
@@ -1208,6 +1305,32 @@ def format_summary(reports: list[DeviceReport], *, include_phase_split: bool = F
                             rail=phase.voltage_rail_samples,
                         )
                     )
+                    if include_feedforward_audit:
+                        lines.append(
+                            "      ff_audit accel_ff={accel_lo}..{accel_hi} "
+                            "nonzero={nonzero}/{samples} accel_sign={sign}/{sign_total} "
+                            "velocity_ff={vel_lo}..{vel_hi} "
+                            "velocity_nonzero={vel_nonzero}/{samples} "
+                            "velocity_sign={vel_sign}/{vel_sign_total} "
+                            "iq/torque={iq_actual} uq_limited={uq_lo}..{uq_hi} "
+                            "post_discriminator={discriminator}".format(
+                                accel_lo=phase.accel_feedforward_offset_range[0],
+                                accel_hi=phase.accel_feedforward_offset_range[1],
+                                nonzero=phase.accel_feedforward_nonzero_samples,
+                                samples=phase.critical_samples,
+                                sign=phase.accel_feedforward_sign_agreement_samples,
+                                sign_total=phase.accel_feedforward_sign_comparable_samples,
+                                vel_lo=phase.velocity_feedforward_offset_range[0],
+                                vel_hi=phase.velocity_feedforward_offset_range[1],
+                                vel_nonzero=phase.velocity_feedforward_nonzero_samples,
+                                vel_sign=phase.velocity_feedforward_sign_agreement_samples,
+                                vel_sign_total=phase.velocity_feedforward_sign_comparable_samples,
+                                iq_actual=_optional_ratio_text(phase.iq_to_actual_abs_median),
+                                uq_lo=phase.uq_limited_range[0],
+                                uq_hi=phase.uq_limited_range[1],
+                                discriminator=phase.post_discriminator or "n/a",
+                            )
+                        )
     return "\n".join(lines)
 
 
@@ -1223,6 +1346,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="include entry/cruise/exit/post-move phase metrics for motion segments",
     )
+    parser.add_argument(
+        "--feedforward-audit",
+        action="store_true",
+        help="include feedforward sign/current-path discriminator lines with phase metrics",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -1236,7 +1364,13 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(f"failed to read {args.capture}: {exc}", file=sys.stderr)
         return 2
-    print(format_summary(reports, include_phase_split=args.phase_split))
+    print(
+        format_summary(
+            reports,
+            include_phase_split=args.phase_split,
+            include_feedforward_audit=args.feedforward_audit,
+        )
+    )
     return 0
 
 
