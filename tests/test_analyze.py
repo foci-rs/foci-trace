@@ -772,12 +772,13 @@ def test_analyze_capture_preserves_existing_summary_api() -> None:
         _header(FRAME_TYPE_CRITICAL, payload, 1, 84_000, 1, 0) + payload,
     )
 
-    from foci_trace.analyze import analyze_capture
+    from foci_trace.analyze import analyze_capture, format_analysis
 
     analysis = analyze_capture(io.BytesIO(output.getvalue()), steady_after_s=0)
 
     assert analysis.devices[0].serial == "ABC"
     assert analysis.contour_segments == []
+    assert "contour_mapping" not in format_analysis(analysis, include_contour=True)
     assert summarize_capture(io.BytesIO(output.getvalue()), steady_after_s=0)[0].serial == "ABC"
 
 
@@ -826,7 +827,9 @@ def test_contour_analysis_reports_along_and_cross_error() -> None:
     assert segment.classification == "along_path_lag"
     assert segment.along_rms > 0
     assert segment.cross_rms == 0
-    assert "contour0" in format_analysis(analysis, include_contour=True)
+    text = format_analysis(analysis, include_contour=True)
+    assert "contour_mapping plus=PLUS minus=MINUS" in text
+    assert "contour0" in text
 
 
 def test_contour_analysis_uses_existing_post_phase_discriminator() -> None:
@@ -1130,3 +1133,65 @@ def test_summarize_capture_does_not_bridge_motion_across_timestamp_gap() -> None
 
     assert reports[0].missing_frames == 249998
     assert reports[0].motion_segments == []
+
+
+def test_main_requires_both_corexy_mapping_arguments(tmp_path, capsys) -> None:
+    capture_path = tmp_path / "empty.bin"
+    with capture_path.open("wb") as output:
+        CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+
+    from foci_trace.analyze import main
+
+    rc = main([str(capture_path), "--contour-analysis", "--corexy-plus", "PLUS"])
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "both --corexy-plus and --corexy-minus are required" in captured.err
+
+
+def test_main_reports_missing_corexy_selector_without_traceback(tmp_path, capsys) -> None:
+    capture_path = tmp_path / "capture.bin"
+    with capture_path.open("wb") as output:
+        writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+        writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+
+    from foci_trace.analyze import main
+
+    rc = main(
+        [
+            str(capture_path),
+            "--contour-analysis",
+            "--corexy-plus",
+            "NOPE",
+            "--corexy-minus",
+            "ABC",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "no trace device matches 'NOPE'" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_main_ignores_corexy_mapping_arguments_without_contour_analysis(tmp_path, capsys) -> None:
+    capture_path = tmp_path / "capture.bin"
+    with capture_path.open("wb") as output:
+        writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+        writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+
+    from foci_trace.analyze import main
+
+    rc = main(
+        [
+            str(capture_path),
+            "--corexy-plus",
+            "NOPE",
+            "--corexy-minus",
+            "MISSING",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "dev0 1-50 FOCI OpenFFBoard (trace) serial=ABC" in captured.out

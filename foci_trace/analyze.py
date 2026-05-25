@@ -160,6 +160,8 @@ class CaptureAnalysis:
 
     devices: list[DeviceReport]
     contour_segments: list[ContourSegmentReport] = field(default_factory=list)
+    corexy_plus: str | None = None
+    corexy_minus: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1245,6 +1247,8 @@ def analyze_capture(
     return CaptureAnalysis(
         devices=[states[index].report for index in sorted(states)],
         contour_segments=contour_segments,
+        corexy_plus=corexy_plus,
+        corexy_minus=corexy_minus,
     )
 
 
@@ -1504,6 +1508,8 @@ def format_analysis(
     if not include_contour:
         return text
     lines = [text] if text else []
+    if analysis.corexy_plus is not None and analysis.corexy_minus is not None:
+        lines.append(f"contour_mapping plus={analysis.corexy_plus} minus={analysis.corexy_minus}")
     for segment in analysis.contour_segments:
         lines.append(
             "contour{idx} samples={samples} duration={duration:.3f}s "
@@ -1547,24 +1553,52 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="include feedforward sign/current-path discriminator lines with phase metrics",
     )
-    args = parser.parse_args(argv)
+    parser.add_argument(
+        "--contour-analysis",
+        action="store_true",
+        help="include CoreXY along-path and cross-path contour metrics",
+    )
+    parser.add_argument("--corexy-plus", help="trace device selector for the X+Y motor")
+    parser.add_argument("--corexy-minus", help="trace device selector for the X-Y motor")
+    parser.add_argument(
+        "--contour-pair-tolerance-ms",
+        type=float,
+        default=5.0,
+        help="maximum host receive timestamp delta for paired contour samples",
+    )
+
+    try:
+        args = parser.parse_args(argv)
+        if args.contour_analysis and (args.corexy_plus is None or args.corexy_minus is None):
+            parser.error("both --corexy-plus and --corexy-minus are required")
+    except SystemExit as exc:
+        return int(exc.code)
 
     try:
         with open(args.capture, "rb") as source:
-            reports = summarize_capture(
+            analysis = analyze_capture(
                 source,
                 steady_after_s=args.steady_after_s,
                 motion_gap_s=args.motion_gap_s,
                 motion_min_steps=args.motion_min_steps,
+                corexy_plus=args.corexy_plus if args.contour_analysis else None,
+                corexy_minus=args.corexy_minus if args.contour_analysis else None,
+                contour_pair_tolerance_ms=args.contour_pair_tolerance_ms,
             )
     except OSError as exc:
         print(f"failed to read {args.capture}: {exc}", file=sys.stderr)
         return 2
+    except ValueError as exc:
+        try:
+            parser.error(str(exc))
+        except SystemExit as parser_exc:
+            return int(parser_exc.code)
     print(
-        format_summary(
-            reports,
+        format_analysis(
+            analysis,
             include_phase_split=args.phase_split,
             include_feedforward_audit=args.feedforward_audit,
+            include_contour=args.contour_analysis,
         )
     )
     return 0
