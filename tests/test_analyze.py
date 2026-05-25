@@ -781,6 +781,227 @@ def test_analyze_capture_preserves_existing_summary_api() -> None:
     assert summarize_capture(io.BytesIO(output.getvalue()), steady_after_s=0)[0].serial == "ABC"
 
 
+def test_contour_analysis_reports_along_and_cross_error() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    plus_serial = "PLUS"
+    minus_serial = "MINUS"
+    writer.write_device_table(0, 100, "1-1", "FOCI OpenFFBoard (trace)", plus_serial, b"")
+    writer.write_device_table(1, 100, "1-2", "FOCI OpenFFBoard (trace)", minus_serial, b"")
+    clock = 84_000_000
+
+    samples = [
+        (0, 0, 0, 0),
+        (clock // 1000, 1000, 950, 950),
+        ((clock // 1000) * 2, 2000, 1900, 1900),
+    ]
+    for seq, (timestamp, commanded, actual_plus, actual_minus) in enumerate(samples, 1):
+        plus_payload = _critical_motion_payload(commanded, actual_plus, 100, 1000)
+        minus_payload = _critical_motion_payload(commanded, actual_minus, 100, 1000)
+        writer.write_firmware_frame(
+            0,
+            10_000 + seq * 1_000,
+            _header(FRAME_TYPE_CRITICAL, plus_payload, seq, timestamp, 1, 0) + plus_payload,
+        )
+        writer.write_firmware_frame(
+            1,
+            10_050 + seq * 1_000,
+            _header(FRAME_TYPE_CRITICAL, minus_payload, seq, timestamp, 1, 0) + minus_payload,
+        )
+
+    from foci_trace.analyze import analyze_capture, format_analysis
+
+    analysis = analyze_capture(
+        io.BytesIO(output.getvalue()),
+        steady_after_s=0,
+        motion_gap_s=0.01,
+        motion_min_steps=100,
+        corexy_plus=plus_serial,
+        corexy_minus=minus_serial,
+        contour_pair_tolerance_ms=1.0,
+    )
+
+    assert len(analysis.contour_segments) == 1
+    segment = analysis.contour_segments[0]
+    assert segment.classification == "along_path_lag"
+    assert segment.along_rms > 0
+    assert segment.cross_rms == 0
+    assert "contour0" in format_analysis(analysis, include_contour=True)
+
+
+def test_contour_analysis_uses_existing_post_phase_discriminator() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    plus_serial = "PLUS"
+    minus_serial = "MINUS"
+    writer.write_device_table(0, 100, "1-1", "FOCI OpenFFBoard (trace)", plus_serial, b"")
+    writer.write_device_table(1, 100, "1-2", "FOCI OpenFFBoard (trace)", minus_serial, b"")
+    clock = 84_000_000
+
+    paired_samples = [
+        (1, 0, 0, 0, 11_000, 11_050),
+        (2, clock // 1000, 1000, 950, 12_000, 12_050),
+        (3, (clock // 1000) * 2, 2000, 1900, 13_000, 13_050),
+    ]
+    for seq, timestamp, commanded, actual, plus_host_ns, minus_host_ns in paired_samples:
+        plus_payload = _critical_motion_payload(commanded, actual, 100, 1000)
+        minus_payload = _critical_motion_payload(commanded, actual, 100, 1000)
+        writer.write_firmware_frame(
+            0,
+            plus_host_ns,
+            _header(FRAME_TYPE_CRITICAL, plus_payload, seq, timestamp, 1, 0) + plus_payload,
+        )
+        writer.write_firmware_frame(
+            1,
+            minus_host_ns,
+            _header(FRAME_TYPE_CRITICAL, minus_payload, seq, timestamp, 1, 0) + minus_payload,
+        )
+
+    plus_post = _critical_motion_payload(
+        2000,
+        1900,
+        torque_actual=150,
+        torque_target=150,
+        uq_limited=0,
+    )
+    writer.write_firmware_frame(
+        0,
+        1_000,
+        _header(FRAME_TYPE_CRITICAL, plus_post, 4, (clock // 1000) * 3, 1, 0) + plus_post,
+    )
+
+    from foci_trace.analyze import analyze_capture
+
+    analysis = analyze_capture(
+        io.BytesIO(output.getvalue()),
+        steady_after_s=0,
+        motion_gap_s=0.1,
+        motion_min_steps=100,
+        corexy_plus=plus_serial,
+        corexy_minus=minus_serial,
+        contour_pair_tolerance_ms=1.0,
+    )
+
+    phase_reports = analysis.devices[0].motion_segments[0].phase_reports
+    assert any(phase.post_discriminator == "loop_active" for phase in phase_reports)
+    assert analysis.contour_segments[0].classification == "endpoint_loop_active"
+
+
+def test_contour_analysis_applies_post_discriminator_per_segment() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    plus_serial = "PLUS"
+    minus_serial = "MINUS"
+    writer.write_device_table(0, 100, "1-1", "FOCI OpenFFBoard (trace)", plus_serial, b"")
+    writer.write_device_table(1, 100, "1-2", "FOCI OpenFFBoard (trace)", minus_serial, b"")
+    clock = 84_000_000
+
+    paired_samples = [
+        (1, 0, 0, 0, 10_000, 10_050),
+        (2, clock // 1000, 1000, 950, 11_000, 11_050),
+        (3, (clock // 1000) * 2, 2000, 1900, 12_000, 12_050),
+        (4, (clock // 1000) * 120, 4000, 3950, 120_000_000, 120_000_050),
+        (5, (clock // 1000) * 121, 5000, 4900, 120_001_000, 120_001_050),
+        (6, (clock // 1000) * 122, 6000, 5850, 120_002_000, 120_002_050),
+    ]
+    for seq, timestamp, commanded, actual, plus_host_ns, minus_host_ns in paired_samples:
+        plus_payload = _critical_motion_payload(commanded, actual, 100, 1000)
+        minus_payload = _critical_motion_payload(commanded, actual, 100, 1000)
+        writer.write_firmware_frame(
+            0,
+            plus_host_ns,
+            _header(FRAME_TYPE_CRITICAL, plus_payload, seq, timestamp, 1, 0) + plus_payload,
+        )
+        writer.write_firmware_frame(
+            1,
+            minus_host_ns,
+            _header(FRAME_TYPE_CRITICAL, minus_payload, seq, timestamp, 1, 0) + minus_payload,
+        )
+
+    plus_post = _critical_motion_payload(
+        6000,
+        5850,
+        torque_actual=150,
+        torque_target=150,
+        uq_limited=0,
+    )
+    writer.write_firmware_frame(
+        0,
+        120_003_000,
+        _header(FRAME_TYPE_CRITICAL, plus_post, 7, (clock // 1000) * 123, 1, 0) + plus_post,
+    )
+
+    from foci_trace.analyze import analyze_capture
+
+    analysis = analyze_capture(
+        io.BytesIO(output.getvalue()),
+        steady_after_s=0,
+        motion_gap_s=0.05,
+        motion_min_steps=100,
+        corexy_plus=plus_serial,
+        corexy_minus=minus_serial,
+        contour_pair_tolerance_ms=1.0,
+    )
+
+    assert len(analysis.contour_segments) == 2
+    assert any(
+        phase.post_discriminator == "loop_active"
+        for phase in analysis.devices[0].motion_segments[1].phase_reports
+    )
+    assert analysis.contour_segments[0].classification == "along_path_lag"
+    assert analysis.contour_segments[1].classification == "endpoint_loop_active"
+
+
+def test_contour_analysis_applies_trace_gap_per_segment() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    plus_serial = "PLUS"
+    minus_serial = "MINUS"
+    writer.write_device_table(0, 100, "1-1", "FOCI OpenFFBoard (trace)", plus_serial, b"")
+    writer.write_device_table(1, 100, "1-2", "FOCI OpenFFBoard (trace)", minus_serial, b"")
+    clock = 84_000_000
+
+    paired_samples = [
+        (1, 0, 0, 0, 10_000, 10_050),
+        (2, clock // 1000, 1000, 950, 11_000, 11_050),
+        (3, (clock // 1000) * 2, 2000, 1900, 12_000, 12_050),
+        (4, (clock // 1000) * 120, 4000, 3950, 120_000_000, 120_000_050),
+        (5, (clock // 1000) * 121, 5000, 4900, 120_001_000, 120_001_050),
+        (6, (clock // 1000) * 171, 6000, 5850, 120_002_000, 120_002_050),
+    ]
+    for seq, timestamp, commanded, actual, plus_host_ns, minus_host_ns in paired_samples:
+        plus_payload = _critical_motion_payload(commanded, actual, 100, 1000)
+        minus_payload = _critical_motion_payload(commanded, actual, 100, 1000)
+        writer.write_firmware_frame(
+            0,
+            plus_host_ns,
+            _header(FRAME_TYPE_CRITICAL, plus_payload, seq, timestamp, 1, 0) + plus_payload,
+        )
+        writer.write_firmware_frame(
+            1,
+            minus_host_ns,
+            _header(FRAME_TYPE_CRITICAL, minus_payload, seq, timestamp, 1, 0) + minus_payload,
+        )
+
+    from foci_trace.analyze import analyze_capture
+
+    analysis = analyze_capture(
+        io.BytesIO(output.getvalue()),
+        steady_after_s=0,
+        motion_gap_s=0.1,
+        motion_min_steps=100,
+        corexy_plus=plus_serial,
+        corexy_minus=minus_serial,
+        contour_pair_tolerance_ms=1.0,
+    )
+
+    assert len(analysis.contour_segments) == 2
+    assert not analysis.devices[0].motion_segments[0].trace_gap_suspect
+    assert analysis.devices[0].motion_segments[1].trace_gap_suspect
+    assert analysis.contour_segments[0].classification == "along_path_lag"
+    assert analysis.contour_segments[1].classification == "inconclusive"
+
+
 def test_motion_summary_distinguishes_critical_target_from_sparse_detail_command() -> None:
     output = io.BytesIO()
     writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)

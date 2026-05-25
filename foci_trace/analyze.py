@@ -16,6 +16,14 @@ from .capture_file import (
     RECORD_TYPE_FIRMWARE_FRAME,
     CaptureReader,
 )
+from .contour import (
+    ContourSegmentReport,
+    MotorSample,
+    PairedMotorSample,
+    contour_pair_groups,
+    contour_segment_report,
+    pair_motor_samples,
+)
 from .protocol import (
     FRAME_TYPE_CONTROL_DETAIL,
     FRAME_TYPE_CRITICAL,
@@ -151,7 +159,7 @@ class CaptureAnalysis:
     """Complete analyzer result, including optional cross-device contour data."""
 
     devices: list[DeviceReport]
-    contour_segments: list[object] = field(default_factory=list)
+    contour_segments: list[ContourSegmentReport] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -209,6 +217,13 @@ class _DeviceState:
     critical_observations: list[_CriticalObservation] = field(default_factory=list)
     current_path_observations: list[_CurrentPathObservation] = field(default_factory=list)
     control_detail_observations: list[_ControlDetailObservation] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _MotionSegmentSpan:
+    start_host_ns: int
+    end_host_ns: int
+    report: MotionSegmentReport
 
 
 def _signed_i16(value: int) -> int:
@@ -639,6 +654,87 @@ def _post_move_discriminator(samples: list[_CriticalObservation]) -> str | None:
     if active_torque:
         return "loop_active"
     return "settling_possible"
+
+
+def _select_state_by_serial(states: dict[int, _DeviceState], selector: str) -> _DeviceState:
+    matches = [
+        state
+        for index, state in states.items()
+        if selector in (f"dev{index}", state.report.serial, state.report.metadata_serial)
+    ]
+    if not matches:
+        raise ValueError(f"no trace device matches {selector!r}")
+    if len(matches) > 1:
+        raise ValueError(f"multiple trace devices match {selector!r}")
+    return matches[0]
+
+
+def _motor_samples(state: _DeviceState) -> list[MotorSample]:
+    return [
+        MotorSample(
+            host_recv_ns=sample.host_recv_ns,
+            commanded=float(sample.step_position),
+            actual=float(sample.tmc_position_actual),
+        )
+        for sample in sorted(state.critical_observations, key=lambda sample: sample.host_recv_ns)
+    ]
+
+
+def _motion_segment_spans(
+    state: _DeviceState,
+    motion_gap_s: float,
+    motion_min_steps: int,
+) -> list[_MotionSegmentSpan]:
+    observations = sorted(state.critical_observations, key=lambda sample: sample.timestamp_ticks)
+    groups = _motion_groups(observations, state.clock_hz, motion_gap_s, motion_min_steps)
+    spans: list[_MotionSegmentSpan] = []
+    for (start_idx, end_idx), report in zip(groups, state.report.motion_segments, strict=True):
+        samples = observations[start_idx : end_idx + 1]
+        host_values = [sample.host_recv_ns for sample in samples]
+        spans.append(
+            _MotionSegmentSpan(
+                start_host_ns=min(host_values),
+                end_host_ns=max(host_values),
+                report=report,
+            )
+        )
+    return spans
+
+
+def _pair_group_host_span(pairs: list[PairedMotorSample]) -> tuple[int, int]:
+    host_values = [
+        host_recv_ns
+        for pair in pairs
+        for host_recv_ns in (pair.plus.host_recv_ns, pair.minus.host_recv_ns)
+    ]
+    return min(host_values), max(host_values)
+
+
+def _contour_group_segments(
+    pairs: list[PairedMotorSample],
+    plus_spans: list[_MotionSegmentSpan],
+    minus_spans: list[_MotionSegmentSpan],
+) -> list[MotionSegmentReport]:
+    group_start_ns, group_end_ns = _pair_group_host_span(pairs)
+    return [
+        span.report
+        for span in plus_spans + minus_spans
+        if span.start_host_ns <= group_end_ns and span.end_host_ns >= group_start_ns
+    ]
+
+
+def _contour_post_discriminator(segments: list[MotionSegmentReport]) -> str | None:
+    discriminators = [
+        phase.post_discriminator
+        for segment in segments
+        for phase in segment.phase_reports
+        if phase.post_discriminator is not None
+    ]
+    if "loop_active" in discriminators:
+        return "loop_active"
+    if "settling_possible" in discriminators:
+        return "settling_possible"
+    return None
 
 
 def _rounded_median(values: list[float]) -> float | None:
@@ -1072,6 +1168,9 @@ def analyze_capture(
     steady_after_s: float = 10.0,
     motion_gap_s: float = DEFAULT_MOTION_GAP_S,
     motion_min_steps: int = DEFAULT_MOTION_MIN_STEPS,
+    corexy_plus: str | None = None,
+    corexy_minus: str | None = None,
+    contour_pair_tolerance_ms: float = 5.0,
 ) -> CaptureAnalysis:
     """Analyze one FTRF capture stream."""
     states: dict[int, _DeviceState] = {}
@@ -1114,9 +1213,38 @@ def analyze_capture(
     for state in states.values():
         _finalize_status(state)
         _finalize_motion_segments(state, motion_gap_s, motion_min_steps)
+    contour_segments: list[ContourSegmentReport] = []
+    if corexy_plus is not None or corexy_minus is not None:
+        if corexy_plus is None or corexy_minus is None:
+            raise ValueError("both corexy_plus and corexy_minus are required")
+        plus_state = _select_state_by_serial(states, corexy_plus)
+        minus_state = _select_state_by_serial(states, corexy_minus)
+        tolerance_ns = int(contour_pair_tolerance_ms * 1_000_000)
+        pairs = pair_motor_samples(
+            _motor_samples(plus_state),
+            _motor_samples(minus_state),
+            tolerance_ns=tolerance_ns,
+        )
+        pair_groups = contour_pair_groups(
+            pairs,
+            gap_ns=int(motion_gap_s * 1_000_000_000),
+            min_delta=float(motion_min_steps),
+        )
+        plus_spans = _motion_segment_spans(plus_state, motion_gap_s, motion_min_steps)
+        minus_spans = _motion_segment_spans(minus_state, motion_gap_s, motion_min_steps)
+        for segment_index, pair_group in enumerate(pair_groups):
+            relevant_segments = _contour_group_segments(pair_group, plus_spans, minus_spans)
+            contour_segments.append(
+                contour_segment_report(
+                    segment_index,
+                    pair_group,
+                    trace_gap=any(segment.trace_gap_suspect for segment in relevant_segments),
+                    post_discriminator=_contour_post_discriminator(relevant_segments),
+                )
+            )
     return CaptureAnalysis(
         devices=[states[index].report for index in sorted(states)],
-        contour_segments=[],
+        contour_segments=contour_segments,
     )
 
 
@@ -1357,6 +1485,48 @@ def format_summary(
                                 discriminator=phase.post_discriminator or "n/a",
                             )
                         )
+    return "\n".join(lines)
+
+
+def format_analysis(
+    analysis: CaptureAnalysis,
+    *,
+    include_phase_split: bool = False,
+    include_feedforward_audit: bool = False,
+    include_contour: bool = False,
+) -> str:
+    """Format full capture analysis, optionally including CoreXY contour reports."""
+    text = format_summary(
+        analysis.devices,
+        include_phase_split=include_phase_split,
+        include_feedforward_audit=include_feedforward_audit,
+    )
+    if not include_contour:
+        return text
+    lines = [text] if text else []
+    for segment in analysis.contour_segments:
+        lines.append(
+            "contour{idx} samples={samples} duration={duration:.3f}s "
+            "delta_xy={dx:.1f},{dy:.1f} "
+            "along_rms={along_rms:.1f} along_peak={along_peak:.1f} "
+            "cross_rms={cross_rms:.1f} cross_peak={cross_peak:.1f} "
+            "final={final_along:.1f},{final_cross:.1f} "
+            "class={classification} pair_gap={pair_gap:.3f}ms".format(
+                idx=segment.segment_index,
+                samples=segment.samples,
+                duration=segment.duration_s,
+                dx=segment.delta_x,
+                dy=segment.delta_y,
+                along_rms=segment.along_rms,
+                along_peak=segment.along_peak,
+                cross_rms=segment.cross_rms,
+                cross_peak=segment.cross_peak,
+                final_along=segment.final_along,
+                final_cross=segment.final_cross,
+                classification=segment.classification,
+                pair_gap=segment.max_pair_delta_ms,
+            )
+        )
     return "\n".join(lines)
 
 

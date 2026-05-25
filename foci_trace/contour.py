@@ -25,6 +25,25 @@ class PairedMotorSample:
     minus: MotorSample
 
 
+@dataclass(frozen=True)
+class ContourSegmentReport:
+    """Contour-error summary for one paired CoreXY motion segment."""
+
+    segment_index: int
+    samples: int
+    duration_s: float
+    delta_x: float
+    delta_y: float
+    along_rms: float
+    along_peak: float
+    cross_rms: float
+    cross_peak: float
+    final_along: float
+    final_cross: float
+    classification: str
+    max_pair_delta_ms: float
+
+
 def corexy_to_xy(motor_plus: float, motor_minus: float) -> tuple[float, float]:
     """Convert CoreXY plus/minus motor coordinates to toolhead X/Y coordinates."""
     return ((motor_plus + motor_minus) / 2.0, (motor_plus - motor_minus) / 2.0)
@@ -124,6 +143,72 @@ def contour_pair_groups(
 
     _append_pair_group(groups, current, min_delta)
     return groups
+
+
+def contour_segment_report(
+    segment_index: int,
+    pairs: Sequence[PairedMotorSample],
+    *,
+    trace_gap: bool,
+    post_discriminator: str | None,
+) -> ContourSegmentReport:
+    """Build a contour report for one contiguous paired CoreXY segment."""
+    if not pairs:
+        return ContourSegmentReport(
+            segment_index=segment_index,
+            samples=0,
+            duration_s=0.0,
+            delta_x=0.0,
+            delta_y=0.0,
+            along_rms=0.0,
+            along_peak=0.0,
+            cross_rms=0.0,
+            cross_peak=0.0,
+            final_along=0.0,
+            final_cross=0.0,
+            classification=classify_phase(0.0, 0.0, trace_gap=trace_gap, post_discriminator=None),
+            max_pair_delta_ms=0.0,
+        )
+
+    commanded_points = [_commanded_xy(pair) for pair in pairs]
+    actual_points = [
+        corexy_to_xy(pair.plus.actual, pair.minus.actual)
+        for pair in pairs
+    ]
+    start = commanded_points[0]
+    end = commanded_points[-1]
+    projections = [
+        project_path_error(start=start, end=end, commanded=commanded, actual=actual)
+        for commanded, actual in zip(commanded_points, actual_points, strict=True)
+    ]
+    along_values = [along for along, _cross in projections]
+    cross_values = [cross for _along, cross in projections]
+    along_rms = rms(along_values)
+    cross_rms = rms(cross_values)
+    max_pair_delta_ms = max(
+        abs(pair.plus.host_recv_ns - pair.minus.host_recv_ns) for pair in pairs
+    ) / 1_000_000.0
+
+    return ContourSegmentReport(
+        segment_index=segment_index,
+        samples=len(pairs),
+        duration_s=(pairs[-1].host_recv_ns - pairs[0].host_recv_ns) / 1_000_000_000.0,
+        delta_x=end[0] - start[0],
+        delta_y=end[1] - start[1],
+        along_rms=along_rms,
+        along_peak=max(abs(value) for value in along_values),
+        cross_rms=cross_rms,
+        cross_peak=max(abs(value) for value in cross_values),
+        final_along=along_values[-1],
+        final_cross=cross_values[-1],
+        classification=classify_phase(
+            along_rms,
+            cross_rms,
+            trace_gap=trace_gap,
+            post_discriminator=post_discriminator,
+        ),
+        max_pair_delta_ms=max_pair_delta_ms,
+    )
 
 
 def rms(values: Iterable[float]) -> float:
