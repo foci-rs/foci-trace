@@ -43,6 +43,9 @@ CURRENT_PATH_GAP_SUSPECT_S = 0.050
 PHASE_EDGE_WINDOW_S = 0.050
 PHASE_POST_WINDOW_S = 0.500
 PHASE_TARGET_MIN_ABS = 100
+DEFAULT_DECOUPLING_F_PWM_HZ = 25_000.0
+DEFAULT_DECOUPLING_POLE_PAIRS = 50
+DEFAULT_DECOUPLING_POSITION_UNITS_PER_REV = 65_536
 
 
 @dataclass
@@ -64,6 +67,34 @@ class CurrentAuthorityReport:
     # Raw ADC movement around the segment median, not calibrated current.
     adc_i0_delta_range: tuple[int, int] | None
     adc_i1_delta_range: tuple[int, int] | None
+
+
+@dataclass(frozen=True)
+class DecouplingConfig:
+    """Count-space motor model used for the offline decoupling audit."""
+
+    l_int: int
+    f_pwm_hz: float = DEFAULT_DECOUPLING_F_PWM_HZ
+    pole_pairs: int = DEFAULT_DECOUPLING_POLE_PAIRS
+    position_units_per_rev: int = DEFAULT_DECOUPLING_POSITION_UNITS_PER_REV
+
+
+@dataclass
+class DecouplingPhaseReport:
+    """Estimated cross-coupling term size for one motion phase."""
+
+    samples: int
+    pole_pairs: int
+    l_int: int
+    f_pwm_hz: float
+    position_units_per_rev: int
+    omega_e_range_rad_s: tuple[float, float]
+    vd_cross_range: tuple[float, float]
+    vq_cross_range: tuple[float, float]
+    cross_to_requested_median: float | None
+    cross_to_requested_p95: float | None
+    cross_to_limited_median: float | None
+    cross_to_limited_p95: float | None
 
 
 @dataclass
@@ -97,6 +128,7 @@ class MotionPhaseReport:
     target_velocity_range: tuple[int, int]
     iq_to_actual_abs_median: float | None
     uq_limited_range: tuple[int, int]
+    decoupling: DecouplingPhaseReport | None = None
     post_discriminator: str | None = None
 
 
@@ -176,7 +208,9 @@ class _CriticalObservation:
     tmc_position_actual: int
     torque_target: int
     actual_torque: int
+    ud_requested: int
     uq_requested: int
+    ud_limited: int
     uq_limited: int
     accel_feedforward_offset: int
     accel_feedforward_gain: int
@@ -367,7 +401,9 @@ def _observe_critical(
             tmc_position_actual=int(payload["tmc_position_actual"]),
             torque_target=torque_target if torque_target is not None else 0,
             actual_torque=actual_torque,
+            ud_requested=ud,
             uq_requested=uq,
+            ud_limited=ud_limited,
             uq_limited=uq_limited,
             accel_feedforward_offset=int(payload["cached_accel_torque_offset"]),
             accel_feedforward_gain=int(payload["accel_feedforward_gain_permille"]),
@@ -637,6 +673,18 @@ def _nearest_current_path(
     return min(samples, key=lambda sample: abs(sample.timestamp_ticks - timestamp_ticks))
 
 
+def _foc_iq_id_for_sample(
+    sample: _CriticalObservation,
+    current_paths: list[_CurrentPathObservation],
+) -> tuple[int, int] | None:
+    if sample.foc_iq is not None and sample.foc_id is not None:
+        return sample.foc_iq, sample.foc_id
+    current_path = _nearest_current_path(current_paths, sample.timestamp_ticks)
+    if current_path is None:
+        return None
+    return current_path.foc_iq, current_path.foc_id
+
+
 def _nearest_control_detail(
     samples: list[_ControlDetailObservation], timestamp_ticks: int
 ) -> _ControlDetailObservation | None:
@@ -771,6 +819,14 @@ def _rounded_median(values: list[float]) -> float | None:
     return round(median(values), 3)
 
 
+def _rounded_percentile(values: list[float], fraction: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = max(0, min(len(ordered) - 1, math.ceil(fraction * len(ordered)) - 1))
+    return round(ordered[index], 3)
+
+
 def _median_int(values: list[int]) -> int | None:
     if not values:
         return None
@@ -903,6 +959,75 @@ def _near_limit_longest_run_s(
     return (longest_end - longest_start) / clock_hz
 
 
+def _decoupling_phase_report(
+    samples: list[_CriticalObservation],
+    phase_current_paths: list[_CurrentPathObservation],
+    config: DecouplingConfig | None,
+) -> DecouplingPhaseReport | None:
+    if (
+        config is None
+        or config.l_int <= 0
+        or config.f_pwm_hz <= 0.0
+        or config.pole_pairs <= 0
+        or config.position_units_per_rev <= 0
+    ):
+        return None
+
+    l_count_seconds = config.l_int * 1e-6
+    omega_values: list[float] = []
+    vd_values: list[float] = []
+    vq_values: list[float] = []
+    requested_ratios: list[float] = []
+    limited_ratios: list[float] = []
+
+    for sample in samples:
+        if sample.target_velocity == 0:
+            continue
+        foc_values = _foc_iq_id_for_sample(sample, phase_current_paths)
+        if foc_values is None:
+            continue
+        foc_iq, foc_id = foc_values
+        omega_e = (
+            abs(sample.target_velocity)
+            * config.f_pwm_hz
+            / config.position_units_per_rev
+            * config.pole_pairs
+            * 2.0
+            * math.pi
+        )
+        if omega_e == 0.0:
+            continue
+        vq_cross = omega_e * l_count_seconds * foc_id
+        vd_cross = -omega_e * l_count_seconds * foc_iq
+        cross_magnitude = math.hypot(vd_cross, vq_cross)
+        requested_magnitude = math.hypot(sample.ud_requested, sample.uq_requested)
+        limited_magnitude = math.hypot(sample.ud_limited, sample.uq_limited)
+        if requested_magnitude > 0.0:
+            requested_ratios.append(cross_magnitude / requested_magnitude)
+        if limited_magnitude > 0.0:
+            limited_ratios.append(cross_magnitude / limited_magnitude)
+        omega_values.append(omega_e)
+        vd_values.append(vd_cross)
+        vq_values.append(vq_cross)
+
+    if not omega_values:
+        return None
+    return DecouplingPhaseReport(
+        samples=len(omega_values),
+        pole_pairs=config.pole_pairs,
+        l_int=config.l_int,
+        f_pwm_hz=config.f_pwm_hz,
+        position_units_per_rev=config.position_units_per_rev,
+        omega_e_range_rad_s=(min(omega_values), max(omega_values)),
+        vd_cross_range=(min(vd_values), max(vd_values)),
+        vq_cross_range=(min(vq_values), max(vq_values)),
+        cross_to_requested_median=_rounded_median(requested_ratios),
+        cross_to_requested_p95=_rounded_percentile(requested_ratios, 0.95),
+        cross_to_limited_median=_rounded_median(limited_ratios),
+        cross_to_limited_p95=_rounded_percentile(limited_ratios, 0.95),
+    )
+
+
 def _motion_phase_reports(
     observations: list[_CriticalObservation],
     current_paths: list[_CurrentPathObservation],
@@ -911,6 +1036,7 @@ def _motion_phase_reports(
     clock_hz: int,
     voltage_limit: int,
     next_segment_start_tick: int | None,
+    decoupling_config: DecouplingConfig | None,
 ) -> list[MotionPhaseReport]:
     if transform is None or clock_hz <= 0:
         return []
@@ -1040,6 +1166,7 @@ def _motion_phase_reports(
                 critical = _nearest_critical(samples, current_path.timestamp_ticks)
                 if critical.actual_torque != 0:
                     iq_to_actual.append(abs(current_path.foc_iq) / abs(critical.actual_torque))
+        decoupling = _decoupling_phase_report(samples, phase_current_paths, decoupling_config)
         post_discriminator = _post_move_discriminator(samples) if name == "post_0_500ms" else None
         reports.append(
             MotionPhaseReport(
@@ -1070,6 +1197,7 @@ def _motion_phase_reports(
                 target_velocity_range=_range([sample.target_velocity for sample in samples]),
                 iq_to_actual_abs_median=_rounded_median(iq_to_actual),
                 uq_limited_range=_range([sample.uq_limited for sample in samples]),
+                decoupling=decoupling,
                 post_discriminator=post_discriminator,
             )
         )
@@ -1077,7 +1205,10 @@ def _motion_phase_reports(
 
 
 def _finalize_motion_segments(
-    state: _DeviceState, motion_gap_s: float, motion_min_steps: int
+    state: _DeviceState,
+    motion_gap_s: float,
+    motion_min_steps: int,
+    decoupling_config: DecouplingConfig | None,
 ) -> None:
     observations = sorted(state.critical_observations, key=lambda sample: sample.timestamp_ticks)
     current_paths = sorted(
@@ -1174,6 +1305,7 @@ def _finalize_motion_segments(
             state.clock_hz,
             voltage_limit,
             next_start_tick,
+            decoupling_config,
         )
         state.report.motion_segments.append(
             MotionSegmentReport(
@@ -1219,6 +1351,10 @@ def analyze_capture(
     corexy_plus: str | None = None,
     corexy_minus: str | None = None,
     contour_pair_tolerance_ms: float = 5.0,
+    decoupling_l_int: int | None = None,
+    decoupling_f_pwm_hz: float = DEFAULT_DECOUPLING_F_PWM_HZ,
+    decoupling_pole_pairs: int = DEFAULT_DECOUPLING_POLE_PAIRS,
+    decoupling_position_units_per_rev: int = DEFAULT_DECOUPLING_POSITION_UNITS_PER_REV,
 ) -> CaptureAnalysis:
     """Analyze one FTRF capture stream."""
     states: dict[int, _DeviceState] = {}
@@ -1258,9 +1394,19 @@ def analyze_capture(
         elif header.frame_type == FRAME_TYPE_CONTROL_DETAIL:
             _observe_control_detail(state, frame.payload, header.timestamp_ticks)
 
+    decoupling_config = (
+        None
+        if decoupling_l_int is None
+        else DecouplingConfig(
+            l_int=decoupling_l_int,
+            f_pwm_hz=decoupling_f_pwm_hz,
+            pole_pairs=decoupling_pole_pairs,
+            position_units_per_rev=decoupling_position_units_per_rev,
+        )
+    )
     for state in states.values():
         _finalize_status(state)
-        _finalize_motion_segments(state, motion_gap_s, motion_min_steps)
+        _finalize_motion_segments(state, motion_gap_s, motion_min_steps, decoupling_config)
     contour_segments: list[ContourSegmentReport] = []
     if corexy_plus is not None or corexy_minus is not None:
         if corexy_plus is None or corexy_minus is None:
@@ -1339,6 +1485,7 @@ def format_summary(
     *,
     include_phase_split: bool = False,
     include_feedforward_audit: bool = False,
+    include_decoupling_audit: bool = False,
 ) -> str:
     """Format capture summaries for operator review."""
     lines: list[str] = []
@@ -1546,6 +1693,33 @@ def format_summary(
                                 discriminator=phase.post_discriminator or "n/a",
                             )
                         )
+                    if include_decoupling_audit and phase.decoupling is not None:
+                        decoupling = phase.decoupling
+                        lines.append(
+                            "      decoupling pole_pairs={pairs} l_int={l_int} "
+                            "f_pwm={f_pwm:g} position_units_per_rev={units} "
+                            "omega_e={omega_lo:.1f}..{omega_hi:.1f}rad/s "
+                            "cross/uq_req={req} p95={req_p95} "
+                            "cross/uq_lim={lim} p95={lim_p95} "
+                            "vd={vd_lo:.1f}..{vd_hi:.1f} "
+                            "vq={vq_lo:.1f}..{vq_hi:.1f} samples={samples}".format(
+                                pairs=decoupling.pole_pairs,
+                                l_int=decoupling.l_int,
+                                f_pwm=decoupling.f_pwm_hz,
+                                units=decoupling.position_units_per_rev,
+                                omega_lo=decoupling.omega_e_range_rad_s[0],
+                                omega_hi=decoupling.omega_e_range_rad_s[1],
+                                req=_optional_ratio_text(decoupling.cross_to_requested_median),
+                                req_p95=_optional_ratio_text(decoupling.cross_to_requested_p95),
+                                lim=_optional_ratio_text(decoupling.cross_to_limited_median),
+                                lim_p95=_optional_ratio_text(decoupling.cross_to_limited_p95),
+                                vd_lo=decoupling.vd_cross_range[0],
+                                vd_hi=decoupling.vd_cross_range[1],
+                                vq_lo=decoupling.vq_cross_range[0],
+                                vq_hi=decoupling.vq_cross_range[1],
+                                samples=decoupling.samples,
+                            )
+                        )
     return "\n".join(lines)
 
 
@@ -1554,6 +1728,7 @@ def format_analysis(
     *,
     include_phase_split: bool = False,
     include_feedforward_audit: bool = False,
+    include_decoupling_audit: bool = False,
     include_contour: bool = False,
 ) -> str:
     """Format full capture analysis, optionally including CoreXY contour reports."""
@@ -1561,6 +1736,7 @@ def format_analysis(
         analysis.devices,
         include_phase_split=include_phase_split,
         include_feedforward_audit=include_feedforward_audit,
+        include_decoupling_audit=include_decoupling_audit,
     )
     if not include_contour:
         return text
@@ -1617,6 +1793,34 @@ def main(argv: list[str] | None = None) -> int:
         help="include feedforward sign/current-path discriminator lines with phase metrics",
     )
     parser.add_argument(
+        "--decoupling-audit",
+        action="store_true",
+        help="include count-space q/d cross-coupling magnitude estimates",
+    )
+    parser.add_argument(
+        "--decoupling-l-int",
+        type=int,
+        help="identified count-space inductance in voltage-count/current-count microseconds",
+    )
+    parser.add_argument(
+        "--decoupling-f-pwm-hz",
+        type=float,
+        default=DEFAULT_DECOUPLING_F_PWM_HZ,
+        help="current-loop/PWM update rate used by target_velocity units",
+    )
+    parser.add_argument(
+        "--decoupling-pole-pairs",
+        type=int,
+        default=DEFAULT_DECOUPLING_POLE_PAIRS,
+        help="motor pole-pair count; LDO 1.8 degree hybrid steppers use 50",
+    )
+    parser.add_argument(
+        "--decoupling-position-units-per-rev",
+        type=int,
+        default=DEFAULT_DECOUPLING_POSITION_UNITS_PER_REV,
+        help="mechanical position units per revolution used by target_velocity",
+    )
+    parser.add_argument(
         "--contour-analysis",
         action="store_true",
         help="include CoreXY along-path and cross-path contour metrics",
@@ -1634,6 +1838,8 @@ def main(argv: list[str] | None = None) -> int:
         args = parser.parse_args(argv)
         if args.contour_analysis and (args.corexy_plus is None or args.corexy_minus is None):
             parser.error("both --corexy-plus and --corexy-minus are required")
+        if args.decoupling_audit and args.decoupling_l_int is None:
+            parser.error("--decoupling-l-int is required with --decoupling-audit")
     except SystemExit as exc:
         return int(exc.code)
 
@@ -1647,6 +1853,10 @@ def main(argv: list[str] | None = None) -> int:
                 corexy_plus=args.corexy_plus if args.contour_analysis else None,
                 corexy_minus=args.corexy_minus if args.contour_analysis else None,
                 contour_pair_tolerance_ms=args.contour_pair_tolerance_ms,
+                decoupling_l_int=args.decoupling_l_int if args.decoupling_audit else None,
+                decoupling_f_pwm_hz=args.decoupling_f_pwm_hz,
+                decoupling_pole_pairs=args.decoupling_pole_pairs,
+                decoupling_position_units_per_rev=args.decoupling_position_units_per_rev,
             )
     except OSError as exc:
         print(f"failed to read {args.capture}: {exc}", file=sys.stderr)
@@ -1661,6 +1871,7 @@ def main(argv: list[str] | None = None) -> int:
             analysis,
             include_phase_split=args.phase_split,
             include_feedforward_audit=args.feedforward_audit,
+            include_decoupling_audit=args.decoupling_audit,
             include_contour=args.contour_analysis,
         )
     )

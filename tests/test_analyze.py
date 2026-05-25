@@ -795,6 +795,82 @@ def test_feedforward_audit_uses_separate_current_path_frames() -> None:
     assert "iq/torque=2.00" in text
 
 
+def test_decoupling_audit_reports_cross_coupling_voltage_fraction() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+
+    clock = 84_000_000
+    detail = _control_detail_payload(1200, voltage_limit=29000, torque_limit=2816)
+    writer.write_firmware_frame(
+        0,
+        0,
+        _header(FRAME_TYPE_CONTROL_DETAIL, detail, 1, 0, 1, 0, version=4) + detail,
+    )
+
+    samples = [
+        (2, 0, 0, 0, 400, 800, 10, 0, 4000, 1000, 50, 100),
+        (3, clock * 20 // 1000, 600, 580, 300, 700, 10, 0, 4000, 1000, 50, 100),
+        (4, clock * 80 // 1000, 1200, 1180, 100, 200, 10, 0, 4000, 1000, 50, 100),
+        (5, clock * 140 // 1000, 1800, 1790, -300, -700, -10, 0, -4000, -1000, -50, -100),
+        (6, clock * 180 // 1000, 2400, 2410, -400, -800, -10, 0, -4000, -1000, -50, -100),
+    ]
+    for (
+        seq,
+        timestamp,
+        step,
+        actual,
+        torque_actual,
+        torque_target,
+        target_velocity,
+        velocity_ff,
+        uq,
+        ud,
+        iq,
+        id_,
+    ) in samples:
+        payload = _critical_payload_v4(
+            step_position=step,
+            tmc_position_actual=actual,
+            torque_actual=torque_actual,
+            torque_target=torque_target,
+            target_velocity=target_velocity,
+            cached_velocity_offset=velocity_ff,
+            foc_uq_ud=_pack_i16_pair(ud, uq),
+            foc_uq_ud_limited=_pack_i16_pair(ud, uq),
+            foc_iq_id=_pack_i16_pair(id_, iq),
+            accel_offset=0,
+            accel_gain=0,
+            accel_flags=0,
+        )
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_CRITICAL, payload, seq, timestamp, 1, 0, version=4) + payload,
+        )
+
+    from foci_trace.analyze import analyze_capture, format_analysis
+
+    analysis = analyze_capture(
+        io.BytesIO(output.getvalue()),
+        steady_after_s=0,
+        motion_gap_s=0.1,
+        motion_min_steps=100,
+        decoupling_l_int=4000,
+    )
+    text = format_analysis(
+        analysis,
+        include_phase_split=True,
+        include_decoupling_audit=True,
+    )
+
+    assert "decoupling pole_pairs=50" in text
+    assert "l_int=4000" in text
+    assert "omega_e=1198.4..1198.4rad/s" in text
+    assert "cross/uq_req=0.13" in text
+    assert "cross/uq_lim=0.13" in text
+
+
 def test_summarize_capture_reports_current_authority_windows() -> None:
     output = io.BytesIO()
     writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
