@@ -90,6 +90,10 @@ class MotionPhaseReport:
     velocity_feedforward_nonzero_samples: int
     velocity_feedforward_sign_agreement_samples: int
     velocity_feedforward_sign_comparable_samples: int
+    velocity_transient_offset_range: tuple[int, int]
+    velocity_transient_nonzero_samples: int
+    velocity_transient_sign_agreement_samples: int
+    velocity_transient_sign_comparable_samples: int
     target_velocity_range: tuple[int, int]
     iq_to_actual_abs_median: float | None
     uq_limited_range: tuple[int, int]
@@ -181,6 +185,7 @@ class _CriticalObservation:
     foc_id: int | None
     target_velocity: int
     cached_velocity_offset: int
+    cached_velocity_transient_offset: int
 
 
 @dataclass(frozen=True)
@@ -371,6 +376,9 @@ def _observe_critical(
             foc_id=foc_id,
             target_velocity=int(payload["target_velocity"]),
             cached_velocity_offset=int(payload["cached_pid_velocity_offset"]),
+            cached_velocity_transient_offset=int(
+                payload.get("cached_velocity_transient_offset", 0)
+            ),
         )
     )
     if _relative_seconds(state, timestamp_ticks) < steady_after_s:
@@ -1006,6 +1014,22 @@ def _motion_phase_reports(
             _same_nonzero_sign(sample.cached_velocity_offset, sample.target_velocity)
             for sample in velocity_sign_candidates
         )
+        velocity_transient_offsets = [sample.cached_velocity_transient_offset for sample in samples]
+        nonzero_velocity_transient_offsets = [
+            offset for offset in velocity_transient_offsets if offset != 0
+        ]
+        velocity_transient_sign_candidates = [
+            sample
+            for sample in samples
+            if sample.cached_velocity_transient_offset != 0 and sample.torque_target != 0
+        ]
+        velocity_transient_sign_agreement = sum(
+            _same_nonzero_sign(
+                sample.cached_velocity_transient_offset,
+                sample.torque_target,
+            )
+            for sample in velocity_transient_sign_candidates
+        )
         iq_to_actual = [
             abs(sample.foc_iq) / abs(sample.actual_torque)
             for sample in samples
@@ -1039,6 +1063,10 @@ def _motion_phase_reports(
                 velocity_feedforward_nonzero_samples=len(nonzero_velocity_offsets),
                 velocity_feedforward_sign_agreement_samples=velocity_sign_agreement,
                 velocity_feedforward_sign_comparable_samples=len(velocity_sign_candidates),
+                velocity_transient_offset_range=_range(velocity_transient_offsets),
+                velocity_transient_nonzero_samples=len(nonzero_velocity_transient_offsets),
+                velocity_transient_sign_agreement_samples=velocity_transient_sign_agreement,
+                velocity_transient_sign_comparable_samples=len(velocity_transient_sign_candidates),
                 target_velocity_range=_range([sample.target_velocity for sample in samples]),
                 iq_to_actual_abs_median=_rounded_median(iq_to_actual),
                 uq_limited_range=_range([sample.uq_limited for sample in samples]),
@@ -1489,6 +1517,9 @@ def format_summary(
                             "velocity_ff={vel_lo}..{vel_hi} "
                             "velocity_nonzero={vel_nonzero}/{samples} "
                             "velocity_sign={vel_sign}/{vel_sign_total} "
+                            "velocity_transient={transient_lo}..{transient_hi} "
+                            "transient_nonzero={transient_nonzero}/{samples} "
+                            "transient_sign={transient_sign}/{transient_sign_total} "
                             "iq/torque={iq_actual} uq_limited={uq_lo}..{uq_hi} "
                             "post_discriminator={discriminator}".format(
                                 accel_lo=phase.accel_feedforward_offset_range[0],
@@ -1502,6 +1533,13 @@ def format_summary(
                                 vel_nonzero=phase.velocity_feedforward_nonzero_samples,
                                 vel_sign=phase.velocity_feedforward_sign_agreement_samples,
                                 vel_sign_total=phase.velocity_feedforward_sign_comparable_samples,
+                                transient_lo=phase.velocity_transient_offset_range[0],
+                                transient_hi=phase.velocity_transient_offset_range[1],
+                                transient_nonzero=phase.velocity_transient_nonzero_samples,
+                                transient_sign=phase.velocity_transient_sign_agreement_samples,
+                                transient_sign_total=(
+                                    phase.velocity_transient_sign_comparable_samples
+                                ),
                                 iq_actual=_optional_ratio_text(phase.iq_to_actual_abs_median),
                                 uq_lo=phase.uq_limited_range[0],
                                 uq_hi=phase.uq_limited_range[1],

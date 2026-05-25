@@ -34,7 +34,7 @@ def _header(
 
 
 def test_decode_critical_offsets() -> None:
-    payload = bytearray(84)
+    payload = bytearray(88)
     payload[0:4] = struct.pack("<i", -1)
     payload[28] = 0x81
     payload[29] = 0x02
@@ -56,6 +56,7 @@ def test_decode_critical_offsets() -> None:
     assert frame.payload["cached_accel_torque_offset"] == -19
     assert frame.payload["accel_feedforward_gain_permille"] == 2000
     assert frame.payload["accel_feedforward_flags"] == 0x03
+    assert frame.payload["cached_velocity_transient_offset"] == 0
     assert "interim_foc_iq_id" not in frame.payload
 
 
@@ -86,6 +87,15 @@ def test_decode_v4_critical_current_signal_path_fields() -> None:
     assert frame.payload["interim_foc_iq_id"] == 0x1122_3344
     assert frame.payload["interim_foc_iwy_iux"] == 0x5566_7788
     assert frame.payload["interim_adc_i1_i0"] == 0x99AA_BBCC
+
+
+def test_decode_v6_critical_velocity_transient_field() -> None:
+    payload = bytearray(88)
+    payload[84:88] = struct.pack("<i", -321)
+
+    frame = decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=6) + payload)
+
+    assert frame.payload["cached_velocity_transient_offset"] == -321
 
 
 def test_decode_v5_current_path_fields() -> None:

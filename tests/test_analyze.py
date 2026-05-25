@@ -117,7 +117,9 @@ def _critical_payload(
         foc_uq_ud,
         foc_uq_ud_limited,
     )
-    return payload + struct.pack("<iHBB", accel_offset, accel_gain, accel_flags, 0)
+    payload += struct.pack("<iHBB", accel_offset, accel_gain, accel_flags, 0)
+    payload += struct.pack("<i", 0)
+    return payload
 
 
 def _current_path_payload(
@@ -172,7 +174,9 @@ def _critical_motion_payload(
         _pack_i16_pair(0, uq_requested),
         _pack_i16_pair(0, uq_limited),
     )
-    return payload + struct.pack("<iHBB", accel_offset, accel_gain, accel_flags, 0)
+    payload += struct.pack("<iHBB", accel_offset, accel_gain, accel_flags, 0)
+    payload += struct.pack("<i", 0)
+    return payload
 
 
 def _critical_payload_v4(
@@ -214,6 +218,48 @@ def _critical_payload_v4(
     )
     payload += struct.pack("<iHBB", accel_offset, accel_gain, accel_flags, 0)
     payload += struct.pack("<III", foc_iq_id, _pack_i16_pair(0, 0), _pack_u16_pair(32000, 32100))
+    return payload
+
+
+def _critical_payload_v6(
+    *,
+    step_position: int,
+    tmc_position_actual: int,
+    torque_actual: int,
+    torque_target: int,
+    target_velocity: int,
+    cached_velocity_offset: int,
+    cached_velocity_transient_offset: int,
+    foc_uq_ud: int,
+    foc_uq_ud_limited: int,
+    accel_offset: int,
+    accel_gain: int,
+    accel_flags: int,
+) -> bytes:
+    payload = struct.pack(
+        "<iiiiiiiBBHIiQQIIIII",
+        step_position,
+        tmc_position_actual,
+        step_position - tmc_position_actual,
+        target_velocity,
+        20,
+        cached_velocity_offset,
+        10,
+        0x80,
+        0,
+        3,
+        7,
+        -5,
+        1,
+        2,
+        0,
+        0,
+        _pack_i16_pair(torque_actual, torque_target),
+        foc_uq_ud,
+        foc_uq_ud_limited,
+    )
+    payload += struct.pack("<iHBB", accel_offset, accel_gain, accel_flags, 0)
+    payload += struct.pack("<i", cached_velocity_transient_offset)
     return payload
 
 
@@ -592,6 +638,102 @@ def test_motion_summary_can_include_feedforward_audit() -> None:
     assert "velocity_sign=2/2" in text
     assert "iq/torque=" in text
     assert "post_discriminator=settling_possible" in text
+
+
+def test_feedforward_audit_includes_velocity_transient_offset() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+
+    clock = 84_000_000
+    detail = _control_detail_payload(1200, voltage_limit=29000, torque_limit=2816)
+    writer.write_firmware_frame(
+        0,
+        0,
+        _header(FRAME_TYPE_CONTROL_DETAIL, detail, 1, 0, 1, 0, version=6) + detail,
+    )
+
+    samples = [
+        (2, 0, 0, 0, 400, 800, 600, 660, 120, 18000, 17000, 300, 0x03),
+        (3, clock * 20 // 1000, 600, 580, 300, 700, 500, 560, 110, 15000, 14000, 280, 0x03),
+        (4, clock * 60 // 1000, 1200, 1188, 80, 100, 80, 70, 0, 4000, 3900, 0, 0x01),
+        (
+            5,
+            clock * 120 // 1000,
+            1800,
+            1790,
+            -350,
+            -850,
+            -600,
+            -660,
+            -120,
+            -16000,
+            -15000,
+            -260,
+            0x03,
+        ),
+        (
+            6,
+            clock * 160 // 1000,
+            2400,
+            2410,
+            -420,
+            -900,
+            -650,
+            -690,
+            -110,
+            -18000,
+            -17000,
+            -320,
+            0x03,
+        ),
+    ]
+    for (
+        seq,
+        timestamp,
+        step,
+        actual,
+        torque_actual,
+        torque_target,
+        target_velocity,
+        velocity_ff,
+        velocity_transient,
+        uq,
+        uq_limited,
+        accel,
+        flags,
+    ) in samples:
+        payload = _critical_payload_v6(
+            step_position=step,
+            tmc_position_actual=actual,
+            torque_actual=torque_actual,
+            torque_target=torque_target,
+            target_velocity=target_velocity,
+            cached_velocity_offset=velocity_ff,
+            cached_velocity_transient_offset=velocity_transient,
+            foc_uq_ud=_pack_i16_pair(0, uq),
+            foc_uq_ud_limited=_pack_i16_pair(0, uq_limited),
+            accel_offset=accel,
+            accel_gain=500 if accel else 0,
+            accel_flags=flags,
+        )
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_CRITICAL, payload, seq, timestamp, 1, 0, version=6) + payload,
+        )
+
+    reports = summarize_capture(
+        io.BytesIO(output.getvalue()),
+        steady_after_s=0,
+        motion_gap_s=0.1,
+        motion_min_steps=100,
+    )
+    text = format_summary(reports, include_phase_split=True, include_feedforward_audit=True)
+
+    assert "velocity_transient=110..120" in text
+    assert "transient_nonzero=2/2" in text
+    assert "transient_sign=2/2" in text
 
 
 def test_feedforward_audit_uses_separate_current_path_frames() -> None:

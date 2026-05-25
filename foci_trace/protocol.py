@@ -7,8 +7,8 @@ import struct
 from typing import Any
 
 FRAME_MAGIC = 0x43525446
-PROTOCOL_VERSION = 5
-SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, PROTOCOL_VERSION)
+PROTOCOL_VERSION = 6
+SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, 5, PROTOCOL_VERSION)
 HEADER_LEN = 32
 
 FRAME_TYPE_CRITICAL = 1
@@ -152,7 +152,8 @@ def _i32(value: int) -> int:
 
 
 def _decode_critical(version: int, payload: bytes) -> dict[str, Any]:
-    _require(payload, 96 if version == 4 else 84, "critical")
+    critical_len = 96 if version == 4 else 88 if version >= 6 else 84
+    _require(payload, critical_len, "critical")
     values = struct.unpack_from("<iiiiiiiBBHIiQQIIIII", payload, 0)
     accel_offset = 0
     accel_gain = 0
@@ -180,6 +181,7 @@ def _decode_critical(version: int, payload: bytes) -> dict[str, Any]:
         "cached_accel_torque_offset": accel_offset,
         "accel_feedforward_gain_permille": accel_gain,
         "accel_feedforward_flags": accel_flags,
+        "cached_velocity_transient_offset": 0,
     }
     if version >= 3:
         decoded["interim_pidin_target_torque"] = _i32(values[15])
@@ -193,6 +195,8 @@ def _decode_critical(version: int, payload: bytes) -> dict[str, Any]:
             decoded["interim_foc_iwy_iux"],
             decoded["interim_adc_i1_i0"],
         ) = struct.unpack_from("<III", payload, 84)
+    if version >= 6:
+        decoded["cached_velocity_transient_offset"] = struct.unpack_from("<i", payload, 84)[0]
     return decoded
 
 
