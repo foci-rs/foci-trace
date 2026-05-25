@@ -40,7 +40,11 @@ class ContourSegmentReport:
     cross_peak: float
     final_along: float
     final_cross: float
+    path_classification: str
     classification: str
+    position_trace_gap: bool
+    support_trace_gap: bool
+    post_discriminator: str | None
     max_pair_delta_ms: float
 
 
@@ -91,11 +95,9 @@ def pair_motor_samples(
         if minus_index >= len(sorted_minus):
             break
 
-        while (
-            minus_index + 1 < len(sorted_minus)
-            and abs(sorted_minus[minus_index + 1].host_recv_ns - plus.host_recv_ns)
-            <= abs(sorted_minus[minus_index].host_recv_ns - plus.host_recv_ns)
-        ):
+        while minus_index + 1 < len(sorted_minus) and abs(
+            sorted_minus[minus_index + 1].host_recv_ns - plus.host_recv_ns
+        ) <= abs(sorted_minus[minus_index].host_recv_ns - plus.host_recv_ns):
             minus_index += 1
 
         minus = sorted_minus[minus_index]
@@ -149,7 +151,8 @@ def contour_segment_report(
     segment_index: int,
     pairs: Sequence[PairedMotorSample],
     *,
-    trace_gap: bool,
+    position_trace_gap: bool,
+    support_trace_gap: bool,
     post_discriminator: str | None,
 ) -> ContourSegmentReport:
     """Build a contour report for one contiguous paired CoreXY segment."""
@@ -166,15 +169,21 @@ def contour_segment_report(
             cross_peak=0.0,
             final_along=0.0,
             final_cross=0.0,
-            classification=classify_phase(0.0, 0.0, trace_gap=trace_gap, post_discriminator=None),
+            path_classification=classify_path_shape(0.0, 0.0),
+            classification=classify_phase(
+                0.0,
+                0.0,
+                trace_gap=position_trace_gap,
+                post_discriminator=post_discriminator,
+            ),
+            position_trace_gap=position_trace_gap,
+            support_trace_gap=support_trace_gap,
+            post_discriminator=post_discriminator,
             max_pair_delta_ms=0.0,
         )
 
     commanded_points = [_commanded_xy(pair) for pair in pairs]
-    actual_points = [
-        corexy_to_xy(pair.plus.actual, pair.minus.actual)
-        for pair in pairs
-    ]
+    actual_points = [corexy_to_xy(pair.plus.actual, pair.minus.actual) for pair in pairs]
     start = commanded_points[0]
     end = commanded_points[-1]
     projections = [
@@ -185,9 +194,9 @@ def contour_segment_report(
     cross_values = [cross for _along, cross in projections]
     along_rms = rms(along_values)
     cross_rms = rms(cross_values)
-    max_pair_delta_ms = max(
-        abs(pair.plus.host_recv_ns - pair.minus.host_recv_ns) for pair in pairs
-    ) / 1_000_000.0
+    max_pair_delta_ms = (
+        max(abs(pair.plus.host_recv_ns - pair.minus.host_recv_ns) for pair in pairs) / 1_000_000.0
+    )
 
     return ContourSegmentReport(
         segment_index=segment_index,
@@ -201,12 +210,16 @@ def contour_segment_report(
         cross_peak=max(abs(value) for value in cross_values),
         final_along=along_values[-1],
         final_cross=cross_values[-1],
+        path_classification=classify_path_shape(along_rms, cross_rms),
         classification=classify_phase(
             along_rms,
             cross_rms,
-            trace_gap=trace_gap,
+            trace_gap=position_trace_gap,
             post_discriminator=post_discriminator,
         ),
+        position_trace_gap=position_trace_gap,
+        support_trace_gap=support_trace_gap,
+        post_discriminator=post_discriminator,
         max_pair_delta_ms=max_pair_delta_ms,
     )
 
@@ -217,6 +230,17 @@ def rms(values: Iterable[float]) -> float:
     if not samples:
         return 0.0
     return math.sqrt(sum(value * value for value in samples) / len(samples))
+
+
+def classify_path_shape(along_rms: float, cross_rms: float) -> str:
+    """Classify geometric path error without trace-quality or settling caveats."""
+    if along_rms != 0.0 and cross_rms <= along_rms * 0.25:
+        return "along_path_lag"
+    if (along_rms == 0.0 and cross_rms != 0.0) or (
+        along_rms != 0.0 and cross_rms >= along_rms * 0.5
+    ):
+        return "cross_path_contour"
+    return "mixed"
 
 
 def classify_phase(
@@ -231,15 +255,12 @@ def classify_phase(
         return "inconclusive"
     if post_discriminator == "loop_active":
         return "endpoint_loop_active"
-    if along_rms != 0.0 and cross_rms <= along_rms * 0.25:
-        return "along_path_lag"
-    if (along_rms == 0.0 and cross_rms != 0.0) or (
-        along_rms != 0.0 and cross_rms >= along_rms * 0.5
-    ):
-        return "cross_path_contour"
+    path_classification = classify_path_shape(along_rms, cross_rms)
+    if path_classification != "mixed":
+        return path_classification
     if post_discriminator == "settling_possible":
         return "passive_settling_plausible"
-    return "mixed"
+    return path_classification
 
 
 def _append_pair_group(

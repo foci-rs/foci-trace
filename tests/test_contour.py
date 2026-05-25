@@ -2,6 +2,7 @@ from foci_trace.contour import (
     MotorSample,
     classify_phase,
     contour_pair_groups,
+    contour_segment_report,
     corexy_to_xy,
     pair_motor_samples,
     project_path_error,
@@ -79,9 +80,7 @@ def test_classify_phase_prefers_lag_before_contour() -> None:
     assert classify_phase(80.0, 55.0, trace_gap=False, post_discriminator=None) == (
         "cross_path_contour"
     )
-    assert classify_phase(80.0, 10.0, trace_gap=True, post_discriminator=None) == (
-        "inconclusive"
-    )
+    assert classify_phase(80.0, 10.0, trace_gap=True, post_discriminator=None) == ("inconclusive")
     assert classify_phase(80.0, 10.0, trace_gap=False, post_discriminator="loop_active") == (
         "endpoint_loop_active"
     )
@@ -118,6 +117,62 @@ def test_contour_pair_groups_excludes_idle_samples_around_motion() -> None:
 
     assert len(groups) == 1
     assert groups[0] == pairs[1:4]
+
+
+def test_contour_report_keeps_path_classification_separate_from_caveats() -> None:
+    pairs = pair_motor_samples(
+        [
+            MotorSample(host_recv_ns=1_000, commanded=0.0, actual=0.0),
+            MotorSample(host_recv_ns=2_000, commanded=1000.0, actual=950.0),
+            MotorSample(host_recv_ns=3_000, commanded=2000.0, actual=1900.0),
+        ],
+        [
+            MotorSample(host_recv_ns=1_000, commanded=0.0, actual=0.0),
+            MotorSample(host_recv_ns=2_000, commanded=1000.0, actual=950.0),
+            MotorSample(host_recv_ns=3_000, commanded=2000.0, actual=1900.0),
+        ],
+        tolerance_ns=0,
+    )
+
+    report = contour_segment_report(
+        0,
+        pairs,
+        position_trace_gap=True,
+        support_trace_gap=True,
+        post_discriminator="loop_active",
+    )
+
+    assert report.path_classification == "along_path_lag"
+    assert report.classification == "inconclusive"
+    assert report.position_trace_gap
+    assert report.support_trace_gap
+    assert report.post_discriminator == "loop_active"
+
+
+def test_support_trace_gap_does_not_force_contour_inconclusive() -> None:
+    pairs = pair_motor_samples(
+        [
+            MotorSample(host_recv_ns=1_000, commanded=0.0, actual=0.0),
+            MotorSample(host_recv_ns=2_000, commanded=1000.0, actual=950.0),
+        ],
+        [
+            MotorSample(host_recv_ns=1_000, commanded=0.0, actual=0.0),
+            MotorSample(host_recv_ns=2_000, commanded=1000.0, actual=950.0),
+        ],
+        tolerance_ns=0,
+    )
+
+    report = contour_segment_report(
+        0,
+        pairs,
+        position_trace_gap=False,
+        support_trace_gap=True,
+        post_discriminator=None,
+    )
+
+    assert report.path_classification == "along_path_lag"
+    assert report.classification == "along_path_lag"
+    assert report.support_trace_gap
 
 
 def _pair(host_recv_ns: int, plus_commanded: float, minus_commanded: float):

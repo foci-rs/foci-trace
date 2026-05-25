@@ -739,6 +739,24 @@ def _contour_post_discriminator(segments: list[MotionSegmentReport]) -> str | No
     return None
 
 
+def _contour_position_trace_gap(segments: list[MotionSegmentReport]) -> bool:
+    return any(segment.critical_max_gap_s > CRITICAL_GAP_SUSPECT_S for segment in segments)
+
+
+def _contour_support_trace_gap(segments: list[MotionSegmentReport]) -> bool:
+    return any(
+        (
+            segment.control_detail_max_gap_s is not None
+            and segment.control_detail_max_gap_s > CONTROL_DETAIL_GAP_SUSPECT_S
+        )
+        or (
+            segment.current_path_max_gap_s is not None
+            and segment.current_path_max_gap_s > CURRENT_PATH_GAP_SUSPECT_S
+        )
+        for segment in segments
+    )
+
+
 def _rounded_median(values: list[float]) -> float | None:
     if not values:
         return None
@@ -1240,7 +1258,8 @@ def analyze_capture(
                 contour_segment_report(
                     segment_index,
                     pair_group,
-                    trace_gap=any(segment.trace_gap_suspect for segment in relevant_segments),
+                    position_trace_gap=_contour_position_trace_gap(relevant_segments),
+                    support_trace_gap=_contour_support_trace_gap(relevant_segments),
                     post_discriminator=_contour_post_discriminator(relevant_segments),
                 )
             )
@@ -1517,7 +1536,9 @@ def format_analysis(
             "along_rms={along_rms:.1f} along_peak={along_peak:.1f} "
             "cross_rms={cross_rms:.1f} cross_peak={cross_peak:.1f} "
             "final={final_along:.1f},{final_cross:.1f} "
-            "class={classification} pair_gap={pair_gap:.3f}ms".format(
+            "path_class={path_classification} class={classification} "
+            "position_gap={position_gap:d} support_gap={support_gap:d} "
+            "post={post_discriminator} pair_gap={pair_gap:.3f}ms".format(
                 idx=segment.segment_index,
                 samples=segment.samples,
                 duration=segment.duration_s,
@@ -1529,7 +1550,11 @@ def format_analysis(
                 cross_peak=segment.cross_peak,
                 final_along=segment.final_along,
                 final_cross=segment.final_cross,
+                path_classification=segment.path_classification,
                 classification=segment.classification,
+                position_gap=int(segment.position_trace_gap),
+                support_gap=int(segment.support_trace_gap),
+                post_discriminator=segment.post_discriminator or "n/a",
                 pair_gap=segment.max_pair_delta_ms,
             )
         )

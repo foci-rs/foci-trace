@@ -825,11 +825,19 @@ def test_contour_analysis_reports_along_and_cross_error() -> None:
     assert len(analysis.contour_segments) == 1
     segment = analysis.contour_segments[0]
     assert segment.classification == "along_path_lag"
+    assert segment.path_classification == "along_path_lag"
+    assert not segment.position_trace_gap
+    assert not segment.support_trace_gap
+    assert segment.post_discriminator is None
     assert segment.along_rms > 0
     assert segment.cross_rms == 0
     text = format_analysis(analysis, include_contour=True)
     assert "contour_mapping plus=PLUS minus=MINUS" in text
     assert "contour0" in text
+    assert "path_class=along_path_lag" in text
+    assert "position_gap=0" in text
+    assert "support_gap=0" in text
+    assert "post=n/a" in text
 
 
 def test_contour_analysis_uses_existing_post_phase_discriminator() -> None:
@@ -1003,6 +1011,9 @@ def test_contour_analysis_applies_trace_gap_per_segment() -> None:
     assert analysis.devices[0].motion_segments[1].trace_gap_suspect
     assert analysis.contour_segments[0].classification == "along_path_lag"
     assert analysis.contour_segments[1].classification == "inconclusive"
+    assert analysis.contour_segments[1].path_classification == "along_path_lag"
+    assert analysis.contour_segments[1].position_trace_gap
+    assert not analysis.contour_segments[1].support_trace_gap
 
 
 def test_motion_summary_distinguishes_critical_target_from_sparse_detail_command() -> None:
