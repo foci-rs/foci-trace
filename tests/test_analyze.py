@@ -761,6 +761,26 @@ def test_summarize_capture_reports_current_authority_windows() -> None:
     assert "iq/actual=1.02 adc0_delta=-20..20 adc1_delta=-30..30" in text
 
 
+def test_analyze_capture_preserves_existing_summary_api() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+    payload = _critical_motion_payload(0, 0, 100, 1000)
+    writer.write_firmware_frame(
+        0,
+        123_456,
+        _header(FRAME_TYPE_CRITICAL, payload, 1, 84_000, 1, 0) + payload,
+    )
+
+    from foci_trace.analyze import analyze_capture
+
+    analysis = analyze_capture(io.BytesIO(output.getvalue()), steady_after_s=0)
+
+    assert analysis.devices[0].serial == "ABC"
+    assert analysis.contour_segments == []
+    assert summarize_capture(io.BytesIO(output.getvalue()), steady_after_s=0)[0].serial == "ABC"
+
+
 def test_motion_summary_distinguishes_critical_target_from_sparse_detail_command() -> None:
     output = io.BytesIO()
     writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)

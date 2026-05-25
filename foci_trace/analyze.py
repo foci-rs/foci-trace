@@ -146,9 +146,18 @@ class DeviceReport:
     decode_errors: int = 0
 
 
+@dataclass
+class CaptureAnalysis:
+    """Complete analyzer result, including optional cross-device contour data."""
+
+    devices: list[DeviceReport]
+    contour_segments: list[object] = field(default_factory=list)
+
+
 @dataclass(frozen=True)
 class _CriticalObservation:
     timestamp_ticks: int
+    host_recv_ns: int
     step_position: int
     tmc_position_actual: int
     torque_target: int
@@ -297,6 +306,7 @@ def _observe_critical(
     state: _DeviceState,
     payload: dict[str, object],
     timestamp_ticks: int,
+    host_recv_ns: int,
     steady_after_s: float,
 ) -> None:
     actual_flux: int | None = None
@@ -330,6 +340,7 @@ def _observe_critical(
     state.critical_observations.append(
         _CriticalObservation(
             timestamp_ticks=timestamp_ticks,
+            host_recv_ns=host_recv_ns,
             step_position=int(payload["step_position"]),
             tmc_position_actual=int(payload["tmc_position_actual"]),
             torque_target=torque_target if torque_target is not None else 0,
@@ -1056,13 +1067,13 @@ def _finalize_motion_segments(
         )
 
 
-def summarize_capture(
+def analyze_capture(
     source: BinaryIO | io.BytesIO,
     steady_after_s: float = 10.0,
     motion_gap_s: float = DEFAULT_MOTION_GAP_S,
     motion_min_steps: int = DEFAULT_MOTION_MIN_STEPS,
-) -> list[DeviceReport]:
-    """Summarize one FTRF capture stream."""
+) -> CaptureAnalysis:
+    """Analyze one FTRF capture stream."""
     states: dict[int, _DeviceState] = {}
     for record in CaptureReader(source).records():
         state = _state(states, record.device_index)
@@ -1092,7 +1103,9 @@ def summarize_capture(
         elif header.frame_type == FRAME_TYPE_STATUS:
             _observe_status(state, (header.source_kind, header.source_index), frame.payload)
         elif header.frame_type == FRAME_TYPE_CRITICAL:
-            _observe_critical(state, frame.payload, header.timestamp_ticks, steady_after_s)
+            _observe_critical(
+                state, frame.payload, header.timestamp_ticks, record.host_recv_ns, steady_after_s
+            )
         elif header.frame_type == FRAME_TYPE_CURRENT_PATH:
             _observe_current_path(state, frame.payload, header.timestamp_ticks, steady_after_s)
         elif header.frame_type == FRAME_TYPE_CONTROL_DETAIL:
@@ -1101,7 +1114,20 @@ def summarize_capture(
     for state in states.values():
         _finalize_status(state)
         _finalize_motion_segments(state, motion_gap_s, motion_min_steps)
-    return [states[index].report for index in sorted(states)]
+    return CaptureAnalysis(
+        devices=[states[index].report for index in sorted(states)],
+        contour_segments=[],
+    )
+
+
+def summarize_capture(
+    source: BinaryIO | io.BytesIO,
+    steady_after_s: float = 10.0,
+    motion_gap_s: float = DEFAULT_MOTION_GAP_S,
+    motion_min_steps: int = DEFAULT_MOTION_MIN_STEPS,
+) -> list[DeviceReport]:
+    """Summarize one FTRF capture stream."""
+    return analyze_capture(source, steady_after_s, motion_gap_s, motion_min_steps).devices
 
 
 def _range_text(ranges: dict[str, tuple[int, int]], name: str) -> str:
