@@ -29,6 +29,7 @@ from .protocol import (
     FRAME_TYPE_CRITICAL,
     FRAME_TYPE_CURRENT_PATH,
     FRAME_TYPE_METADATA,
+    FRAME_TYPE_PHASE_ADVANCE,
     FRAME_TYPE_STATUS,
     DecodeError,
     decode_frame,
@@ -46,6 +47,10 @@ PHASE_TARGET_MIN_ABS = 100
 DEFAULT_DECOUPLING_F_PWM_HZ = 25_000.0
 DEFAULT_DECOUPLING_POLE_PAIRS = 50
 DEFAULT_DECOUPLING_POSITION_UNITS_PER_REV = 65_536
+PHASE_ADVANCE_FLAG_NONZERO = 1 << 1
+PHASE_ADVANCE_FLAG_CLAMPED = 1 << 2
+PHASE_ADVANCE_FLAG_GATED = 1 << 4
+PHASE_ADVANCE_FLAG_WRITE_FAILED = 1 << 5
 
 
 @dataclass
@@ -98,6 +103,21 @@ class DecouplingPhaseReport:
 
 
 @dataclass
+class PhaseAdvanceReport:
+    """Runtime phase-advance summary for one motion phase."""
+
+    samples: int
+    counts_range: tuple[int, int]
+    nonzero_samples: int
+    clamped_samples: int
+    gated_samples: int
+    write_failed_samples: int
+    gain_ppm_range: tuple[int, int]
+    max_counts_range: tuple[int, int]
+    deadband_range: tuple[int, int]
+
+
+@dataclass
 class MotionPhaseReport:
     """Phase-focused summary for one motion segment bucket."""
 
@@ -128,6 +148,7 @@ class MotionPhaseReport:
     target_velocity_range: tuple[int, int]
     iq_to_actual_abs_median: float | None
     uq_limited_range: tuple[int, int]
+    phase_advance: PhaseAdvanceReport | None = None
     decoupling: DecouplingPhaseReport | None = None
     post_discriminator: str | None = None
 
@@ -203,6 +224,7 @@ class CaptureAnalysis:
 @dataclass(frozen=True)
 class _CriticalObservation:
     timestamp_ticks: int
+    source_key: tuple[int, int]
     host_recv_ns: int
     step_position: int
     tmc_position_actual: int
@@ -234,6 +256,17 @@ class _CurrentPathObservation:
 
 
 @dataclass(frozen=True)
+class _PhaseAdvanceObservation:
+    timestamp_ticks: int
+    source_key: tuple[int, int]
+    counts: int
+    flags: int
+    gain_ppm: int
+    max_counts: int
+    deadband: int
+
+
+@dataclass(frozen=True)
 class _ControlDetailObservation:
     timestamp_ticks: int
     torque_command: int
@@ -257,6 +290,7 @@ class _DeviceState:
     last_status_by_source: dict[tuple[int, int], dict[str, int]] = field(default_factory=dict)
     critical_observations: list[_CriticalObservation] = field(default_factory=list)
     current_path_observations: list[_CurrentPathObservation] = field(default_factory=list)
+    phase_advance_observations: list[_PhaseAdvanceObservation] = field(default_factory=list)
     control_detail_observations: list[_ControlDetailObservation] = field(default_factory=list)
 
 
@@ -362,6 +396,7 @@ def _observe_critical(
     state: _DeviceState,
     payload: dict[str, object],
     timestamp_ticks: int,
+    source_key: tuple[int, int],
     host_recv_ns: int,
     steady_after_s: float,
 ) -> None:
@@ -396,6 +431,7 @@ def _observe_critical(
     state.critical_observations.append(
         _CriticalObservation(
             timestamp_ticks=timestamp_ticks,
+            source_key=source_key,
             host_recv_ns=host_recv_ns,
             step_position=int(payload["step_position"]),
             tmc_position_actual=int(payload["tmc_position_actual"]),
@@ -499,6 +535,25 @@ def _observe_current_path(
         foc_iwy,
         adc_i0_raw,
         adc_i1_raw,
+    )
+
+
+def _observe_phase_advance(
+    state: _DeviceState,
+    payload: dict[str, object],
+    timestamp_ticks: int,
+    source_key: tuple[int, int],
+) -> None:
+    state.phase_advance_observations.append(
+        _PhaseAdvanceObservation(
+            timestamp_ticks=timestamp_ticks,
+            source_key=source_key,
+            counts=int(payload["phase_advance_counts"]),
+            flags=int(payload["phase_advance_flags"]),
+            gain_ppm=int(payload["phase_advance_gain_ppm"]),
+            max_counts=int(payload["phase_advance_max_counts"]),
+            deadband=int(payload["phase_advance_deadband"]),
+        )
     )
 
 
@@ -959,6 +1014,25 @@ def _near_limit_longest_run_s(
     return (longest_end - longest_start) / clock_hz
 
 
+def _phase_advance_report(
+    observations: list[_PhaseAdvanceObservation],
+) -> PhaseAdvanceReport | None:
+    if not observations:
+        return None
+    flags = [sample.flags for sample in observations]
+    return PhaseAdvanceReport(
+        samples=len(observations),
+        counts_range=_range([sample.counts for sample in observations]),
+        nonzero_samples=sum(bool(flag & PHASE_ADVANCE_FLAG_NONZERO) for flag in flags),
+        clamped_samples=sum(bool(flag & PHASE_ADVANCE_FLAG_CLAMPED) for flag in flags),
+        gated_samples=sum(bool(flag & PHASE_ADVANCE_FLAG_GATED) for flag in flags),
+        write_failed_samples=sum(bool(flag & PHASE_ADVANCE_FLAG_WRITE_FAILED) for flag in flags),
+        gain_ppm_range=_range([sample.gain_ppm for sample in observations]),
+        max_counts_range=_range([sample.max_counts for sample in observations]),
+        deadband_range=_range([sample.deadband for sample in observations]),
+    )
+
+
 def _decoupling_phase_report(
     samples: list[_CriticalObservation],
     phase_current_paths: list[_CurrentPathObservation],
@@ -1031,6 +1105,7 @@ def _decoupling_phase_report(
 def _motion_phase_reports(
     observations: list[_CriticalObservation],
     current_paths: list[_CurrentPathObservation],
+    phase_advances: list[_PhaseAdvanceObservation],
     segment_samples: list[_CriticalObservation],
     transform: _FittedTransform | None,
     clock_hz: int,
@@ -1102,6 +1177,15 @@ def _motion_phase_reports(
             ]
         if not samples:
             continue
+        sample_start = samples[0].timestamp_ticks
+        sample_end = samples[-1].timestamp_ticks
+        sample_sources = {sample.source_key for sample in samples}
+        phase_advance_samples = [
+            sample
+            for sample in phase_advances
+            if sample_start <= sample.timestamp_ticks <= sample_end
+            and sample.source_key in sample_sources
+        ]
         residuals = [_fitted_residual(sample, transform, command_position) for sample in samples]
         rms, peak = _residual_stats(residuals)
         actual_to_target = [
@@ -1166,6 +1250,7 @@ def _motion_phase_reports(
                 critical = _nearest_critical(samples, current_path.timestamp_ticks)
                 if critical.actual_torque != 0:
                     iq_to_actual.append(abs(current_path.foc_iq) / abs(critical.actual_torque))
+        phase_advance = _phase_advance_report(phase_advance_samples)
         decoupling = _decoupling_phase_report(samples, phase_current_paths, decoupling_config)
         post_discriminator = _post_move_discriminator(samples) if name == "post_0_500ms" else None
         reports.append(
@@ -1197,6 +1282,7 @@ def _motion_phase_reports(
                 target_velocity_range=_range([sample.target_velocity for sample in samples]),
                 iq_to_actual_abs_median=_rounded_median(iq_to_actual),
                 uq_limited_range=_range([sample.uq_limited for sample in samples]),
+                phase_advance=phase_advance,
                 decoupling=decoupling,
                 post_discriminator=post_discriminator,
             )
@@ -1213,6 +1299,9 @@ def _finalize_motion_segments(
     observations = sorted(state.critical_observations, key=lambda sample: sample.timestamp_ticks)
     current_paths = sorted(
         state.current_path_observations, key=lambda sample: sample.timestamp_ticks
+    )
+    phase_advances = sorted(
+        state.phase_advance_observations, key=lambda sample: sample.timestamp_ticks
     )
     details = sorted(state.control_detail_observations, key=lambda sample: sample.timestamp_ticks)
     groups = _motion_groups(observations, state.clock_hz, motion_gap_s, motion_min_steps)
@@ -1300,6 +1389,7 @@ def _finalize_motion_segments(
         phase_reports = _motion_phase_reports(
             observations,
             current_paths,
+            phase_advances,
             segment_samples,
             transform,
             state.clock_hz,
@@ -1387,10 +1477,22 @@ def analyze_capture(
             _observe_status(state, (header.source_kind, header.source_index), frame.payload)
         elif header.frame_type == FRAME_TYPE_CRITICAL:
             _observe_critical(
-                state, frame.payload, header.timestamp_ticks, record.host_recv_ns, steady_after_s
+                state,
+                frame.payload,
+                header.timestamp_ticks,
+                (header.source_kind, header.source_index),
+                record.host_recv_ns,
+                steady_after_s,
             )
         elif header.frame_type == FRAME_TYPE_CURRENT_PATH:
             _observe_current_path(state, frame.payload, header.timestamp_ticks, steady_after_s)
+        elif header.frame_type == FRAME_TYPE_PHASE_ADVANCE:
+            _observe_phase_advance(
+                state,
+                frame.payload,
+                header.timestamp_ticks,
+                (header.source_kind, header.source_index),
+            )
         elif header.frame_type == FRAME_TYPE_CONTROL_DETAIL:
             _observe_control_detail(state, frame.payload, header.timestamp_ticks)
 
@@ -1465,6 +1567,12 @@ def _range_text(ranges: dict[str, tuple[int, int]], name: str) -> str:
 def _optional_range_text(value: tuple[int, int] | None) -> str:
     if value is None:
         return "n/a"
+    return f"{value[0]}..{value[1]}"
+
+
+def _compact_range_text(value: tuple[int, int]) -> str:
+    if value[0] == value[1]:
+        return str(value[0])
     return f"{value[0]}..{value[1]}"
 
 
@@ -1693,6 +1801,25 @@ def format_summary(
                                 discriminator=phase.post_discriminator or "n/a",
                             )
                         )
+                        if phase.phase_advance is not None:
+                            phase_advance = phase.phase_advance
+                            lines.append(
+                                "      phase_advance={counts} "
+                                "nonzero={nonzero}/{samples} "
+                                "clamped={clamped}/{samples} gated={gated}/{samples} "
+                                "write_failed={write_failed}/{samples} "
+                                "gain={gain} max={max_counts} deadband={deadband}".format(
+                                    counts=_optional_range_text(phase_advance.counts_range),
+                                    nonzero=phase_advance.nonzero_samples,
+                                    samples=phase_advance.samples,
+                                    clamped=phase_advance.clamped_samples,
+                                    gated=phase_advance.gated_samples,
+                                    write_failed=phase_advance.write_failed_samples,
+                                    gain=_compact_range_text(phase_advance.gain_ppm_range),
+                                    max_counts=_compact_range_text(phase_advance.max_counts_range),
+                                    deadband=_compact_range_text(phase_advance.deadband_range),
+                                )
+                            )
                     if include_decoupling_audit and phase.decoupling is not None:
                         decoupling = phase.decoupling
                         lines.append(

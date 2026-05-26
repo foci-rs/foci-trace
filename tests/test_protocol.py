@@ -6,6 +6,7 @@ from foci_trace.protocol import (
     FRAME_TYPE_CRITICAL,
     FRAME_TYPE_CURRENT_PATH,
     FRAME_TYPE_METADATA,
+    FRAME_TYPE_PHASE_ADVANCE,
     PROTOCOL_VERSION,
     DecodeError,
     FrameAssembler,
@@ -111,6 +112,19 @@ def test_decode_v5_current_path_fields() -> None:
     assert frame.payload["interim_foc_iq_id"] == 0x1122_3344
     assert frame.payload["interim_foc_iwy_iux"] == 0x5566_7788
     assert frame.payload["interim_adc_i1_i0"] == 0x99AA_BBCC
+
+
+def test_decodes_phase_advance_frame() -> None:
+    payload = struct.pack("<hBBiHH", -64, 0b0000_0111, 0, -60000, 64, 16)
+
+    frame = decode_frame(_header(FRAME_TYPE_PHASE_ADVANCE, payload) + payload)
+
+    assert frame.header.frame_type == FRAME_TYPE_PHASE_ADVANCE
+    assert frame.payload["phase_advance_counts"] == -64
+    assert frame.payload["phase_advance_flags"] == 0b0000_0111
+    assert frame.payload["phase_advance_gain_ppm"] == -60000
+    assert frame.payload["phase_advance_max_counts"] == 64
+    assert frame.payload["phase_advance_deadband"] == 16
 
 
 def test_decode_v2_critical_keeps_legacy_torque_fields() -> None:

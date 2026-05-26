@@ -8,6 +8,7 @@ from foci_trace.protocol import (
     FRAME_TYPE_CRITICAL,
     FRAME_TYPE_CURRENT_PATH,
     FRAME_TYPE_METADATA,
+    FRAME_TYPE_PHASE_ADVANCE,
     FRAME_TYPE_STATUS,
     PROTOCOL_VERSION,
 )
@@ -129,6 +130,10 @@ def _current_path_payload(
     sample_flags: int = 0,
 ) -> bytes:
     return struct.pack("<BBBBIII", sample_flags, 0, 0, 0, foc_iq_id, foc_iwy_iux, adc_i1_i0)
+
+
+def _phase_advance_payload(counts: int, flags: int) -> bytes:
+    return struct.pack("<hBBiHH", counts, flags, 0, -60000, 64, 16)
 
 
 def _pack_i16_pair(low: int, high: int) -> int:
@@ -734,6 +739,61 @@ def test_feedforward_audit_includes_velocity_transient_offset() -> None:
     assert "velocity_transient=110..120" in text
     assert "transient_nonzero=2/2" in text
     assert "transient_sign=2/2" in text
+
+
+def test_phase_advance_audit_uses_phase_critical_timestamp_span() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+
+    clock = 84_000_000
+    critical_samples = [
+        (1, 0, 0, 0),
+        (2, clock * 20 // 1000, 600, 580),
+        (3, clock * 80 // 1000, 1200, 1180),
+        (4, clock * 140 // 1000, 1800, 1780),
+    ]
+    for seq, timestamp, step, actual in critical_samples:
+        payload = _critical_motion_payload(
+            step,
+            actual,
+            torque_actual=400,
+            torque_target=800,
+            uq_limited=1000,
+        )
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_CRITICAL, payload, seq, timestamp, 1, 0) + payload,
+        )
+
+    phase_samples = [
+        (5, 0, -64, 0b0000_0111),
+        (6, clock * 10 // 1000, 0, 0b0001_0000),
+        (7, clock * 20 // 1000, 64, 0b0000_0011),
+        (8, clock * 40 // 1000, 99, 0b0000_0111),
+    ]
+    for seq, timestamp, counts, flags in phase_samples:
+        payload = _phase_advance_payload(counts, flags)
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_PHASE_ADVANCE, payload, seq, timestamp, 1, 0) + payload,
+        )
+
+    reports = summarize_capture(
+        io.BytesIO(output.getvalue()),
+        steady_after_s=0,
+        motion_gap_s=0.1,
+        motion_min_steps=100,
+    )
+    text = format_summary(reports, include_phase_split=True, include_feedforward_audit=True)
+
+    assert (
+        "phase_advance=-64..64 nonzero=2/3 clamped=1/3 gated=1/3 "
+        "write_failed=0/3 gain=-60000 max=64 deadband=16"
+    ) in text
+    assert "phase_advance=-64..99" not in text
 
 
 def test_feedforward_audit_uses_separate_current_path_frames() -> None:

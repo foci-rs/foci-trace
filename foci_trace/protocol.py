@@ -17,6 +17,7 @@ FRAME_TYPE_STATUS = 3
 FRAME_TYPE_EVENT = 4
 FRAME_TYPE_METADATA = 5
 FRAME_TYPE_CURRENT_PATH = 6
+FRAME_TYPE_PHASE_ADVANCE = 7
 
 
 class DecodeError(ValueError):
@@ -138,6 +139,8 @@ def _decode_payload(version: int, frame_type: int, payload: bytes) -> dict[str, 
         return _decode_metadata(payload)
     if frame_type == FRAME_TYPE_CURRENT_PATH:
         return _decode_current_path(payload)
+    if frame_type == FRAME_TYPE_PHASE_ADVANCE:
+        return _decode_phase_advance(payload)
     return {"raw": payload}
 
 
@@ -210,6 +213,20 @@ def _decode_current_path(payload: bytes) -> dict[str, Any]:
         "interim_foc_iq_id": foc_iq_id,
         "interim_foc_iwy_iux": foc_iwy_iux,
         "interim_adc_i1_i0": adc_i1_i0,
+    }
+
+
+def _decode_phase_advance(payload: bytes) -> dict[str, Any]:
+    _require(payload, 12, "phase-advance")
+    counts, flags, _reserved, gain_ppm, max_counts, deadband = struct.unpack_from(
+        "<hBBiHH", payload, 0
+    )
+    return {
+        "phase_advance_counts": counts,
+        "phase_advance_flags": flags,
+        "phase_advance_gain_ppm": gain_ppm,
+        "phase_advance_max_counts": max_counts,
+        "phase_advance_deadband": deadband,
     }
 
 
