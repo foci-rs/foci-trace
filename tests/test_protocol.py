@@ -5,6 +5,7 @@ import pytest
 from foci_trace.protocol import (
     FRAME_TYPE_CRITICAL,
     FRAME_TYPE_CURRENT_PATH,
+    FRAME_TYPE_EVENT,
     FRAME_TYPE_METADATA,
     FRAME_TYPE_PHASE_ADVANCE,
     PROTOCOL_VERSION,
@@ -178,6 +179,18 @@ def test_decode_metadata_strings_and_labels() -> None:
     assert frame.payload["firmware_id"] == "fw 1.2.3"
     assert frame.payload["product"] == "FOCI OpenFFBoard (trace)"
     assert frame.payload["sources"][0]["label"] == "channel"
+
+
+def test_decode_commissioning_event_names() -> None:
+    payload = struct.pack("<BBHBxxxiiii", 1, 7, 101, 4, 0, 1, 17, 3)
+
+    frame = decode_frame(_header(FRAME_TYPE_EVENT, payload) + payload)
+
+    assert frame.payload["subsystem_name"] == "commissioning"
+    assert frame.payload["event_name"] == "commission_phase_start"
+    assert frame.payload["level_name"] == "info"
+    assert frame.payload["engine_kind_name"] == "commission"
+    assert frame.payload["args"] == [0, 1, 17, 3]
 
 
 def test_rejects_bad_magic() -> None:

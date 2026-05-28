@@ -19,6 +19,111 @@ FRAME_TYPE_METADATA = 5
 FRAME_TYPE_CURRENT_PATH = 6
 FRAME_TYPE_PHASE_ADVANCE = 7
 
+SUBSYSTEM_COMMISSIONING = 7
+
+EVENT_COMMISSION_ENGINE_START = 100
+EVENT_COMMISSION_PHASE_START = 101
+EVENT_COMMISSION_PHASE_END = 102
+EVENT_COMMISSION_ENGINE_TERMINAL = 103
+EVENT_COMMISSION_MECHANICAL_ID_RESULT = 110
+EVENT_COMMISSION_MECHANICAL_ID_ATTEMPT = 111
+EVENT_COMMISSION_MECHANICAL_ID_RESPONSE = 112
+EVENT_COMMISSION_MECHANICAL_ID_CLASSIFICATION = 113
+EVENT_COMMISSION_VELOCITY_VALIDATE_RESULT = 120
+EVENT_COMMISSION_VELOCITY_VALIDATE_GAIN = 121
+EVENT_COMMISSION_VELOCITY_VALIDATE_METRICS = 122
+EVENT_COMMISSION_VELOCITY_VALIDATE_LIMITS = 123
+EVENT_COMMISSION_POSITION_TUNE_RESULT = 130
+EVENT_COMMISSION_POSITION_TUNE_TARGET = 131
+EVENT_COMMISSION_POSITION_TUNE_METRICS = 132
+EVENT_COMMISSION_POSITION_TUNE_LIMITS = 133
+EVENT_COMMISSION_RESTORE_RESULT = 140
+EVENT_COMMISSION_RESTORE_ERROR_DRIFT = 141
+EVENT_COMMISSION_RESTORE_DISPOSITION = 142
+EVENT_COMMISSION_DIAGNOSTIC_WARNING = 200
+
+_LEVEL_NAMES = {
+    1: "info",
+    2: "warn",
+    3: "error",
+}
+
+_SUBSYSTEM_NAMES = {
+    SUBSYSTEM_COMMISSIONING: "commissioning",
+}
+
+_COMMISSIONING_EVENT_NAMES = {
+    EVENT_COMMISSION_ENGINE_START: "commission_engine_start",
+    EVENT_COMMISSION_PHASE_START: "commission_phase_start",
+    EVENT_COMMISSION_PHASE_END: "commission_phase_end",
+    EVENT_COMMISSION_ENGINE_TERMINAL: "commission_engine_terminal",
+    EVENT_COMMISSION_MECHANICAL_ID_RESULT: "commission_mechanical_id_result",
+    EVENT_COMMISSION_MECHANICAL_ID_ATTEMPT: "commission_mechanical_id_attempt",
+    EVENT_COMMISSION_MECHANICAL_ID_RESPONSE: "commission_mechanical_id_response",
+    EVENT_COMMISSION_MECHANICAL_ID_CLASSIFICATION: "commission_mechanical_id_classification",
+    EVENT_COMMISSION_VELOCITY_VALIDATE_RESULT: "commission_velocity_validate_result",
+    EVENT_COMMISSION_VELOCITY_VALIDATE_GAIN: "commission_velocity_validate_gain",
+    EVENT_COMMISSION_VELOCITY_VALIDATE_METRICS: "commission_velocity_validate_metrics",
+    EVENT_COMMISSION_VELOCITY_VALIDATE_LIMITS: "commission_velocity_validate_limits",
+    EVENT_COMMISSION_POSITION_TUNE_RESULT: "commission_position_tune_result",
+    EVENT_COMMISSION_POSITION_TUNE_TARGET: "commission_position_tune_target",
+    EVENT_COMMISSION_POSITION_TUNE_METRICS: "commission_position_tune_metrics",
+    EVENT_COMMISSION_POSITION_TUNE_LIMITS: "commission_position_tune_limits",
+    EVENT_COMMISSION_RESTORE_RESULT: "commission_restore_result",
+    EVENT_COMMISSION_RESTORE_ERROR_DRIFT: "commission_restore_error_drift",
+    EVENT_COMMISSION_RESTORE_DISPOSITION: "commission_restore_disposition",
+    EVENT_COMMISSION_DIAGNOSTIC_WARNING: "commission_diagnostic_warning",
+}
+
+_ENGINE_KIND_NAMES = {
+    1: "commission",
+    2: "calibrate",
+    3: "selftest",
+    4: "outer_tune",
+}
+
+PHASE_NAMES = {
+    1: "AdcCalibrate",
+    2: "CoilCheck",
+    3: "PhaseWiringCheck",
+    4: "EncoderCheck",
+    5: "ElectricalId",
+    6: "CurrentTune",
+    7: "CurrentValidate",
+    8: "InnerDone",
+    9: "MechanicalId",
+    10: "VelocityTune",
+    11: "VelocityValidate",
+    12: "PositionTune",
+    13: "FilterTune",
+    14: "Commit",
+    15: "OuterDone",
+    16: "EncoderAlign",
+    17: "ClosedLoopEntry",
+}
+
+COMMISSION_STATUS_NAMES = {
+    0: "accepted",
+    1: "accepted_with_warnings",
+    2: "inner_only",
+    3: "spi",
+    4: "adc_fault",
+    5: "coil_fault",
+    6: "phase_fault",
+    7: "encoder_fault",
+    8: "electrical_id_failed",
+    9: "current_validation_failed",
+    10: "mechanical_id_failed",
+    11: "velocity_validation_failed",
+    12: "position_tune_failed",
+    13: "encoder_not_aligned",
+    14: "shutdown",
+    15: "already_running",
+    16: "queue_full",
+    17: "safety_envelope_violation",
+    18: "chip_reset_detected",
+}
+
 
 class DecodeError(ValueError):
     """Raised when a trace frame cannot be decoded."""
@@ -268,12 +373,29 @@ def _decode_event(payload: bytes) -> dict[str, Any]:
     _require(payload, 24, "event")
     level, subsystem_id, event_id, arg_count = struct.unpack_from("<BBHB", payload, 0)
     args = struct.unpack_from("<iiii", payload, 8)
-    return {
+    decoded_args = list(args[: min(arg_count, 4)])
+    decoded = {
         "level": level,
+        "level_name": _LEVEL_NAMES.get(level, f"unknown_{level}"),
         "subsystem_id": subsystem_id,
+        "subsystem_name": _SUBSYSTEM_NAMES.get(subsystem_id, f"unknown_{subsystem_id}"),
         "event_id": event_id,
         "arg_count": min(arg_count, 4),
-        "args": list(args[: min(arg_count, 4)]),
+        "args": decoded_args,
+    }
+    if subsystem_id == SUBSYSTEM_COMMISSIONING:
+        decoded["event_name"] = _COMMISSIONING_EVENT_NAMES.get(
+            event_id, f"commission_unknown_{event_id}"
+        )
+        if len(decoded_args) >= 2:
+            engine_kind = decoded_args[1]
+            decoded["engine_kind_name"] = _ENGINE_KIND_NAMES.get(
+                engine_kind, f"unknown_{engine_kind}"
+            )
+    else:
+        decoded["event_name"] = f"unknown_{event_id}"
+    return {
+        **decoded,
     }
 
 

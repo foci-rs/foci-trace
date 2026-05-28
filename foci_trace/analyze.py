@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, field
 import io
+import json
 import math
 from statistics import median
 import struct
@@ -15,6 +16,12 @@ from .capture_file import (
     RECORD_TYPE_DEVICE_TABLE,
     RECORD_TYPE_FIRMWARE_FRAME,
     CaptureReader,
+)
+from .commissioning import (
+    CommissioningCaptureBuilder,
+    CommissioningCaptureReport,
+    commissioning_report_to_json,
+    format_commissioning_report,
 )
 from .contour import (
     ContourSegmentReport,
@@ -28,6 +35,7 @@ from .protocol import (
     FRAME_TYPE_CONTROL_DETAIL,
     FRAME_TYPE_CRITICAL,
     FRAME_TYPE_CURRENT_PATH,
+    FRAME_TYPE_EVENT,
     FRAME_TYPE_METADATA,
     FRAME_TYPE_PHASE_ADVANCE,
     FRAME_TYPE_STATUS,
@@ -216,6 +224,9 @@ class CaptureAnalysis:
     """Complete analyzer result, including optional cross-device contour data."""
 
     devices: list[DeviceReport]
+    commissioning: CommissioningCaptureReport = field(
+        default_factory=lambda: CommissioningCaptureReport([])
+    )
     contour_segments: list[ContourSegmentReport] = field(default_factory=list)
     corexy_plus: str | None = None
     corexy_minus: str | None = None
@@ -1448,6 +1459,7 @@ def analyze_capture(
 ) -> CaptureAnalysis:
     """Analyze one FTRF capture stream."""
     states: dict[int, _DeviceState] = {}
+    commissioning = CommissioningCaptureBuilder()
     for record in CaptureReader(source).records():
         state = _state(states, record.device_index)
         if record.record_type == RECORD_TYPE_DEVICE_TABLE:
@@ -1484,6 +1496,12 @@ def analyze_capture(
                 record.host_recv_ns,
                 steady_after_s,
             )
+            commissioning.observe_critical(
+                record.device_index,
+                header.source_index,
+                header.timestamp_ticks,
+                frame.payload,
+            )
         elif header.frame_type == FRAME_TYPE_CURRENT_PATH:
             _observe_current_path(state, frame.payload, header.timestamp_ticks, steady_after_s)
         elif header.frame_type == FRAME_TYPE_PHASE_ADVANCE:
@@ -1495,6 +1513,14 @@ def analyze_capture(
             )
         elif header.frame_type == FRAME_TYPE_CONTROL_DETAIL:
             _observe_control_detail(state, frame.payload, header.timestamp_ticks)
+            commissioning.observe_control_detail(
+                record.device_index,
+                header.source_index,
+                header.timestamp_ticks,
+                frame.payload,
+            )
+        elif header.frame_type == FRAME_TYPE_EVENT:
+            commissioning.observe_event(record.device_index, header, frame.payload)
 
     decoupling_config = (
         None
@@ -1541,6 +1567,9 @@ def analyze_capture(
             )
     return CaptureAnalysis(
         devices=[states[index].report for index in sorted(states)],
+        commissioning=commissioning.finalize(
+            {index: state.clock_hz for index, state in states.items()}
+        ),
         contour_segments=contour_segments,
         corexy_plus=corexy_plus,
         corexy_minus=corexy_minus,
@@ -1865,6 +1894,9 @@ def format_analysis(
         include_feedforward_audit=include_feedforward_audit,
         include_decoupling_audit=include_decoupling_audit,
     )
+    commissioning_text = format_commissioning_report(analysis.commissioning)
+    if commissioning_text:
+        text = "\n".join(part for part in (text, commissioning_text) if part)
     if not include_contour:
         return text
     lines = [text] if text else []
@@ -1900,6 +1932,56 @@ def format_analysis(
             )
         )
     return "\n".join(lines)
+
+
+def analysis_to_json(analysis: CaptureAnalysis) -> dict[str, object]:
+    """Convert full capture analysis to JSON-compatible dictionaries."""
+    return {
+        "devices": [
+            {
+                "device_index": report.device_index,
+                "usb_path": report.usb_path,
+                "product": report.product,
+                "serial": report.serial,
+                "metadata_serial": report.metadata_serial,
+                "source_labels": list(report.source_labels),
+                "frame_counts": dict(report.frame_counts),
+                "missing_frames": report.missing_frames,
+                "sequence_gaps": dict(report.sequence_gaps),
+                "status_deltas": dict(report.status_deltas),
+                "steady_after_s": report.steady_after_s,
+                "steady_samples": report.steady_samples,
+                "voltage_limited_samples": report.voltage_limited_samples,
+                "ranges": dict(report.ranges),
+                "motion_segments": [
+                    {
+                        "segment_index": segment.segment_index,
+                        "start_s": segment.start_s,
+                        "duration_s": segment.duration_s,
+                        "step_delta": segment.step_delta,
+                        "critical_samples": segment.critical_samples,
+                        "control_detail_samples": segment.control_detail_samples,
+                        "trace_gap_suspect": segment.trace_gap_suspect,
+                    }
+                    for segment in report.motion_segments
+                ],
+                "decode_errors": report.decode_errors,
+            }
+            for report in analysis.devices
+        ],
+        "commissioning": commissioning_report_to_json(analysis.commissioning),
+        "contour_segments": [
+            {
+                "segment_index": segment.segment_index,
+                "samples": segment.samples,
+                "duration_s": segment.duration_s,
+                "delta_x": segment.delta_x,
+                "delta_y": segment.delta_y,
+                "classification": segment.classification,
+            }
+            for segment in analysis.contour_segments
+        ],
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1960,6 +2042,11 @@ def main(argv: list[str] | None = None) -> int:
         default=5.0,
         help="maximum host receive timestamp delta for paired contour samples",
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit machine-readable JSON instead of text",
+    )
 
     try:
         args = parser.parse_args(argv)
@@ -1993,15 +2080,18 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(str(exc))
         except SystemExit as parser_exc:
             return int(parser_exc.code)
-    print(
-        format_analysis(
-            analysis,
-            include_phase_split=args.phase_split,
-            include_feedforward_audit=args.feedforward_audit,
-            include_decoupling_audit=args.decoupling_audit,
-            include_contour=args.contour_analysis,
+    if args.json:
+        print(json.dumps(analysis_to_json(analysis), sort_keys=True))
+    else:
+        print(
+            format_analysis(
+                analysis,
+                include_phase_split=args.phase_split,
+                include_feedforward_audit=args.feedforward_audit,
+                include_decoupling_audit=args.decoupling_audit,
+                include_contour=args.contour_analysis,
+            )
         )
-    )
     return 0
 
 

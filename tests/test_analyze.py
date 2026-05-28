@@ -1,16 +1,23 @@
 import io
+import json
 import struct
 
 from foci_trace.analyze import format_summary, summarize_capture
 from foci_trace.capture_file import CaptureWriter
 from foci_trace.protocol import (
+    EVENT_COMMISSION_ENGINE_START,
+    EVENT_COMMISSION_ENGINE_TERMINAL,
+    EVENT_COMMISSION_PHASE_END,
+    EVENT_COMMISSION_PHASE_START,
     FRAME_TYPE_CONTROL_DETAIL,
     FRAME_TYPE_CRITICAL,
     FRAME_TYPE_CURRENT_PATH,
+    FRAME_TYPE_EVENT,
     FRAME_TYPE_METADATA,
     FRAME_TYPE_PHASE_ADVANCE,
     FRAME_TYPE_STATUS,
     PROTOCOL_VERSION,
+    SUBSYSTEM_COMMISSIONING,
 )
 
 
@@ -84,6 +91,28 @@ def _status_payload(drops: int, endpoint_pressure: int, flags: int = 0x70004480)
         1,
         endpoint_pressure,
         4,
+    )
+
+
+def _commission_event_payload(
+    event_id: int,
+    *,
+    source_index: int = 0,
+    engine_kind: int = 1,
+    arg2: int = 0,
+    arg3: int = 0,
+    level: int = 1,
+) -> bytes:
+    return struct.pack(
+        "<BBHBxxxiiii",
+        level,
+        SUBSYSTEM_COMMISSIONING,
+        event_id,
+        4,
+        source_index,
+        engine_kind,
+        arg2,
+        arg3,
     )
 
 
@@ -1060,6 +1089,44 @@ def test_analyze_capture_preserves_existing_summary_api() -> None:
     assert summarize_capture(io.BytesIO(output.getvalue()), steady_after_s=0)[0].serial == "ABC"
 
 
+def test_analyze_capture_includes_commissioning_report() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+
+    events = [
+        (1, 1_000, EVENT_COMMISSION_ENGINE_START, 1, 7),
+        (2, 10_000, EVENT_COMMISSION_PHASE_START, 17, 3),
+        (3, 80_000, EVENT_COMMISSION_PHASE_END, 17, 0),
+        (4, 81_000, EVENT_COMMISSION_ENGINE_TERMINAL, 0, 7),
+    ]
+    for seq, timestamp, event_id, arg2, arg3 in events:
+        payload = _commission_event_payload(event_id, arg2=arg2, arg3=arg3)
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_EVENT, payload, seq, timestamp, 255, 255) + payload,
+        )
+    for idx in range(5):
+        payload = _critical_motion_payload(idx, idx, 100, 1000)
+        timestamp = 10_000 + idx * 1_000
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_CRITICAL, payload, 10 + idx, timestamp, 1, 0) + payload,
+        )
+
+    from foci_trace.analyze import analyze_capture, format_analysis
+
+    analysis = analyze_capture(io.BytesIO(output.getvalue()), steady_after_s=0)
+    text = format_analysis(analysis)
+
+    assert analysis.commissioning.runs[0].result == "accepted"
+    assert analysis.commissioning.runs[0].phases[0].critical_samples == 5
+    assert "commissioning dev0 source=0 engine=commission" in text
+    assert "phase ClosedLoopEntry" in text
+
+
 def test_contour_analysis_reports_along_and_cross_error() -> None:
     output = io.BytesIO()
     writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
@@ -1484,3 +1551,32 @@ def test_main_ignores_corexy_mapping_arguments_without_contour_analysis(tmp_path
     captured = capsys.readouterr()
     assert rc == 0
     assert "dev0 1-50 FOCI OpenFFBoard (trace) serial=ABC" in captured.out
+
+
+def test_main_json_includes_commissioning_section(tmp_path, capsys) -> None:
+    capture_path = tmp_path / "capture.bin"
+    with capture_path.open("wb") as output:
+        writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+        writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+        for seq, timestamp, event_id, arg2, arg3 in (
+            (1, 1_000, EVENT_COMMISSION_ENGINE_START, 1, 7),
+            (2, 10_000, EVENT_COMMISSION_PHASE_START, 17, 3),
+            (3, 80_000, EVENT_COMMISSION_PHASE_END, 17, 0),
+            (4, 81_000, EVENT_COMMISSION_ENGINE_TERMINAL, 0, 7),
+        ):
+            payload = _commission_event_payload(event_id, arg2=arg2, arg3=arg3)
+            writer.write_firmware_frame(
+                0,
+                timestamp,
+                _header(FRAME_TYPE_EVENT, payload, seq, timestamp, 255, 255) + payload,
+            )
+
+    from foci_trace.analyze import main
+
+    rc = main([str(capture_path), "--json"])
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    data = json.loads(captured.out)
+    assert data["devices"][0]["serial"] == "ABC"
+    assert data["commissioning"]["runs"][0]["result"] == "accepted"
