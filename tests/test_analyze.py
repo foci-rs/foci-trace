@@ -1068,6 +1068,70 @@ def test_summarize_capture_reports_current_authority_windows() -> None:
     assert "iq/actual=1.02 adc0_delta=-20..20 adc1_delta=-30..30" in text
 
 
+def test_current_path_frames_are_matched_by_source_index() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI Ouroboros (trace)", "ABC", b"")
+
+    clock = 84_000_000
+    for seq, timestamp, step in (
+        (1, clock // 1000, 0),
+        (2, (clock // 1000) * 2, 10),
+    ):
+        payload = _critical_motion_payload(
+            step,
+            step,
+            torque_actual=100,
+            torque_target=2800,
+            uq_limited=1200,
+        )
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_CRITICAL, payload, seq, timestamp, 1, 1) + payload,
+        )
+
+    other_channel_current = _current_path_payload(
+        _pack_i16_pair(0, 900),
+        _pack_i16_pair(0, 0),
+        _pack_u16_pair(32000, 32100),
+    )
+    writer.write_firmware_frame(
+        0,
+        clock // 1000,
+        _header(
+            FRAME_TYPE_CURRENT_PATH,
+            other_channel_current,
+            3,
+            clock // 1000,
+            1,
+            0,
+        )
+        + other_channel_current,
+    )
+
+    detail = _control_detail_payload(2800, voltage_limit=3000, torque_limit=2816)
+    writer.write_firmware_frame(
+        0,
+        clock // 1000,
+        _header(FRAME_TYPE_CONTROL_DETAIL, detail, 4, clock // 1000, 1, 1) + detail,
+    )
+
+    reports = summarize_capture(
+        io.BytesIO(output.getvalue()),
+        steady_after_s=0,
+        motion_gap_s=0.01,
+        motion_min_steps=5,
+    )
+
+    segment = reports[0].motion_segments[0]
+    assert segment.foc_iq_range is None
+    assert segment.foc_id_range is None
+    assert segment.current_path_max_gap_s is None
+    assert segment.current_authority is not None
+    assert segment.current_authority.iq_to_actual_abs_median is None
+
+
 def test_analyze_capture_preserves_existing_summary_api() -> None:
     output = io.BytesIO()
     writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)

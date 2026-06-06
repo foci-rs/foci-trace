@@ -258,6 +258,7 @@ class _CriticalObservation:
 @dataclass(frozen=True)
 class _CurrentPathObservation:
     timestamp_ticks: int
+    source_key: tuple[int, int]
     foc_iq: int
     foc_id: int
     foc_iux: int
@@ -431,6 +432,7 @@ def _observe_critical(
         _observe_current_path_values(
             state,
             timestamp_ticks,
+            source_key,
             steady_after_s,
             foc_iq,
             foc_id,
@@ -495,6 +497,7 @@ def _observe_critical(
 def _observe_current_path_values(
     state: _DeviceState,
     timestamp_ticks: int,
+    source_key: tuple[int, int],
     steady_after_s: float,
     foc_iq: int,
     foc_id: int,
@@ -506,6 +509,7 @@ def _observe_current_path_values(
     state.current_path_observations.append(
         _CurrentPathObservation(
             timestamp_ticks=timestamp_ticks,
+            source_key=source_key,
             foc_iq=foc_iq,
             foc_id=foc_id,
             foc_iux=foc_iux,
@@ -531,6 +535,7 @@ def _observe_current_path(
     state: _DeviceState,
     payload: dict[str, object],
     timestamp_ticks: int,
+    source_key: tuple[int, int],
     steady_after_s: float,
 ) -> None:
     foc_id, foc_iq = _split_i16_pair(int(payload["interim_foc_iq_id"]))
@@ -539,6 +544,7 @@ def _observe_current_path(
     _observe_current_path_values(
         state,
         timestamp_ticks,
+        source_key,
         steady_after_s,
         foc_iq,
         foc_id,
@@ -732,11 +738,19 @@ def _nearest_critical(
 
 
 def _nearest_current_path(
-    samples: list[_CurrentPathObservation], timestamp_ticks: int
+    samples: list[_CurrentPathObservation], sample: _CriticalObservation
 ) -> _CurrentPathObservation | None:
-    if not samples:
+    source_samples = [
+        current_path
+        for current_path in samples
+        if current_path.source_key == sample.source_key
+    ]
+    if not source_samples:
         return None
-    return min(samples, key=lambda sample: abs(sample.timestamp_ticks - timestamp_ticks))
+    return min(
+        source_samples,
+        key=lambda current_path: abs(current_path.timestamp_ticks - sample.timestamp_ticks),
+    )
 
 
 def _foc_iq_id_for_sample(
@@ -745,7 +759,7 @@ def _foc_iq_id_for_sample(
 ) -> tuple[int, int] | None:
     if sample.foc_iq is not None and sample.foc_id is not None:
         return sample.foc_iq, sample.foc_id
-    current_path = _nearest_current_path(current_paths, sample.timestamp_ticks)
+    current_path = _nearest_current_path(current_paths, sample)
     if current_path is None:
         return None
     return current_path.foc_iq, current_path.foc_id
@@ -957,9 +971,19 @@ def _current_authority_report(
         if _sign_matches(actual, target):
             sign_agreement += 1
 
+    near_limit_keys = {
+        (sample.source_key, sample.timestamp_ticks) for sample, _detail in near_limit_samples
+    }
     for current_path in segment_current_paths:
-        critical = _nearest_critical(segment_samples, current_path.timestamp_ticks)
-        if critical.timestamp_ticks not in near_limit_timestamps:
+        source_samples = [
+            sample
+            for sample in segment_samples
+            if sample.source_key == current_path.source_key
+        ]
+        if not source_samples:
+            continue
+        critical = _nearest_critical(source_samples, current_path.timestamp_ticks)
+        if (critical.source_key, critical.timestamp_ticks) not in near_limit_keys:
             continue
         if critical.actual_torque != 0:
             iq_to_actual.append(abs(current_path.foc_iq) / abs(critical.actual_torque))
@@ -1191,6 +1215,9 @@ def _motion_phase_reports(
         sample_start = samples[0].timestamp_ticks
         sample_end = samples[-1].timestamp_ticks
         sample_sources = {sample.source_key for sample in samples}
+        phase_current_paths = [
+            sample for sample in phase_current_paths if sample.source_key in sample_sources
+        ]
         phase_advance_samples = [
             sample
             for sample in phase_advances
@@ -1258,7 +1285,14 @@ def _motion_phase_reports(
         ]
         if not iq_to_actual:
             for current_path in phase_current_paths:
-                critical = _nearest_critical(samples, current_path.timestamp_ticks)
+                source_samples = [
+                    sample
+                    for sample in samples
+                    if sample.source_key == current_path.source_key
+                ]
+                if not source_samples:
+                    continue
+                critical = _nearest_critical(source_samples, current_path.timestamp_ticks)
                 if critical.actual_torque != 0:
                     iq_to_actual.append(abs(current_path.foc_iq) / abs(critical.actual_torque))
         phase_advance = _phase_advance_report(phase_advance_samples)
@@ -1328,8 +1362,12 @@ def _finalize_motion_segments(
         torque_values = [sample.actual_torque for sample in segment_samples]
         torque_target_values = [sample.torque_target for sample in segment_samples]
         uq_limited_values = [sample.uq_limited for sample in segment_samples]
+        segment_sources = {sample.source_key for sample in segment_samples}
         segment_current_paths = [
-            sample for sample in current_paths if start_tick <= sample.timestamp_ticks <= end_tick
+            sample
+            for sample in current_paths
+            if start_tick <= sample.timestamp_ticks <= end_tick
+            and sample.source_key in segment_sources
         ]
         foc_iq_range = _optional_range([sample.foc_iq for sample in segment_current_paths])
         foc_id_range = _optional_range([sample.foc_id for sample in segment_current_paths])
@@ -1503,7 +1541,13 @@ def analyze_capture(
                 frame.payload,
             )
         elif header.frame_type == FRAME_TYPE_CURRENT_PATH:
-            _observe_current_path(state, frame.payload, header.timestamp_ticks, steady_after_s)
+            _observe_current_path(
+                state,
+                frame.payload,
+                header.timestamp_ticks,
+                (header.source_kind, header.source_index),
+                steady_after_s,
+            )
         elif header.frame_type == FRAME_TYPE_PHASE_ADVANCE:
             _observe_phase_advance(
                 state,
