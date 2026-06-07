@@ -35,6 +35,11 @@ def _header(
     )
 
 
+def _metadata_source(kind: int, index: int, label: str) -> bytes:
+    label_bytes = label.encode("ascii")
+    return bytes([kind, index, len(label_bytes)]) + label_bytes
+
+
 def test_decode_critical_offsets() -> None:
     payload = bytearray(88)
     payload[0:4] = struct.pack("<i", -1)
@@ -153,15 +158,24 @@ def test_decode_v1_critical_treats_accel_feedforward_fields_as_zero() -> None:
 
 
 def test_decode_metadata_strings_and_labels() -> None:
+    sources = b"".join(
+        [
+            _metadata_source(0, 255, "board"),
+            _metadata_source(2, 255, "usb"),
+            _metadata_source(3, 255, "klipper"),
+            _metadata_source(1, 0, "channel0"),
+            _metadata_source(1, 1, "channel1"),
+        ]
+    )
     fixed = struct.pack(
         "<BBBBIIIIIIII",
         1,
         1,
-        1,
+        5,
         3,
         84_000_000,
         1000,
-        500,
+        500,  # OpenFFBoard's configured control-detail trace rate.
         10,
         7,
         7000,
@@ -169,16 +183,20 @@ def test_decode_metadata_strings_and_labels() -> None:
         70,
     )
     strings = b"\x08fw 1.2.3\x18FOCI OpenFFBoard (trace)\x08ABCDEF12"
-    label = b"\x01\x00\x07channel"
-    frame = decode_frame(
-        _header(FRAME_TYPE_METADATA, fixed + strings + label) + fixed + strings + label
-    )
+    payload = fixed + strings + sources
+    frame = decode_frame(_header(FRAME_TYPE_METADATA, payload) + payload)
 
     assert frame.payload["metadata_schema_version"] == 1
-    assert frame.payload["source_count"] == 1
+    assert frame.payload["source_count"] == 5
     assert frame.payload["firmware_id"] == "fw 1.2.3"
     assert frame.payload["product"] == "FOCI OpenFFBoard (trace)"
-    assert frame.payload["sources"][0]["label"] == "channel"
+    assert frame.payload["sources"] == [
+        {"source_kind": 0, "source_index": 255, "label": "board"},
+        {"source_kind": 2, "source_index": 255, "label": "usb"},
+        {"source_kind": 3, "source_index": 255, "label": "klipper"},
+        {"source_kind": 1, "source_index": 0, "label": "channel0"},
+        {"source_kind": 1, "source_index": 1, "label": "channel1"},
+    ]
 
 
 def test_decode_commissioning_event_names() -> None:

@@ -47,16 +47,29 @@ def _header(
     )
 
 
+def _metadata_source(kind: int, index: int, label: str) -> bytes:
+    label_bytes = label.encode("ascii")
+    return bytes([kind, index, len(label_bytes)]) + label_bytes
+
+
 def _metadata_payload(serial: str) -> bytes:
+    sources = b"".join(
+        [
+            _metadata_source(0, 255, "board"),
+            _metadata_source(2, 255, "usb"),
+            _metadata_source(3, 255, "klipper"),
+            _metadata_source(1, 0, "channel0"),
+        ]
+    )
     fixed = struct.pack(
         "<BBBBIIIIIIII",
         1,
         1,
-        1,
+        4,
         3,
         84_000_000,
         1000,
-        500,
+        500,  # OpenFFBoard's configured control-detail trace rate.
         10,
         2,
         2,
@@ -73,7 +86,7 @@ def _metadata_payload(serial: str) -> bytes:
         + product
         + bytes([len(serial)])
         + serial.encode("ascii")
-        + b"\x01\x00\x07channel"
+        + sources
     )
 
 
@@ -91,6 +104,23 @@ def _status_payload(drops: int, endpoint_pressure: int, flags: int = 0x70004480)
         1,
         endpoint_pressure,
         4,
+    )
+
+
+def _klipper_status_payload(queue_depth: int) -> bytes:
+    return struct.pack(
+        "<IIIIIHHIIII",
+        0,
+        0,
+        0,
+        0,
+        0,
+        queue_depth,
+        0,
+        0,
+        0,
+        0,
+        0,
     )
 
 
@@ -328,11 +358,24 @@ def test_summarize_capture_reports_mapping_gaps_status_and_steady_ranges() -> No
     )
     writer.write_firmware_frame(
         0,
+        125,
+        _header(
+            FRAME_TYPE_STATUS,
+            _klipper_status_payload(9),
+            3,
+            84_000_000,
+            3,
+            255,
+        )
+        + _klipper_status_payload(9),
+    )
+    writer.write_firmware_frame(
+        0,
         130,
         _header(
             FRAME_TYPE_CRITICAL,
             _critical_payload(3, -4, 0xFFFE_0001, 0x0002_0003, -19, 2000, 0x03),
-            3,
+            4,
             84_000_000 * 2,
             1,
             0,
@@ -355,8 +398,21 @@ def test_summarize_capture_reports_mapping_gaps_status_and_steady_ranges() -> No
     writer.write_firmware_frame(
         0,
         150,
-        _header(FRAME_TYPE_STATUS, _status_payload(13, 27), 6, 84_000_000 * 4, 2, 255)
+        _header(FRAME_TYPE_STATUS, _status_payload(13, 27), 7, 84_000_000 * 4, 2, 255)
         + _status_payload(13, 27),
+    )
+    writer.write_firmware_frame(
+        0,
+        155,
+        _header(
+            FRAME_TYPE_STATUS,
+            _klipper_status_payload(12),
+            8,
+            84_000_000 * 4,
+            3,
+            255,
+        )
+        + _klipper_status_payload(12),
     )
 
     reports = summarize_capture(io.BytesIO(output.getvalue()), steady_after_s=1.5)
@@ -366,7 +422,12 @@ def test_summarize_capture_reports_mapping_gaps_status_and_steady_ranges() -> No
     assert report.usb_path == "1-50"
     assert report.serial == "ABC"
     assert report.metadata_serial == "ABC"
-    assert report.source_labels == ["FOCI[0]=channel"]
+    assert report.source_labels == [
+        "board=board",
+        "USB=usb",
+        "Klipper=klipper",
+        "FOCI[0]=channel0",
+    ]
     assert report.missing_frames == 1
     assert report.status_deltas["dropped_motion_sample_count"] == 3
     assert report.status_deltas["endpoint_not_ready_count"] == 7
