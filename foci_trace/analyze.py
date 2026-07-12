@@ -154,11 +154,13 @@ class MotionPhaseReport:
     velocity_transient_sign_agreement_samples: int
     velocity_transient_sign_comparable_samples: int
     target_velocity_range: tuple[int, int]
-    velocity_actual_range: tuple[int, int]
-    velocity_effective_target_range: tuple[int, int]
-    velocity_error_rms: float
-    velocity_error_peak: float
+    velocity_actual_range: tuple[int, int] | None
+    velocity_effective_target_range: tuple[int, int] | None
+    velocity_error_rms: float | None
+    velocity_error_peak: float | None
     velocity_actual_to_effective_target_abs_median: float | None
+    velocity_pidin_target_range: tuple[int, int] | None
+    velocity_pidout_target_range: tuple[int, int] | None
     iq_to_actual_abs_median: float | None
     uq_limited_range: tuple[int, int]
     phase_advance: PhaseAdvanceReport | None = None
@@ -171,6 +173,7 @@ class MotionSegmentReport:
     """Motion-focused summary for one contiguous stepper segment."""
 
     segment_index: int
+    source_key: tuple[int, int]
     start_s: float
     duration_s: float
     step_delta: int
@@ -212,6 +215,7 @@ class DeviceReport:
     serial: str = ""
     metadata_serial: str = ""
     source_labels: list[str] = field(default_factory=list)
+    critical_source_keys: list[tuple[int, int]] = field(default_factory=list)
     frame_counts: dict[int, int] = field(default_factory=dict)
     missing_frames: int = 0
     sequence_gaps: dict[int, int] = field(default_factory=dict)
@@ -289,7 +293,10 @@ class _PhaseAdvanceObservation:
 @dataclass(frozen=True)
 class _ControlDetailObservation:
     timestamp_ticks: int
+    source_key: tuple[int, int]
     torque_command: int
+    velocity_pidin_target: int
+    velocity_pidout_target: int
     voltage_limit: int
     torque_limit: int
 
@@ -319,6 +326,15 @@ class _MotionSegmentSpan:
     start_host_ns: int
     end_host_ns: int
     report: MotionSegmentReport
+
+
+@dataclass(frozen=True)
+class _MotionGroup:
+    source_key: tuple[int, int]
+    observations: list[_CriticalObservation]
+    start_index: int
+    end_index: int
+    next_start_tick: int | None
 
 
 def _signed_i16(value: int) -> int:
@@ -420,6 +436,8 @@ def _observe_critical(
     host_recv_ns: int,
     steady_after_s: float,
 ) -> None:
+    if source_key not in state.report.critical_source_keys:
+        state.report.critical_source_keys.append(source_key)
     actual_flux: int | None = None
     torque_target: int | None = None
     foc_iq: int | None = None
@@ -588,14 +606,20 @@ def _observe_phase_advance(
 
 
 def _observe_control_detail(
-    state: _DeviceState, payload: dict[str, object], timestamp_ticks: int
+    state: _DeviceState,
+    payload: dict[str, object],
+    timestamp_ticks: int,
+    source_key: tuple[int, int],
 ) -> None:
     voltage_limits = _split_i16_pair(int(payload["pidout_uq_ud_limits"]))
     torque_limits = _split_i16_pair(int(payload["pid_torque_flux_limits"]))
     state.control_detail_observations.append(
         _ControlDetailObservation(
             timestamp_ticks=timestamp_ticks,
+            source_key=source_key,
             torque_command=_signed_i32(int(payload["interim_pidout_target_torque"])),
+            velocity_pidin_target=int(payload["interim_pidin_target_velocity"]),
+            velocity_pidout_target=int(payload["interim_pidout_target_velocity"]),
             voltage_limit=max(abs(voltage_limits[0]), abs(voltage_limits[1])),
             torque_limit=max(abs(torque_limits[0]), abs(torque_limits[1])),
         )
@@ -679,6 +703,64 @@ def _motion_groups(
         if abs(observations[end].step_position - observations[start].step_position) >= min_steps:
             groups.append((start, end))
     return groups
+
+
+def _motion_groups_by_source(
+    observations: list[_CriticalObservation],
+    clock_hz: int,
+    gap_s: float,
+    min_steps: int,
+) -> list[tuple[tuple[int, int], list[_CriticalObservation], list[tuple[int, int]]]]:
+    observations_by_source: dict[tuple[int, int], list[_CriticalObservation]] = {}
+    for observation in observations:
+        observations_by_source.setdefault(observation.source_key, []).append(observation)
+    source_groups = []
+    for source_key in sorted(observations_by_source):
+        source_observations = sorted(
+            observations_by_source[source_key], key=lambda sample: sample.timestamp_ticks
+        )
+        source_groups.append(
+            (
+                source_key,
+                source_observations,
+                _motion_groups(source_observations, clock_hz, gap_s, min_steps),
+            )
+        )
+    return source_groups
+
+
+def _ordered_motion_groups(
+    observations: list[_CriticalObservation],
+    clock_hz: int,
+    gap_s: float,
+    min_steps: int,
+) -> list[_MotionGroup]:
+    motion_groups: list[_MotionGroup] = []
+    for source_key, source_observations, groups in _motion_groups_by_source(
+        observations, clock_hz, gap_s, min_steps
+    ):
+        for group_index, (start_index, end_index) in enumerate(groups):
+            next_start_tick = (
+                source_observations[groups[group_index + 1][0]].timestamp_ticks
+                if group_index + 1 < len(groups)
+                else None
+            )
+            motion_groups.append(
+                _MotionGroup(
+                    source_key=source_key,
+                    observations=source_observations,
+                    start_index=start_index,
+                    end_index=end_index,
+                    next_start_tick=next_start_tick,
+                )
+            )
+    return sorted(
+        motion_groups,
+        key=lambda group: (
+            group.observations[group.start_index].timestamp_ticks,
+            group.source_key,
+        ),
+    )
 
 
 def _fitted_transform(samples: list[_CriticalObservation]) -> _FittedTransform | None:
@@ -834,11 +916,13 @@ def _motion_segment_spans(
     motion_gap_s: float,
     motion_min_steps: int,
 ) -> list[_MotionSegmentSpan]:
-    observations = sorted(state.critical_observations, key=lambda sample: sample.timestamp_ticks)
-    groups = _motion_groups(observations, state.clock_hz, motion_gap_s, motion_min_steps)
     spans: list[_MotionSegmentSpan] = []
-    for (start_idx, end_idx), report in zip(groups, state.report.motion_segments, strict=True):
-        samples = observations[start_idx : end_idx + 1]
+    motion_groups = _ordered_motion_groups(
+        state.critical_observations, state.clock_hz, motion_gap_s, motion_min_steps
+    )
+    for motion_group, report in zip(motion_groups, state.report.motion_segments, strict=True):
+        assert motion_group.source_key == report.source_key
+        samples = motion_group.observations[motion_group.start_index : motion_group.end_index + 1]
         host_values = [sample.host_recv_ns for sample in samples]
         spans.append(
             _MotionSegmentSpan(
@@ -1150,11 +1234,13 @@ def _motion_phase_reports(
     observations: list[_CriticalObservation],
     current_paths: list[_CurrentPathObservation],
     phase_advances: list[_PhaseAdvanceObservation],
+    control_details: list[_ControlDetailObservation],
     segment_samples: list[_CriticalObservation],
     transform: _FittedTransform | None,
     clock_hz: int,
     voltage_limit: int,
     next_segment_start_tick: int | None,
+    velocity_tracking_available: bool,
     decoupling_config: DecouplingConfig | None,
 ) -> list[MotionPhaseReport]:
     if transform is None or clock_hz <= 0:
@@ -1233,6 +1319,12 @@ def _motion_phase_reports(
             if sample_start <= sample.timestamp_ticks <= sample_end
             and sample.source_key in sample_sources
         ]
+        phase_control_details = [
+            sample
+            for sample in control_details
+            if sample_start <= sample.timestamp_ticks <= sample_end
+            and sample.source_key in sample_sources
+        ]
         residuals = [_fitted_residual(sample, transform, command_position) for sample in samples]
         rms, peak = _residual_stats(residuals)
         actual_to_target = [
@@ -1288,12 +1380,18 @@ def _motion_phase_reports(
             for sample in velocity_transient_sign_candidates
         )
         velocity_errors = [sample.velocity_error for sample in samples]
-        velocity_error_rms, velocity_error_peak = _residual_stats(velocity_errors)
-        velocity_actual_to_effective_target = [
-            abs(sample.velocity_actual) / abs(sample.velocity_effective_target)
-            for sample in samples
-            if sample.velocity_effective_target != 0
-        ]
+        velocity_error_rms, velocity_error_peak = (
+            _residual_stats(velocity_errors) if velocity_tracking_available else (None, None)
+        )
+        velocity_actual_to_effective_target = (
+            [
+                abs(sample.velocity_actual) / abs(sample.velocity_effective_target)
+                for sample in samples
+                if sample.velocity_effective_target != 0
+            ]
+            if velocity_tracking_available
+            else []
+        )
         iq_to_actual = [
             abs(sample.foc_iq) / abs(sample.actual_torque)
             for sample in samples
@@ -1339,14 +1437,34 @@ def _motion_phase_reports(
                 velocity_transient_sign_agreement_samples=velocity_transient_sign_agreement,
                 velocity_transient_sign_comparable_samples=len(velocity_transient_sign_candidates),
                 target_velocity_range=_range([sample.target_velocity for sample in samples]),
-                velocity_actual_range=_range([sample.velocity_actual for sample in samples]),
-                velocity_effective_target_range=_range(
-                    [sample.velocity_effective_target for sample in samples]
+                velocity_actual_range=(
+                    _range([sample.velocity_actual for sample in samples])
+                    if velocity_tracking_available
+                    else None
+                ),
+                velocity_effective_target_range=(
+                    _range([sample.velocity_effective_target for sample in samples])
+                    if velocity_tracking_available
+                    else None
                 ),
                 velocity_error_rms=velocity_error_rms,
                 velocity_error_peak=velocity_error_peak,
                 velocity_actual_to_effective_target_abs_median=_rounded_median(
                     velocity_actual_to_effective_target
+                ),
+                velocity_pidin_target_range=(
+                    _optional_range(
+                        [sample.velocity_pidin_target for sample in phase_control_details]
+                    )
+                    if velocity_tracking_available
+                    else None
+                ),
+                velocity_pidout_target_range=(
+                    _optional_range(
+                        [sample.velocity_pidout_target for sample in phase_control_details]
+                    )
+                    if velocity_tracking_available
+                    else None
                 ),
                 iq_to_actual_abs_median=_rounded_median(iq_to_actual),
                 uq_limited_range=_range([sample.uq_limited for sample in samples]),
@@ -1364,7 +1482,6 @@ def _finalize_motion_segments(
     motion_min_steps: int,
     decoupling_config: DecouplingConfig | None,
 ) -> None:
-    observations = sorted(state.critical_observations, key=lambda sample: sample.timestamp_ticks)
     current_paths = sorted(
         state.current_path_observations, key=lambda sample: sample.timestamp_ticks
     )
@@ -1372,25 +1489,29 @@ def _finalize_motion_segments(
         state.phase_advance_observations, key=lambda sample: sample.timestamp_ticks
     )
     details = sorted(state.control_detail_observations, key=lambda sample: sample.timestamp_ticks)
-    groups = _motion_groups(observations, state.clock_hz, motion_gap_s, motion_min_steps)
-    for segment_index, (start_idx, end_idx) in enumerate(groups):
-        segment_samples = observations[start_idx : end_idx + 1]
+    motion_groups = _ordered_motion_groups(
+        state.critical_observations, state.clock_hz, motion_gap_s, motion_min_steps
+    )
+    for segment_index, motion_group in enumerate(motion_groups):
+        source_key = motion_group.source_key
+        observations = motion_group.observations
+        segment_samples = observations[motion_group.start_index : motion_group.end_index + 1]
         start_tick = segment_samples[0].timestamp_ticks
         end_tick = segment_samples[-1].timestamp_ticks
         segment_details = [
-            detail for detail in details if start_tick <= detail.timestamp_ticks <= end_tick
+            detail
+            for detail in details
+            if start_tick <= detail.timestamp_ticks <= end_tick and detail.source_key == source_key
         ]
         step_delta = segment_samples[-1].step_position - segment_samples[0].step_position
         rms, peak = _fitted_error_stats(segment_samples)
         torque_values = [sample.actual_torque for sample in segment_samples]
         torque_target_values = [sample.torque_target for sample in segment_samples]
         uq_limited_values = [sample.uq_limited for sample in segment_samples]
-        segment_sources = {sample.source_key for sample in segment_samples}
         segment_current_paths = [
             sample
             for sample in current_paths
-            if start_tick <= sample.timestamp_ticks <= end_tick
-            and sample.source_key in segment_sources
+            if start_tick <= sample.timestamp_ticks <= end_tick and sample.source_key == source_key
         ]
         foc_iq_range = _optional_range([sample.foc_iq for sample in segment_current_paths])
         foc_id_range = _optional_range([sample.foc_id for sample in segment_current_paths])
@@ -1452,26 +1573,30 @@ def _finalize_motion_segments(
             for detail in saturated_details
             if detail.torque_command != 0
         ]
-        next_start_tick = (
-            observations[groups[segment_index + 1][0]].timestamp_ticks
-            if segment_index + 1 < len(groups)
-            else None
-        )
         transform = _fitted_transform(segment_samples)
+        velocity_tracking_available = any(
+            sample.velocity_actual != 0 or sample.velocity_error != 0 for sample in segment_samples
+        ) or any(
+            detail.velocity_pidin_target != 0 or detail.velocity_pidout_target != 0
+            for detail in segment_details
+        )
         phase_reports = _motion_phase_reports(
             observations,
             current_paths,
             phase_advances,
+            details,
             segment_samples,
             transform,
             state.clock_hz,
             voltage_limit,
-            next_start_tick,
+            motion_group.next_start_tick,
+            velocity_tracking_available,
             decoupling_config,
         )
         state.report.motion_segments.append(
             MotionSegmentReport(
                 segment_index=segment_index,
+                source_key=source_key,
                 start_s=(start_tick - (state.first_timestamp or start_tick)) / state.clock_hz,
                 duration_s=(end_tick - start_tick) / state.clock_hz,
                 step_delta=step_delta,
@@ -1579,7 +1704,12 @@ def analyze_capture(
                 (header.source_kind, header.source_index),
             )
         elif header.frame_type == FRAME_TYPE_CONTROL_DETAIL:
-            _observe_control_detail(state, frame.payload, header.timestamp_ticks)
+            _observe_control_detail(
+                state,
+                frame.payload,
+                header.timestamp_ticks,
+                (header.source_kind, header.source_index),
+            )
             commissioning.observe_control_detail(
                 record.device_index,
                 header.source_index,
@@ -1678,6 +1808,20 @@ def _optional_ratio_text(value: float | None) -> str:
     return f"{value:.2f}"
 
 
+def _optional_float_text(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.1f}"
+
+
+def _source_key_text(source_key: tuple[int, int]) -> str:
+    kind, index = source_key
+    prefix = {0: "board", 1: "FOCI", 2: "USB", 3: "Klipper"}.get(kind, f"kind{kind}")
+    if kind in (0, 2, 3):
+        return prefix
+    return f"{prefix}[{index}]"
+
+
 def _optional_milliseconds_text(value: float | None) -> str:
     if value is None:
         return "n/a"
@@ -1751,6 +1895,7 @@ def format_summary(
                 flags=report.ranges.get("accel_ff_flags", (0, 0))[1],
             )
         )
+        multiple_motion_sources = len(report.critical_source_keys) > 1
         for segment in report.motion_segments:
             command_range = (
                 "n/a"
@@ -1763,7 +1908,7 @@ def format_summary(
                 else f"{segment.actual_to_command_abs_median:.2f}"
             )
             lines.append(
-                "  motion{idx} delta={delta} duration={duration:.3f}s "
+                "  motion{idx}{source} delta={delta} duration={duration:.3f}s "
                 "critical={critical} control_detail={detail} "
                 "fit_rms={rms:.1f} fit_peak={peak:.1f} "
                 "torque={torque_lo}..{torque_hi} "
@@ -1776,6 +1921,11 @@ def format_summary(
                 "accel_ff={accel_lo}..{accel_hi} gain={gain_lo}..{gain_hi} "
                 "flags=0x{flags:02x}".format(
                     idx=segment.segment_index,
+                    source=(
+                        f" source={_source_key_text(segment.source_key)}"
+                        if multiple_motion_sources
+                        else ""
+                    ),
                     delta=segment.step_delta,
                     duration=segment.duration_s,
                     critical=segment.critical_samples,
@@ -1844,11 +1994,13 @@ def format_summary(
                         "torque={torque_lo}..{torque_hi} "
                         "torque_target={target_lo}..{target_hi} "
                         "actual/target={actual_target} "
-                        "velocity_actual={velocity_actual_lo}..{velocity_actual_hi} "
-                        "velocity_effective_target={velocity_target_lo}..{velocity_target_hi} "
-                        "velocity_error_rms={velocity_error_rms:.1f} "
-                        "velocity_error_peak={velocity_error_peak:.1f} "
+                        "velocity_actual={velocity_actual} "
+                        "velocity_effective_target={velocity_target} "
+                        "velocity_error_rms={velocity_error_rms} "
+                        "velocity_error_peak={velocity_error_peak} "
                         "velocity_actual/effective_target={velocity_ratio} "
+                        "velocity_pidin={velocity_pidin} "
+                        "velocity_pidout={velocity_pidout} "
                         "uq/limit={uq_median}..{uq_peak} rail={rail}/{samples}".format(
                             name=phase.name,
                             samples=phase.critical_samples,
@@ -1861,14 +2013,18 @@ def format_summary(
                             target_lo=phase.torque_target_range[0],
                             target_hi=phase.torque_target_range[1],
                             actual_target=_optional_ratio_text(phase.actual_to_target_abs_median),
-                            velocity_actual_lo=phase.velocity_actual_range[0],
-                            velocity_actual_hi=phase.velocity_actual_range[1],
-                            velocity_target_lo=phase.velocity_effective_target_range[0],
-                            velocity_target_hi=phase.velocity_effective_target_range[1],
-                            velocity_error_rms=phase.velocity_error_rms,
-                            velocity_error_peak=phase.velocity_error_peak,
+                            velocity_actual=_optional_range_text(phase.velocity_actual_range),
+                            velocity_target=_optional_range_text(
+                                phase.velocity_effective_target_range
+                            ),
+                            velocity_error_rms=_optional_float_text(phase.velocity_error_rms),
+                            velocity_error_peak=_optional_float_text(phase.velocity_error_peak),
                             velocity_ratio=_optional_ratio_text(
                                 phase.velocity_actual_to_effective_target_abs_median
+                            ),
+                            velocity_pidin=_optional_range_text(phase.velocity_pidin_target_range),
+                            velocity_pidout=_optional_range_text(
+                                phase.velocity_pidout_target_range
                             ),
                             uq_median=_optional_ratio_text(phase.uq_to_limit_abs_median),
                             uq_peak=_optional_ratio_text(phase.uq_to_limit_abs_peak),
@@ -2037,6 +2193,14 @@ def analysis_to_json(analysis: CaptureAnalysis) -> dict[str, object]:
                 "motion_segments": [
                     {
                         "segment_index": segment.segment_index,
+                        **(
+                            {
+                                "source_kind": segment.source_key[0],
+                                "source_index": segment.source_key[1],
+                            }
+                            if len(report.critical_source_keys) > 1
+                            else {}
+                        ),
                         "start_s": segment.start_s,
                         "duration_s": segment.duration_s,
                         "step_delta": segment.step_delta,

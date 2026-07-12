@@ -215,6 +215,7 @@ def _critical_motion_payload(
     accel_flags: int = 0,
     pid_velocity_actual: int = 20,
     velocity_error: int = 10,
+    target_velocity: int = 30,
 ) -> bytes:
     if uq_requested is None:
         uq_requested = uq_limited
@@ -223,7 +224,7 @@ def _critical_motion_payload(
         step_position,
         tmc_position_actual,
         step_position - tmc_position_actual,
-        30,
+        target_velocity,
         pid_velocity_actual,
         4,
         velocity_error,
@@ -329,13 +330,19 @@ def _critical_payload_v6(
     return payload
 
 
-def _control_detail_payload(torque_cmd: int, voltage_limit: int, torque_limit: int) -> bytes:
+def _control_detail_payload(
+    torque_cmd: int,
+    voltage_limit: int,
+    torque_limit: int,
+    velocity_pidin: int = 0,
+    velocity_pidout: int = 0,
+) -> bytes:
     return struct.pack(
-        "<IIIIIII",
+        "<IIiiIII",
         torque_cmd & 0xFFFF_FFFF,
         0,
-        0,
-        0,
+        velocity_pidin,
+        velocity_pidout,
         _pack_i16_pair(voltage_limit, voltage_limit),
         _pack_i16_pair(0, torque_limit),
         500000,
@@ -686,6 +693,216 @@ def test_phase_summary_reports_velocity_loop_tracking() -> None:
     assert "velocity_effective_target=-100..100" in text
     assert "velocity_error_rms=13.5 velocity_error_peak=20.0" in text
     assert "velocity_actual/effective_target=0.85" in text
+
+
+def test_motion_velocity_analysis_is_isolated_by_trace_source() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI Ouroboros (trace)", "ABC", b"")
+
+    clock = 84_000_000
+    critical_samples = [
+        (1, 1, 0, 1000, 1000, -40, -10, -2000),
+        (2, 0, clock // 1000, 0, 0, 80, 20, 1000),
+        (3, 1, clock * 2 // 1000, 900, 900, -50, -10, -2100),
+        (4, 0, clock * 3 // 1000, 100, 100, 90, 20, 1100),
+        (5, 1, clock * 4 // 1000, 800, 800, -60, -10, -2200),
+        (6, 0, clock * 5 // 1000, 200, 200, 100, 20, 1200),
+        (7, 1, clock * 6 // 1000, 700, 700, -70, -10, -2300),
+        (8, 0, clock * 7 // 1000, 300, 300, 110, 20, 1300),
+    ]
+    for (
+        seq,
+        source_index,
+        timestamp,
+        step,
+        actual,
+        velocity_actual,
+        velocity_error,
+        target_velocity,
+    ) in critical_samples:
+        payload = _critical_motion_payload(
+            step,
+            actual,
+            torque_actual=400,
+            torque_target=800,
+            uq_limited=1000,
+            pid_velocity_actual=velocity_actual,
+            velocity_error=velocity_error,
+            target_velocity=target_velocity,
+        )
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(
+                FRAME_TYPE_CRITICAL,
+                payload,
+                seq,
+                timestamp,
+                1,
+                source_index,
+            )
+            + payload,
+        )
+
+    for seq, source_index, timestamp, pidin, pidout in (
+        (9, 1, clock // 1000, -201, -211),
+        (10, 0, clock * 2 // 1000, 101, 111),
+        (11, 1, clock * 3 // 1000, -202, -212),
+        (12, 0, clock * 4 // 1000, 102, 112),
+    ):
+        payload = _control_detail_payload(
+            100,
+            voltage_limit=3000,
+            torque_limit=2816,
+            velocity_pidin=pidin,
+            velocity_pidout=pidout,
+        )
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(
+                FRAME_TYPE_CONTROL_DETAIL,
+                payload,
+                seq,
+                timestamp,
+                1,
+                source_index,
+            )
+            + payload,
+        )
+
+    from foci_trace.analyze import analysis_to_json, analyze_capture
+
+    analysis = analyze_capture(
+        io.BytesIO(output.getvalue()),
+        steady_after_s=0,
+        motion_gap_s=0.01,
+        motion_min_steps=50,
+    )
+
+    segments = analysis.devices[0].motion_segments
+    assert [segment.source_key for segment in segments] == [(1, 1), (1, 0)]
+    assert [segment.step_delta for segment in segments] == [-300, 300]
+
+    channel_0 = segments[1].phase_reports[0]
+    assert channel_0.target_velocity_range == (1000, 1200)
+    assert channel_0.velocity_actual_range == (80, 100)
+    assert channel_0.velocity_effective_target_range == (100, 120)
+    assert channel_0.velocity_error_peak == 20
+    assert channel_0.velocity_pidin_target_range == (101, 102)
+    assert channel_0.velocity_pidout_target_range == (111, 112)
+
+    channel_1 = segments[0].phase_reports[0]
+    assert channel_1.target_velocity_range == (-2200, -2000)
+    assert channel_1.velocity_actual_range == (-60, -40)
+    assert channel_1.velocity_effective_target_range == (-70, -50)
+    assert channel_1.velocity_error_peak == 10
+    assert channel_1.velocity_pidin_target_range == (-202, -201)
+    assert channel_1.velocity_pidout_target_range == (-212, -211)
+
+    text = format_summary(analysis.devices, include_phase_split=True)
+    assert "motion0 source=FOCI[1] delta=-300" in text
+    assert "motion1 source=FOCI[0] delta=300" in text
+
+    json_segments = analysis_to_json(analysis)["devices"][0]["motion_segments"]
+    assert json_segments[0]["source_kind"] == 1
+    assert json_segments[0]["source_index"] == 1
+    assert json_segments[1]["source_kind"] == 1
+    assert json_segments[1]["source_index"] == 0
+
+
+def test_multi_source_capture_identifies_a_single_qualifying_motion_segment() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI Ouroboros (trace)", "ABC", b"")
+
+    clock = 84_000_000
+    for seq, source_index, timestamp, step in (
+        (1, 0, 0, 0),
+        (2, 1, clock // 1000, 500),
+        (3, 0, clock * 2 // 1000, 100),
+        (4, 1, clock * 3 // 1000, 500),
+        (5, 0, clock * 4 // 1000, 200),
+    ):
+        payload = _critical_motion_payload(step, step, torque_actual=400, uq_limited=1000)
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_CRITICAL, payload, seq, timestamp, 1, source_index) + payload,
+        )
+
+    from foci_trace.analyze import analysis_to_json, analyze_capture
+
+    analysis = analyze_capture(
+        io.BytesIO(output.getvalue()),
+        steady_after_s=0,
+        motion_gap_s=0.01,
+        motion_min_steps=50,
+    )
+
+    assert len(analysis.devices[0].motion_segments) == 1
+    assert analysis.devices[0].motion_segments[0].source_key == (1, 0)
+    text = format_summary(analysis.devices)
+    assert "motion0 source=FOCI[0] delta=200" in text
+    json_segment = analysis_to_json(analysis)["devices"][0]["motion_segments"][0]
+    assert json_segment["source_kind"] == 1
+    assert json_segment["source_index"] == 0
+
+
+def test_legacy_motion_velocity_tracking_is_unavailable() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+
+    clock = 84_000_000
+    for seq, timestamp, step in (
+        (1, 0, 0),
+        (2, clock * 20 // 1000, 600),
+        (3, clock * 40 // 1000, 1200),
+    ):
+        payload = _critical_motion_payload(
+            step,
+            step,
+            torque_actual=400,
+            torque_target=800,
+            uq_limited=1000,
+            pid_velocity_actual=0,
+            velocity_error=0,
+        )
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_CRITICAL, payload, seq, timestamp, 1, 0) + payload,
+        )
+
+    detail = _control_detail_payload(100, voltage_limit=3000, torque_limit=2816)
+    writer.write_firmware_frame(
+        0,
+        clock * 20 // 1000,
+        _header(FRAME_TYPE_CONTROL_DETAIL, detail, 4, clock * 20 // 1000, 1, 0) + detail,
+    )
+
+    reports = summarize_capture(
+        io.BytesIO(output.getvalue()),
+        steady_after_s=0,
+        motion_gap_s=0.1,
+        motion_min_steps=100,
+    )
+
+    phase = reports[0].motion_segments[0].phase_reports[0]
+    assert phase.velocity_actual_range is None
+    assert phase.velocity_effective_target_range is None
+    assert phase.velocity_error_rms is None
+    assert phase.velocity_error_peak is None
+    assert phase.velocity_actual_to_effective_target_abs_median is None
+    assert phase.velocity_pidin_target_range is None
+    assert phase.velocity_pidout_target_range is None
+
+    text = format_summary(reports, include_phase_split=True)
+    assert "velocity_actual=n/a" in text
+    assert "velocity_effective_target=n/a" in text
+    assert "velocity_error_rms=n/a velocity_error_peak=n/a" in text
 
 
 def test_motion_summary_can_include_feedforward_audit() -> None:
