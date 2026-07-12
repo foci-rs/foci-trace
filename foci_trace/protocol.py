@@ -337,7 +337,7 @@ def _decode_phase_advance(payload: bytes) -> dict[str, Any]:
 
 def _decode_control_detail(payload: bytes) -> dict[str, Any]:
     _require(payload, 28, "control-detail")
-    fields = struct.unpack_from("<IIIIIII", payload, 0)
+    fields = struct.unpack_from("<IIiiIII", payload, 0)
     names = (
         "interim_pidout_target_torque",
         "interim_pidout_target_flux",

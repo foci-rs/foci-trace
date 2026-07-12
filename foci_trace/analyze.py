@@ -154,6 +154,11 @@ class MotionPhaseReport:
     velocity_transient_sign_agreement_samples: int
     velocity_transient_sign_comparable_samples: int
     target_velocity_range: tuple[int, int]
+    velocity_actual_range: tuple[int, int]
+    velocity_effective_target_range: tuple[int, int]
+    velocity_error_rms: float
+    velocity_error_peak: float
+    velocity_actual_to_effective_target_abs_median: float | None
     iq_to_actual_abs_median: float | None
     uq_limited_range: tuple[int, int]
     phase_advance: PhaseAdvanceReport | None = None
@@ -251,6 +256,9 @@ class _CriticalObservation:
     foc_iq: int | None
     foc_id: int | None
     target_velocity: int
+    velocity_actual: int
+    velocity_effective_target: int
+    velocity_error: int
     cached_velocity_offset: int
     cached_velocity_transient_offset: int
 
@@ -441,6 +449,8 @@ def _observe_critical(
             adc_i0_raw,
             adc_i1_raw,
         )
+    velocity_actual = int(payload["pid_velocity_actual"])
+    velocity_error = int(payload["velocity_error"])
     state.critical_observations.append(
         _CriticalObservation(
             timestamp_ticks=timestamp_ticks,
@@ -460,6 +470,9 @@ def _observe_critical(
             foc_iq=foc_iq,
             foc_id=foc_id,
             target_velocity=int(payload["target_velocity"]),
+            velocity_actual=velocity_actual,
+            velocity_effective_target=velocity_actual + velocity_error,
+            velocity_error=velocity_error,
             cached_velocity_offset=int(payload["cached_pid_velocity_offset"]),
             cached_velocity_transient_offset=int(
                 payload.get("cached_velocity_transient_offset", 0)
@@ -741,9 +754,7 @@ def _nearest_current_path(
     samples: list[_CurrentPathObservation], sample: _CriticalObservation
 ) -> _CurrentPathObservation | None:
     source_samples = [
-        current_path
-        for current_path in samples
-        if current_path.source_key == sample.source_key
+        current_path for current_path in samples if current_path.source_key == sample.source_key
     ]
     if not source_samples:
         return None
@@ -976,9 +987,7 @@ def _current_authority_report(
     }
     for current_path in segment_current_paths:
         source_samples = [
-            sample
-            for sample in segment_samples
-            if sample.source_key == current_path.source_key
+            sample for sample in segment_samples if sample.source_key == current_path.source_key
         ]
         if not source_samples:
             continue
@@ -1278,6 +1287,13 @@ def _motion_phase_reports(
             )
             for sample in velocity_transient_sign_candidates
         )
+        velocity_errors = [sample.velocity_error for sample in samples]
+        velocity_error_rms, velocity_error_peak = _residual_stats(velocity_errors)
+        velocity_actual_to_effective_target = [
+            abs(sample.velocity_actual) / abs(sample.velocity_effective_target)
+            for sample in samples
+            if sample.velocity_effective_target != 0
+        ]
         iq_to_actual = [
             abs(sample.foc_iq) / abs(sample.actual_torque)
             for sample in samples
@@ -1286,9 +1302,7 @@ def _motion_phase_reports(
         if not iq_to_actual:
             for current_path in phase_current_paths:
                 source_samples = [
-                    sample
-                    for sample in samples
-                    if sample.source_key == current_path.source_key
+                    sample for sample in samples if sample.source_key == current_path.source_key
                 ]
                 if not source_samples:
                     continue
@@ -1325,6 +1339,15 @@ def _motion_phase_reports(
                 velocity_transient_sign_agreement_samples=velocity_transient_sign_agreement,
                 velocity_transient_sign_comparable_samples=len(velocity_transient_sign_candidates),
                 target_velocity_range=_range([sample.target_velocity for sample in samples]),
+                velocity_actual_range=_range([sample.velocity_actual for sample in samples]),
+                velocity_effective_target_range=_range(
+                    [sample.velocity_effective_target for sample in samples]
+                ),
+                velocity_error_rms=velocity_error_rms,
+                velocity_error_peak=velocity_error_peak,
+                velocity_actual_to_effective_target_abs_median=_rounded_median(
+                    velocity_actual_to_effective_target
+                ),
                 iq_to_actual_abs_median=_rounded_median(iq_to_actual),
                 uq_limited_range=_range([sample.uq_limited for sample in samples]),
                 phase_advance=phase_advance,
@@ -1821,6 +1844,11 @@ def format_summary(
                         "torque={torque_lo}..{torque_hi} "
                         "torque_target={target_lo}..{target_hi} "
                         "actual/target={actual_target} "
+                        "velocity_actual={velocity_actual_lo}..{velocity_actual_hi} "
+                        "velocity_effective_target={velocity_target_lo}..{velocity_target_hi} "
+                        "velocity_error_rms={velocity_error_rms:.1f} "
+                        "velocity_error_peak={velocity_error_peak:.1f} "
+                        "velocity_actual/effective_target={velocity_ratio} "
                         "uq/limit={uq_median}..{uq_peak} rail={rail}/{samples}".format(
                             name=phase.name,
                             samples=phase.critical_samples,
@@ -1833,6 +1861,15 @@ def format_summary(
                             target_lo=phase.torque_target_range[0],
                             target_hi=phase.torque_target_range[1],
                             actual_target=_optional_ratio_text(phase.actual_to_target_abs_median),
+                            velocity_actual_lo=phase.velocity_actual_range[0],
+                            velocity_actual_hi=phase.velocity_actual_range[1],
+                            velocity_target_lo=phase.velocity_effective_target_range[0],
+                            velocity_target_hi=phase.velocity_effective_target_range[1],
+                            velocity_error_rms=phase.velocity_error_rms,
+                            velocity_error_peak=phase.velocity_error_peak,
+                            velocity_ratio=_optional_ratio_text(
+                                phase.velocity_actual_to_effective_target_abs_median
+                            ),
                             uq_median=_optional_ratio_text(phase.uq_to_limit_abs_median),
                             uq_peak=_optional_ratio_text(phase.uq_to_limit_abs_peak),
                             rail=phase.voltage_rail_samples,

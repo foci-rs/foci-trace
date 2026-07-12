@@ -3,6 +3,7 @@ import struct
 import pytest
 
 from foci_trace.protocol import (
+    FRAME_TYPE_CONTROL_DETAIL,
     FRAME_TYPE_CRITICAL,
     FRAME_TYPE_CURRENT_PATH,
     FRAME_TYPE_EVENT,
@@ -103,6 +104,31 @@ def test_decode_v6_critical_velocity_transient_field() -> None:
     frame = decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=6) + payload)
 
     assert frame.payload["cached_velocity_transient_offset"] == -321
+
+
+def test_decode_control_detail_velocity_targets_as_signed_values() -> None:
+    payload = struct.pack(
+        "<IIiiIII",
+        0xFFFF_FFFF,
+        0x8000_0000,
+        -1234,
+        -5678,
+        0xFFFF_FFFE,
+        0x8000_0001,
+        0xFFFF_FFFD,
+    )
+
+    frame = decode_frame(_header(FRAME_TYPE_CONTROL_DETAIL, payload) + payload)
+
+    assert frame.payload == {
+        "interim_pidout_target_torque": 0xFFFF_FFFF,
+        "interim_pidout_target_flux": 0x8000_0000,
+        "interim_pidin_target_velocity": -1234,
+        "interim_pidout_target_velocity": -5678,
+        "pidout_uq_ud_limits": 0xFFFF_FFFE,
+        "pid_torque_flux_limits": 0x8000_0001,
+        "pid_velocity_limit": 0xFFFF_FFFD,
+    }
 
 
 def test_decode_v5_current_path_fields() -> None:

@@ -213,6 +213,8 @@ def _critical_motion_payload(
     accel_offset: int = 0,
     accel_gain: int = 0,
     accel_flags: int = 0,
+    pid_velocity_actual: int = 20,
+    velocity_error: int = 10,
 ) -> bytes:
     if uq_requested is None:
         uq_requested = uq_limited
@@ -222,9 +224,9 @@ def _critical_motion_payload(
         tmc_position_actual,
         step_position - tmc_position_actual,
         30,
-        20,
+        pid_velocity_actual,
         4,
-        10,
+        velocity_error,
         0x80,
         0,
         3,
@@ -634,6 +636,56 @@ def test_motion_summary_can_include_phase_split() -> None:
     assert "phase post_0_500ms samples=2" in phase_text
     assert "actual/target=" in phase_text
     assert "uq/limit=" in phase_text
+
+
+def test_phase_summary_reports_velocity_loop_tracking() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+
+    clock = 84_000_000
+    samples = [
+        (1, 0, 0, 80, 20),
+        (2, clock * 20 // 1000, 600, -90, -10),
+        (3, clock * 40 // 1000, 1200, 7, -7),
+        (4, clock * 80 // 1000, 1800, 60, 15),
+    ]
+    for seq, timestamp, step, velocity_actual, velocity_error in samples:
+        payload = _critical_motion_payload(
+            step,
+            step,
+            torque_actual=400,
+            torque_target=800,
+            uq_limited=1000,
+            pid_velocity_actual=velocity_actual,
+            velocity_error=velocity_error,
+        )
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_CRITICAL, payload, seq, timestamp, 1, 0) + payload,
+        )
+
+    reports = summarize_capture(
+        io.BytesIO(output.getvalue()),
+        steady_after_s=0,
+        motion_gap_s=0.1,
+        motion_min_steps=100,
+    )
+
+    phase = reports[0].motion_segments[0].phase_reports[0]
+    assert phase.name == "entry_0_50ms"
+    assert phase.velocity_actual_range == (-90, 80)
+    assert phase.velocity_effective_target_range == (-100, 100)
+    assert round(phase.velocity_error_rms, 3) == 13.528
+    assert phase.velocity_error_peak == 20
+    assert phase.velocity_actual_to_effective_target_abs_median == 0.85
+
+    text = format_summary(reports, include_phase_split=True)
+    assert "velocity_actual=-90..80" in text
+    assert "velocity_effective_target=-100..100" in text
+    assert "velocity_error_rms=13.5 velocity_error_peak=20.0" in text
+    assert "velocity_actual/effective_target=0.85" in text
 
 
 def test_motion_summary_can_include_feedforward_audit() -> None:
