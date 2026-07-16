@@ -1,0 +1,75 @@
+{
+  "description": "Task 1-4 signed, time-weighted fixed-point golden vector shared with the embedded blocker tests.",
+  "observations": [
+    {"delta_counts": 1, "direction": 1, "elapsed_us": 1000, "stroke_index": 0, "target_cpms": 1},
+    {"delta_counts": 0, "direction": 1, "elapsed_us": 1000, "stroke_index": 0, "target_cpms": 1},
+    {"delta_counts": 1, "direction": 1, "elapsed_us": 1000, "stroke_index": 0, "target_cpms": 1},
+    {"delta_counts": 1, "direction": 1, "elapsed_us": 1000, "stroke_index": 0, "target_cpms": 1}
+  ],
+  "report": {
+    "directions": {
+      "1": {
+        "confidence_half_width_rate_q": null,
+        "direction": 1,
+        "levels": [
+          {
+            "block_count": 4,
+            "exact_delta_counts": 3,
+            "exact_elapsed_us": 4000,
+            "level": 0,
+            "m2_rate_q2": 750000833334,
+            "mean_rate_q": 749999,
+            "plateau_with_next": true,
+            "sample_variance_rate_q2": 250000277778,
+            "variance_of_mean_q2": 62500069444
+          },
+          {
+            "block_count": 2,
+            "exact_delta_counts": 3,
+            "exact_elapsed_us": 4000,
+            "level": 1,
+            "m2_rate_q2": 125000000000,
+            "mean_rate_q": 750000,
+            "plateau_with_next": false,
+            "sample_variance_rate_q2": 125000000000,
+            "variance_of_mean_q2": 62500000000
+          },
+          {
+            "block_count": 1,
+            "exact_delta_counts": 3,
+            "exact_elapsed_us": 4000,
+            "level": 2,
+            "m2_rate_q2": 0,
+            "mean_rate_q": 750000,
+            "plateau_with_next": false,
+            "sample_variance_rate_q2": null,
+            "variance_of_mean_q2": null
+          },
+          {
+            "block_count": 0,
+            "exact_delta_counts": 0,
+            "exact_elapsed_us": 0,
+            "level": 3,
+            "m2_rate_q2": 0,
+            "mean_rate_q": 0,
+            "plateau_with_next": null,
+            "sample_variance_rate_q2": null,
+            "variance_of_mean_q2": null
+          }
+        ],
+        "mean_error_rate_q": null,
+        "observation_count": 4,
+        "selected_blocks": null,
+        "selected_level": null,
+        "settled_mean_rate_q": null,
+        "stroke_count": 1,
+        "target_cpms": 1
+      }
+    },
+    "interval_deviations_us": [0.0, 0.0, 0.0, 0.0],
+    "max_interval_us": 1000,
+    "median_interval_us": 1000.0,
+    "min_interval_us": 1000,
+    "timing_discontinuity_count": 0
+  }
+}
