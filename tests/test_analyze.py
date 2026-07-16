@@ -1974,3 +1974,20 @@ def test_main_json_includes_commissioning_section(tmp_path, capsys) -> None:
     data = json.loads(captured.out)
     assert data["devices"][0]["serial"] == "ABC"
     assert data["commissioning"]["runs"][0]["result"] == "accepted"
+
+
+def test_main_writes_deterministic_velocity_report_file(tmp_path, capsys) -> None:
+    capture_path = tmp_path / "empty.bin"
+    report_path = tmp_path / "velocity.json"
+    with capture_path.open("wb") as output:
+        CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+
+    from foci_trace.analyze import main
+
+    rc = main([str(capture_path), "--velocity-json", str(report_path)])
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.out == ""
+    assert json.loads(report_path.read_text()) == {"groups": []}
+    assert report_path.read_text().endswith("\n")

@@ -42,6 +42,7 @@ from .protocol import (
     DecodeError,
     decode_frame,
 )
+from .velocity_measurement import VelocityMeasurementReport, velocity_report_to_json
 
 DEFAULT_CLOCK_HZ = 84_000_000
 DEFAULT_MOTION_GAP_S = 0.08
@@ -237,6 +238,7 @@ class CaptureAnalysis:
         default_factory=lambda: CommissioningCaptureReport([])
     )
     contour_segments: list[ContourSegmentReport] = field(default_factory=list)
+    velocity_reports: list[VelocityMeasurementReport] = field(default_factory=list)
     corexy_plus: str | None = None
     corexy_minus: str | None = None
 
@@ -2229,6 +2231,11 @@ def analysis_to_json(analysis: CaptureAnalysis) -> dict[str, object]:
     }
 
 
+def velocity_analysis_to_json(analysis: CaptureAnalysis) -> dict[str, object]:
+    """Convert velocity measurement groups to deterministic JSON-compatible values."""
+    return {"groups": [velocity_report_to_json(report) for report in analysis.velocity_reports]}
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the offline capture analyzer."""
     parser = argparse.ArgumentParser()
@@ -2292,6 +2299,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="emit machine-readable JSON instead of text",
     )
+    parser.add_argument(
+        "--velocity-json",
+        metavar="PATH",
+        help="write machine-readable velocity measurement evidence to PATH",
+    )
 
     try:
         args = parser.parse_args(argv)
@@ -2325,7 +2337,15 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(str(exc))
         except SystemExit as parser_exc:
             return int(parser_exc.code)
-    if args.json:
+    if args.velocity_json:
+        try:
+            with open(args.velocity_json, "w", encoding="utf-8") as output:
+                output.write(json.dumps(velocity_analysis_to_json(analysis), sort_keys=True))
+                output.write("\n")
+        except OSError as exc:
+            print(f"failed to write {args.velocity_json}: {exc}", file=sys.stderr)
+            return 2
+    elif args.json:
         print(json.dumps(analysis_to_json(analysis), sort_keys=True))
     else:
         print(
