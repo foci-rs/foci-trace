@@ -2,13 +2,21 @@ import io
 import json
 import struct
 
-from foci_trace.analyze import format_summary, summarize_capture
+import pytest
+
+from foci_trace.analyze import (
+    analyze_capture,
+    format_summary,
+    summarize_capture,
+    velocity_analysis_to_json,
+)
 from foci_trace.capture_file import CaptureWriter
 from foci_trace.protocol import (
     EVENT_COMMISSION_ENGINE_START,
     EVENT_COMMISSION_ENGINE_TERMINAL,
     EVENT_COMMISSION_PHASE_END,
     EVENT_COMMISSION_PHASE_START,
+    EVENT_COMMISSION_VELOCITY_VALIDATE_GAIN,
     FRAME_TYPE_CONTROL_DETAIL,
     FRAME_TYPE_CRITICAL,
     FRAME_TYPE_CURRENT_PATH,
@@ -16,6 +24,7 @@ from foci_trace.protocol import (
     FRAME_TYPE_METADATA,
     FRAME_TYPE_PHASE_ADVANCE,
     FRAME_TYPE_STATUS,
+    FRAME_TYPE_VELOCITY_OBSERVATION,
     PROTOCOL_VERSION,
     SUBSYSTEM_COMMISSIONING,
 )
@@ -193,6 +202,26 @@ def _current_path_payload(
 
 def _phase_advance_payload(counts: int, flags: int) -> bytes:
     return struct.pack("<hBBiHH", counts, flags, 0, -60000, 64, 16)
+
+
+def _velocity_observation_payload(
+    target_cpms: int,
+    delta_counts: int,
+    *,
+    elapsed_us: int = 1_000,
+    stroke_index: int = 0,
+    direction: int = 1,
+    flags: int = 0,
+) -> bytes:
+    return struct.pack(
+        "<iiIHbB",
+        target_cpms,
+        delta_counts,
+        elapsed_us,
+        stroke_index,
+        direction,
+        flags,
+    )
 
 
 def _pack_i16_pair(low: int, high: int) -> int:
@@ -1991,3 +2020,107 @@ def test_main_writes_deterministic_velocity_report_file(tmp_path, capsys) -> Non
     assert captured.out == ""
     assert json.loads(report_path.read_text()) == {"groups": []}
     assert report_path.read_text().endswith("\n")
+
+
+def test_velocity_frames_group_by_device_source_and_engine_run() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    for device_index, serial, complete in ((0, "X", True), (1, "Y", False)):
+        writer.write_device_table(
+            device_index,
+            100,
+            f"1-{device_index}",
+            "FOCI OpenFFBoard (trace)",
+            serial,
+            b"",
+        )
+        sequence = 1
+        start = _commission_event_payload(EVENT_COMMISSION_ENGINE_START, arg3=7)
+        writer.write_firmware_frame(
+            device_index,
+            1_000,
+            _header(FRAME_TYPE_EVENT, start, sequence, 1_000, 255, 255) + start,
+        )
+        sequence += 2 if device_index == 0 else 1
+        gain = _commission_event_payload(
+            EVENT_COMMISSION_VELOCITY_VALIDATE_GAIN,
+            arg2=1,
+            arg3=350 | (80 << 16),
+        )
+        writer.write_firmware_frame(
+            device_index,
+            1_500,
+            _header(FRAME_TYPE_EVENT, gain, sequence, 1_500, 255, 255) + gain,
+        )
+        sequence += 1
+        for direction, target, stroke_index in ((1, 4, 0), (-1, -4, 1)):
+            for delta in (direction, 0, direction, direction):
+                payload = _velocity_observation_payload(
+                    target,
+                    delta,
+                    stroke_index=stroke_index,
+                    direction=direction,
+                )
+                writer.write_firmware_frame(
+                    device_index,
+                    2_000 + sequence,
+                    _header(
+                        FRAME_TYPE_VELOCITY_OBSERVATION,
+                        payload,
+                        sequence,
+                        2_000 + sequence,
+                        1,
+                        0,
+                    )
+                    + payload,
+                )
+                sequence += 1
+        if complete:
+            terminal = _commission_event_payload(EVENT_COMMISSION_ENGINE_TERMINAL, arg2=0, arg3=7)
+            writer.write_firmware_frame(
+                device_index,
+                10_000,
+                _header(FRAME_TYPE_EVENT, terminal, sequence, 10_000, 255, 255) + terminal,
+            )
+
+    analysis = analyze_capture(io.BytesIO(output.getvalue()))
+
+    assert len(analysis.velocity_reports) == 2
+    x_group, y_group = analysis.velocity_reports
+    assert (x_group.device_index, x_group.serial, x_group.engine_seq) == (0, "X", 7)
+    assert (x_group.velocity_p, x_group.velocity_i) == (350, 80)
+    assert set(x_group.report.directions) == {-1, 1}
+    assert x_group.missing_frames == 1
+    assert x_group.caveats == []
+    assert (y_group.device_index, y_group.serial, y_group.engine_seq) == (1, "Y", 7)
+    assert "partial capture: missing engine_terminal" in y_group.caveats
+    json_groups = velocity_analysis_to_json(analysis)["groups"]
+    assert json_groups[0]["measurement"]["directions"]["-1"]["target_cpms"] == -4
+
+
+def test_velocity_group_rejects_mixed_signed_targets() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-0", "FOCI OpenFFBoard (trace)", "X", b"")
+    start = _commission_event_payload(EVENT_COMMISSION_ENGINE_START, arg3=7)
+    writer.write_firmware_frame(
+        0, 1_000, _header(FRAME_TYPE_EVENT, start, 1, 1_000, 255, 255) + start
+    )
+    for sequence, target in ((2, 4), (3, 2)):
+        payload = _velocity_observation_payload(target, 1)
+        writer.write_firmware_frame(
+            0,
+            2_000 + sequence,
+            _header(
+                FRAME_TYPE_VELOCITY_OBSERVATION,
+                payload,
+                sequence,
+                2_000 + sequence,
+                1,
+                0,
+            )
+            + payload,
+        )
+
+    with pytest.raises(ValueError, match="mixed targets"):
+        analyze_capture(io.BytesIO(output.getvalue()))

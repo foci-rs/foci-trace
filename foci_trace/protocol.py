@@ -18,6 +18,7 @@ FRAME_TYPE_EVENT = 4
 FRAME_TYPE_METADATA = 5
 FRAME_TYPE_CURRENT_PATH = 6
 FRAME_TYPE_PHASE_ADVANCE = 7
+FRAME_TYPE_VELOCITY_OBSERVATION = 8
 
 SUBSYSTEM_COMMISSIONING = 7
 
@@ -246,6 +247,8 @@ def _decode_payload(version: int, frame_type: int, payload: bytes) -> dict[str, 
         return _decode_current_path(payload)
     if frame_type == FRAME_TYPE_PHASE_ADVANCE:
         return _decode_phase_advance(payload)
+    if frame_type == FRAME_TYPE_VELOCITY_OBSERVATION:
+        return _decode_velocity_observation(payload)
     return {"raw": payload}
 
 
@@ -332,6 +335,21 @@ def _decode_phase_advance(payload: bytes) -> dict[str, Any]:
         "phase_advance_gain_ppm": gain_ppm,
         "phase_advance_max_counts": max_counts,
         "phase_advance_deadband": deadband,
+    }
+
+
+def _decode_velocity_observation(payload: bytes) -> dict[str, Any]:
+    _require(payload, 16, "velocity observation")
+    target, delta, elapsed_us, stroke_index, direction, flags = struct.unpack_from(
+        "<iiIHbB", payload, 0
+    )
+    return {
+        "target_counts_per_ms": target,
+        "delta_counts": delta,
+        "elapsed_us": elapsed_us,
+        "stroke_index": stroke_index,
+        "direction": direction,
+        "flags": flags,
     }
 
 

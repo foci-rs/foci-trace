@@ -9,6 +9,7 @@ from foci_trace.protocol import (
     FRAME_TYPE_EVENT,
     FRAME_TYPE_METADATA,
     FRAME_TYPE_PHASE_ADVANCE,
+    FRAME_TYPE_VELOCITY_OBSERVATION,
     PROTOCOL_VERSION,
     DecodeError,
     FrameAssembler,
@@ -157,6 +158,21 @@ def test_decodes_phase_advance_frame() -> None:
     assert frame.payload["phase_advance_gain_ppm"] == -60000
     assert frame.payload["phase_advance_max_counts"] == 64
     assert frame.payload["phase_advance_deadband"] == 16
+
+
+def test_decodes_signed_velocity_observation_frame() -> None:
+    payload = struct.pack("<iiIHbB", -4, -7, 1_037, 513, -1, 1)
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_OBSERVATION, payload) + payload)
+
+    assert frame.payload == {
+        "target_counts_per_ms": -4,
+        "delta_counts": -7,
+        "elapsed_us": 1_037,
+        "stroke_index": 513,
+        "direction": -1,
+        "flags": 1,
+    }
 
 
 def test_decode_v2_critical_keeps_legacy_torque_fields() -> None:

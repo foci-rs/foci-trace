@@ -20,6 +20,7 @@ from .capture_file import (
 from .commissioning import (
     CommissioningCaptureBuilder,
     CommissioningCaptureReport,
+    CommissioningRun,
     commissioning_report_to_json,
     format_commissioning_report,
 )
@@ -39,12 +40,19 @@ from .protocol import (
     FRAME_TYPE_METADATA,
     FRAME_TYPE_PHASE_ADVANCE,
     FRAME_TYPE_STATUS,
+    FRAME_TYPE_VELOCITY_OBSERVATION,
     DecodeError,
     decode_frame,
 )
-from .velocity_measurement import VelocityMeasurementReport, velocity_report_to_json
+from .velocity_measurement import (
+    VelocityMeasurementReport,
+    VelocityObservation,
+    analyze_velocity_observations,
+    velocity_report_to_json,
+)
 
 DEFAULT_CLOCK_HZ = 84_000_000
+VELOCITY_REFERENCE_MAX_LEVELS = 8
 DEFAULT_MOTION_GAP_S = 0.08
 DEFAULT_MOTION_MIN_STEPS = 1000
 CRITICAL_GAP_SUSPECT_S = 0.005
@@ -238,7 +246,7 @@ class CaptureAnalysis:
         default_factory=lambda: CommissioningCaptureReport([])
     )
     contour_segments: list[ContourSegmentReport] = field(default_factory=list)
-    velocity_reports: list[VelocityMeasurementReport] = field(default_factory=list)
+    velocity_reports: list[VelocityCaptureGroup] = field(default_factory=list)
     corexy_plus: str | None = None
     corexy_minus: str | None = None
 
@@ -304,6 +312,37 @@ class _ControlDetailObservation:
 
 
 @dataclass(frozen=True)
+class _VelocityFrameObservation:
+    timestamp_ticks: int
+    source_index: int
+    observation: VelocityObservation
+    flags: int
+
+
+@dataclass(frozen=True)
+class VelocityCaptureGroup:
+    """Velocity observations correlated to one device, source, and engine run."""
+
+    device_index: int
+    source_index: int
+    serial: str
+    product: str
+    engine_kind: str
+    engine_seq: int | None
+    result: str | None
+    start_ticks: int | None
+    terminal_ticks: int | None
+    velocity_p: int | None
+    velocity_i: int | None
+    saturated_observations: int
+    missing_frames: int
+    sequence_gaps: dict[int, int]
+    trace_drops: int
+    caveats: list[str]
+    report: VelocityMeasurementReport
+
+
+@dataclass(frozen=True)
 class _FittedTransform:
     slope: float
     intercept: float
@@ -321,6 +360,7 @@ class _DeviceState:
     current_path_observations: list[_CurrentPathObservation] = field(default_factory=list)
     phase_advance_observations: list[_PhaseAdvanceObservation] = field(default_factory=list)
     control_detail_observations: list[_ControlDetailObservation] = field(default_factory=list)
+    velocity_observations: list[_VelocityFrameObservation] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -603,6 +643,28 @@ def _observe_phase_advance(
             gain_ppm=int(payload["phase_advance_gain_ppm"]),
             max_counts=int(payload["phase_advance_max_counts"]),
             deadband=int(payload["phase_advance_deadband"]),
+        )
+    )
+
+
+def _observe_velocity_observation(
+    state: _DeviceState,
+    payload: dict[str, object],
+    timestamp_ticks: int,
+    source_index: int,
+) -> None:
+    state.velocity_observations.append(
+        _VelocityFrameObservation(
+            timestamp_ticks=timestamp_ticks,
+            source_index=source_index,
+            observation=VelocityObservation(
+                delta_counts=int(payload["delta_counts"]),
+                elapsed_us=int(payload["elapsed_us"]),
+                direction=int(payload["direction"]),
+                stroke_index=int(payload["stroke_index"]),
+                target_cpms=int(payload["target_counts_per_ms"]),
+            ),
+            flags=int(payload["flags"]),
         )
     )
 
@@ -1524,6 +1586,7 @@ def _finalize_motion_segments(
         current_authority = _current_authority_report(
             segment_samples, segment_details, segment_current_paths, state.clock_hz
         )
+
         critical_max_gap_s = (
             _max_timestamp_gap_s(
                 [sample.timestamp_ticks for sample in segment_samples], state.clock_hz
@@ -1632,6 +1695,71 @@ def _finalize_motion_segments(
         )
 
 
+def _velocity_gain_tuple(run: CommissioningRun) -> tuple[int | None, int | None]:
+    for fragment in reversed(run.summaries):
+        if fragment.family == "velocity_validate_summary" and fragment.fragment == "gain":
+            packed = fragment.value & 0xFFFF_FFFF
+            return packed & 0xFFFF, (packed >> 16) & 0xFFFF
+    return None, None
+
+
+def _velocity_capture_groups(
+    states: dict[int, _DeviceState], commissioning: CommissioningCaptureReport
+) -> list[VelocityCaptureGroup]:
+    groups: list[VelocityCaptureGroup] = []
+    for run_index, run in enumerate(commissioning.runs):
+        state = states.get(run.device_index)
+        if state is None:
+            continue
+        next_start = next(
+            (
+                later.start_ticks
+                for later in commissioning.runs[run_index + 1 :]
+                if later.device_index == run.device_index
+                and later.source_index == run.source_index
+                and later.start_ticks is not None
+            ),
+            None,
+        )
+        start_ticks = run.start_ticks if run.start_ticks is not None else -1
+        matching = [
+            item
+            for item in state.velocity_observations
+            if item.source_index == run.source_index
+            and item.timestamp_ticks >= start_ticks
+            and (run.terminal_ticks is None or item.timestamp_ticks <= run.terminal_ticks)
+            and (next_start is None or item.timestamp_ticks < next_start)
+        ]
+        if not matching:
+            continue
+        velocity_p, velocity_i = _velocity_gain_tuple(run)
+        groups.append(
+            VelocityCaptureGroup(
+                device_index=run.device_index,
+                source_index=run.source_index,
+                serial=state.report.serial or state.report.metadata_serial,
+                product=state.report.product,
+                engine_kind=run.engine_kind_name,
+                engine_seq=run.engine_seq,
+                result=run.result,
+                start_ticks=run.start_ticks,
+                terminal_ticks=run.terminal_ticks,
+                velocity_p=velocity_p,
+                velocity_i=velocity_i,
+                saturated_observations=sum(bool(item.flags & 1) for item in matching),
+                missing_frames=state.report.missing_frames,
+                sequence_gaps=dict(state.report.sequence_gaps),
+                trace_drops=state.report.status_deltas.get("dropped_motion_sample_count", 0),
+                caveats=list(run.caveats),
+                report=analyze_velocity_observations(
+                    [item.observation for item in matching],
+                    max_levels=VELOCITY_REFERENCE_MAX_LEVELS,
+                ),
+            )
+        )
+    return groups
+
+
 def analyze_capture(
     source: BinaryIO | io.BytesIO,
     steady_after_s: float = 10.0,
@@ -1705,6 +1833,13 @@ def analyze_capture(
                 header.timestamp_ticks,
                 (header.source_kind, header.source_index),
             )
+        elif header.frame_type == FRAME_TYPE_VELOCITY_OBSERVATION:
+            _observe_velocity_observation(
+                state,
+                frame.payload,
+                header.timestamp_ticks,
+                header.source_index,
+            )
         elif header.frame_type == FRAME_TYPE_CONTROL_DETAIL:
             _observe_control_detail(
                 state,
@@ -1734,6 +1869,9 @@ def analyze_capture(
     for state in states.values():
         _finalize_status(state)
         _finalize_motion_segments(state, motion_gap_s, motion_min_steps, decoupling_config)
+    commissioning_report = commissioning.finalize(
+        {index: state.clock_hz for index, state in states.items()}
+    )
     contour_segments: list[ContourSegmentReport] = []
     if corexy_plus is not None or corexy_minus is not None:
         if corexy_plus is None or corexy_minus is None:
@@ -1766,10 +1904,9 @@ def analyze_capture(
             )
     return CaptureAnalysis(
         devices=[states[index].report for index in sorted(states)],
-        commissioning=commissioning.finalize(
-            {index: state.clock_hz for index, state in states.items()}
-        ),
+        commissioning=commissioning_report,
         contour_segments=contour_segments,
+        velocity_reports=_velocity_capture_groups(states, commissioning_report),
         corexy_plus=corexy_plus,
         corexy_minus=corexy_minus,
     )
@@ -2233,7 +2370,30 @@ def analysis_to_json(analysis: CaptureAnalysis) -> dict[str, object]:
 
 def velocity_analysis_to_json(analysis: CaptureAnalysis) -> dict[str, object]:
     """Convert velocity measurement groups to deterministic JSON-compatible values."""
-    return {"groups": [velocity_report_to_json(report) for report in analysis.velocity_reports]}
+    return {
+        "groups": [
+            {
+                "device_index": group.device_index,
+                "source_index": group.source_index,
+                "serial": group.serial,
+                "product": group.product,
+                "engine_kind": group.engine_kind,
+                "engine_seq": group.engine_seq,
+                "result": group.result,
+                "start_ticks": group.start_ticks,
+                "terminal_ticks": group.terminal_ticks,
+                "velocity_p": group.velocity_p,
+                "velocity_i": group.velocity_i,
+                "saturated_observations": group.saturated_observations,
+                "missing_frames": group.missing_frames,
+                "sequence_gaps": dict(group.sequence_gaps),
+                "trace_drops": group.trace_drops,
+                "caveats": list(group.caveats),
+                "measurement": velocity_report_to_json(group.report),
+            }
+            for group in analysis.velocity_reports
+        ]
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
