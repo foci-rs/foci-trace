@@ -301,3 +301,26 @@ def test_sweep_audit_reconstructs_observations_rung_band_and_terminal() -> None:
     assert report["observation_count"] == 4
     assert report["rung_count"] == 1
     assert report["directions"][0]["eligible_rungs"] == 1
+
+
+@pytest.mark.parametrize(
+    ("record_kind", "expected_caveat"), [("plan", "missing terminal"), ("terminal", "missing plan")]
+)
+def test_sweep_audit_reports_partial_capture_without_raising(
+    record_kind: str, expected_caveat: str
+) -> None:
+    from foci_trace.velocity_measurement import audit_velocity_sweep
+
+    record = {
+        "record_kind": record_kind,
+        "run_sequence": 9,
+        "evidence_sequence": 0,
+        "rung_count": 0,
+        "observations_per_direction": 2,
+    }
+
+    report = audit_velocity_sweep([], [(b"partial", record)])
+
+    assert report["complete"] is False
+    assert report["matches_firmware"] is False
+    assert any(expected_caveat in caveat for caveat in report["caveats"])

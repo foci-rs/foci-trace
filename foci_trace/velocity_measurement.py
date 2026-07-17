@@ -860,23 +860,49 @@ def audit_velocity_sweep(
     """Independently reconstruct one sweep and compare every firmware decision."""
     plans = [value for _raw, value in evidence_records if value["record_kind"] == "plan"]
     terminals = [value for _raw, value in evidence_records if value["record_kind"] == "terminal"]
-    if len(plans) != 1 or len(terminals) != 1:
-        raise ValueError("velocity sweep audit requires exactly one plan and terminal")
-    plan, terminal = plans[0], terminals[0]
     records = [
         (raw, value)
         for raw, value in evidence_records
         if value["record_kind"] in ("plan", "observation", "rung")
     ]
-    mismatches: list[str] = []
-    sequences = [int(value["evidence_sequence"]) for _raw, value in records]
-    if sequences != list(range(len(sequences))):
-        mismatches.append(f"evidence sequence is not contiguous: {sequences}")
     digest = FNV1A64_OFFSET
     for raw, _value in records:
         for byte in raw:
             digest ^= byte
             digest = (digest * FNV1A64_PRIME) & 0xFFFF_FFFF_FFFF_FFFF
+    if len(plans) != 1 or len(terminals) != 1:
+        caveats = []
+        if not plans:
+            caveats.append("partial capture: missing plan")
+        elif len(plans) > 1:
+            caveats.append("partial capture: duplicate plans")
+        if not terminals:
+            caveats.append("partial capture: missing terminal")
+        elif len(terminals) > 1:
+            caveats.append("partial capture: duplicate terminals")
+        observation_count = sum(value["record_kind"] == "observation" for _raw, value in records)
+        rung_count = sum(value["record_kind"] == "rung" for _raw, value in records)
+        identities = plans or terminals or [value for _raw, value in records]
+        return {
+            "run_sequence": int(identities[0].get("run_sequence", 0)) if identities else 0,
+            "plan": dict(plans[0]) if len(plans) == 1 else None,
+            "terminal": dict(terminals[0]) if len(terminals) == 1 else None,
+            "digest": digest,
+            "reported_digest": None,
+            "raw_observation_count": len(raw_observations),
+            "observation_count": observation_count,
+            "rung_count": rung_count,
+            "directions": [],
+            "complete": False,
+            "matches_firmware": False,
+            "mismatches": list(caveats),
+            "caveats": caveats,
+        }
+    plan, terminal = plans[0], terminals[0]
+    mismatches: list[str] = []
+    sequences = [int(value["evidence_sequence"]) for _raw, value in records]
+    if sequences != list(range(len(sequences))):
+        mismatches.append(f"evidence sequence is not contiguous: {sequences}")
     reported_digest = int(terminal["digest_low"]) | (int(terminal["digest_high"]) << 32)
     if digest != reported_digest:
         mismatches.append(
@@ -1031,6 +1057,8 @@ def audit_velocity_sweep(
         "observation_count": len(observation_records),
         "rung_count": len(rung_records),
         "directions": finished_bands,
+        "complete": True,
         "matches_firmware": not mismatches,
         "mismatches": mismatches,
+        "caveats": [],
     }
