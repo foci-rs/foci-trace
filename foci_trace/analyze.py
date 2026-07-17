@@ -20,7 +20,6 @@ from .capture_file import (
 from .commissioning import (
     CommissioningCaptureBuilder,
     CommissioningCaptureReport,
-    CommissioningRun,
     commissioning_report_to_json,
     format_commissioning_report,
 )
@@ -332,6 +331,7 @@ class VelocityCaptureGroup:
     result: str | None
     start_ticks: int | None
     terminal_ticks: int | None
+    candidate_summary_seq: int | None
     velocity_p: int | None
     velocity_i: int | None
     saturated_observations: int
@@ -1695,18 +1695,16 @@ def _finalize_motion_segments(
         )
 
 
-def _velocity_gain_tuple(run: CommissioningRun) -> tuple[int | None, int | None]:
-    for fragment in reversed(run.summaries):
-        if fragment.family == "velocity_validate_summary" and fragment.fragment == "gain":
-            packed = fragment.value & 0xFFFF_FFFF
-            return packed & 0xFFFF, (packed >> 16) & 0xFFFF
-    return None, None
+def _velocity_gain_tuple(value: int) -> tuple[int, int]:
+    packed = value & 0xFFFF_FFFF
+    return packed & 0xFFFF, (packed >> 16) & 0xFFFF
 
 
 def _velocity_capture_groups(
     states: dict[int, _DeviceState], commissioning: CommissioningCaptureReport
 ) -> list[VelocityCaptureGroup]:
     groups: list[VelocityCaptureGroup] = []
+    claimed_observation_ids: set[int] = set()
     for run_index, run in enumerate(commissioning.runs):
         state = states.get(run.device_index)
         if state is None:
@@ -1725,6 +1723,7 @@ def _velocity_capture_groups(
         matching = [
             item
             for item in state.velocity_observations
+            if id(item) not in claimed_observation_ids
             if item.source_index == run.source_index
             and item.timestamp_ticks >= start_ticks
             and (run.terminal_ticks is None or item.timestamp_ticks <= run.terminal_ticks)
@@ -1732,31 +1731,78 @@ def _velocity_capture_groups(
         ]
         if not matching:
             continue
-        velocity_p, velocity_i = _velocity_gain_tuple(run)
-        groups.append(
-            VelocityCaptureGroup(
-                device_index=run.device_index,
-                source_index=run.source_index,
-                serial=state.report.serial or state.report.metadata_serial,
-                product=state.report.product,
-                engine_kind=run.engine_kind_name,
-                engine_seq=run.engine_seq,
-                result=run.result,
-                start_ticks=run.start_ticks,
-                terminal_ticks=run.terminal_ticks,
-                velocity_p=velocity_p,
-                velocity_i=velocity_i,
-                saturated_observations=sum(bool(item.flags & 1) for item in matching),
-                missing_frames=state.report.missing_frames,
-                sequence_gaps=dict(state.report.sequence_gaps),
-                trace_drops=state.report.status_deltas.get("dropped_motion_sample_count", 0),
-                caveats=list(run.caveats),
-                report=analyze_velocity_observations(
-                    [item.observation for item in matching],
-                    max_levels=VELOCITY_REFERENCE_MAX_LEVELS,
-                ),
-            )
+
+        gain_fragments = sorted(
+            (
+                fragment
+                for fragment in run.summaries
+                if fragment.family == "velocity_validate_summary" and fragment.fragment == "gain"
+            ),
+            key=lambda fragment: fragment.timestamp_ticks,
         )
+        candidates: list[
+            tuple[list[_VelocityFrameObservation], int | None, int | None, int | None]
+        ] = []
+        previous_summary_ticks = start_ticks - 1
+        for fragment in gain_fragments:
+            candidate_observations = [
+                item
+                for item in matching
+                if previous_summary_ticks < item.timestamp_ticks < fragment.timestamp_ticks
+            ]
+            if candidate_observations:
+                velocity_p, velocity_i = _velocity_gain_tuple(fragment.value)
+                candidates.append(
+                    (
+                        candidate_observations,
+                        fragment.summary_seq,
+                        velocity_p,
+                        velocity_i,
+                    )
+                )
+            previous_summary_ticks = fragment.timestamp_ticks
+
+        trailing = [item for item in matching if item.timestamp_ticks > previous_summary_ticks]
+        if trailing:
+            if len(gain_fragments) == 1 and not candidates:
+                fragment = gain_fragments[0]
+                velocity_p, velocity_i = _velocity_gain_tuple(fragment.value)
+                candidates.append((trailing, fragment.summary_seq, velocity_p, velocity_i))
+            else:
+                candidates.append((trailing, None, None, None))
+        if not gain_fragments:
+            candidates = [(matching, None, None, None)]
+        claimed_observation_ids.update(id(item) for item in matching)
+
+        for candidate, summary_seq, velocity_p, velocity_i in candidates:
+            caveats = list(run.caveats)
+            if summary_seq is None and gain_fragments:
+                caveats.append("partial velocity candidate: missing gain summary")
+            groups.append(
+                VelocityCaptureGroup(
+                    device_index=run.device_index,
+                    source_index=run.source_index,
+                    serial=state.report.serial or state.report.metadata_serial,
+                    product=state.report.product,
+                    engine_kind=run.engine_kind_name,
+                    engine_seq=run.engine_seq,
+                    result=run.result,
+                    start_ticks=run.start_ticks,
+                    terminal_ticks=run.terminal_ticks,
+                    candidate_summary_seq=summary_seq,
+                    velocity_p=velocity_p,
+                    velocity_i=velocity_i,
+                    saturated_observations=sum(bool(item.flags & 1) for item in candidate),
+                    missing_frames=state.report.missing_frames,
+                    sequence_gaps=dict(state.report.sequence_gaps),
+                    trace_drops=state.report.status_deltas.get("dropped_motion_sample_count", 0),
+                    caveats=caveats,
+                    report=analyze_velocity_observations(
+                        [item.observation for item in candidate],
+                        max_levels=VELOCITY_REFERENCE_MAX_LEVELS,
+                    ),
+                )
+            )
     return groups
 
 
@@ -2382,6 +2428,7 @@ def velocity_analysis_to_json(analysis: CaptureAnalysis) -> dict[str, object]:
                 "result": group.result,
                 "start_ticks": group.start_ticks,
                 "terminal_ticks": group.terminal_ticks,
+                "candidate_summary_seq": group.candidate_summary_seq,
                 "velocity_p": group.velocity_p,
                 "velocity_i": group.velocity_i,
                 "saturated_observations": group.saturated_observations,

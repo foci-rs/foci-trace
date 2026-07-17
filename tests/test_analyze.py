@@ -2098,6 +2098,145 @@ def test_velocity_frames_group_by_device_source_and_engine_run() -> None:
     assert json_groups[0]["measurement"]["directions"]["-1"]["target_cpms"] == -4
 
 
+def test_velocity_frames_split_reused_stroke_indexes_at_gain_summaries() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-0", "FOCI OpenFFBoard (trace)", "X", b"")
+    sequence = 1
+    timestamp = 1_000
+    start = _commission_event_payload(EVENT_COMMISSION_ENGINE_START, arg3=7)
+    writer.write_firmware_frame(
+        0,
+        timestamp,
+        _header(FRAME_TYPE_EVENT, start, sequence, timestamp, 255, 255) + start,
+    )
+
+    for summary_seq, gain_p, delta_scale in ((1, 350, 1), (2, 500, 2)):
+        for direction, target, stroke_index in ((1, 4, 0), (-1, -4, 1)):
+            for _ in range(4):
+                sequence += 1
+                timestamp += 1_000
+                payload = _velocity_observation_payload(
+                    target,
+                    direction * delta_scale,
+                    stroke_index=stroke_index,
+                    direction=direction,
+                )
+                writer.write_firmware_frame(
+                    0,
+                    timestamp,
+                    _header(
+                        FRAME_TYPE_VELOCITY_OBSERVATION,
+                        payload,
+                        sequence,
+                        timestamp,
+                        1,
+                        0,
+                    )
+                    + payload,
+                )
+        sequence += 1
+        timestamp += 1_000
+        gain = _commission_event_payload(
+            EVENT_COMMISSION_VELOCITY_VALIDATE_GAIN,
+            arg2=summary_seq,
+            arg3=gain_p,
+        )
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_EVENT, gain, sequence, timestamp, 255, 255) + gain,
+        )
+
+    sequence += 1
+    timestamp += 1_000
+    terminal = _commission_event_payload(EVENT_COMMISSION_ENGINE_TERMINAL, arg2=11, arg3=7)
+    writer.write_firmware_frame(
+        0,
+        timestamp,
+        _header(FRAME_TYPE_EVENT, terminal, sequence, timestamp, 255, 255) + terminal,
+    )
+
+    analysis = analyze_capture(io.BytesIO(output.getvalue()))
+
+    assert [(group.velocity_p, group.velocity_i) for group in analysis.velocity_reports] == [
+        (350, 0),
+        (500, 0),
+    ]
+    assert [
+        group.report.directions[1].observation_count for group in analysis.velocity_reports
+    ] == [4, 4]
+    assert [
+        group.report.directions[1].levels[0].exact_delta_counts
+        for group in analysis.velocity_reports
+    ] == [4, 8]
+
+
+def test_velocity_frames_are_not_reclaimed_by_post_terminal_partial_run() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-0", "FOCI OpenFFBoard (trace)", "X", b"")
+    start = _commission_event_payload(EVENT_COMMISSION_ENGINE_START, arg3=7)
+    writer.write_firmware_frame(
+        0, 1_000, _header(FRAME_TYPE_EVENT, start, 1, 1_000, 255, 255) + start
+    )
+    for sequence, direction, target, stroke_index in (
+        (2, 1, 4, 0),
+        (3, -1, -4, 1),
+    ):
+        payload = _velocity_observation_payload(
+            target,
+            direction,
+            stroke_index=stroke_index,
+            direction=direction,
+        )
+        writer.write_firmware_frame(
+            0,
+            sequence * 1_000,
+            _header(
+                FRAME_TYPE_VELOCITY_OBSERVATION,
+                payload,
+                sequence,
+                sequence * 1_000,
+                1,
+                0,
+            )
+            + payload,
+        )
+    gain = _commission_event_payload(
+        EVENT_COMMISSION_VELOCITY_VALIDATE_GAIN,
+        arg2=0,
+        arg3=350 | (80 << 16),
+    )
+    writer.write_firmware_frame(
+        0, 4_000, _header(FRAME_TYPE_EVENT, gain, 4, 4_000, 255, 255) + gain
+    )
+    terminal = _commission_event_payload(EVENT_COMMISSION_ENGINE_TERMINAL, arg2=11, arg3=7)
+    writer.write_firmware_frame(
+        0,
+        5_000,
+        _header(FRAME_TYPE_EVENT, terminal, 5, 5_000, 255, 255) + terminal,
+    )
+    orphan_gain = _commission_event_payload(
+        EVENT_COMMISSION_VELOCITY_VALIDATE_GAIN,
+        arg2=1,
+        arg3=500,
+    )
+    writer.write_firmware_frame(
+        0,
+        6_000,
+        _header(FRAME_TYPE_EVENT, orphan_gain, 6, 6_000, 255, 255) + orphan_gain,
+    )
+
+    analysis = analyze_capture(io.BytesIO(output.getvalue()))
+
+    assert len(analysis.velocity_reports) == 1
+    assert (analysis.velocity_reports[0].velocity_p, analysis.velocity_reports[0].velocity_i) == (
+        350,
+        80,
+    )
+
+
 def test_velocity_group_rejects_mixed_signed_targets() -> None:
     output = io.BytesIO()
     writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
