@@ -25,6 +25,7 @@ from foci_trace.protocol import (
     FRAME_TYPE_PHASE_ADVANCE,
     FRAME_TYPE_STATUS,
     FRAME_TYPE_VELOCITY_OBSERVATION,
+    FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
     PROTOCOL_VERSION,
     SUBSYSTEM_COMMISSIONING,
 )
@@ -2018,8 +2019,81 @@ def test_main_writes_deterministic_velocity_report_file(tmp_path, capsys) -> Non
     captured = capsys.readouterr()
     assert rc == 0
     assert captured.out == ""
-    assert json.loads(report_path.read_text()) == {"groups": []}
+    assert json.loads(report_path.read_text()) == {"groups": [], "sweeps": []}
     assert report_path.read_text().endswith("\n")
+
+
+def test_capture_integrates_canonical_velocity_sweep_audit() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    plan_values = (
+        7,
+        0,
+        5_000,
+        1,
+        4_800,
+        7_500,
+        1,
+        0,
+        3_200,
+        8,
+        8,
+        0,
+        2,
+        256_000,
+        200_000,
+        0,
+        0,
+        1_000,
+        250,
+        1_250,
+        1_250,
+        1_000,
+        900,
+    )
+    plan = bytes([1]) + struct.pack("<IHIBIIHBiHHBHIIIIIIIIHH", *plan_values)
+    digest = 0xCBF29CE484222325
+    for byte in plan:
+        digest ^= byte
+        digest = (digest * 0x100000001B3) & 0xFFFF_FFFF_FFFF_FFFF
+    empty_direction = struct.pack("<BHHHiiiiiBHB", 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    terminal = (
+        bytes([4])
+        + struct.pack("<III", 7, 4_000, 25_000)
+        + empty_direction
+        + struct.pack("<BHHHiiiiiBHB", 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        + struct.pack(
+            "<HHHHIIBBB",
+            0,
+            0,
+            0,
+            0,
+            digest & 0xFFFF_FFFF,
+            digest >> 32,
+            1,
+            2,
+            0,
+        )
+    )
+    for sequence, timestamp, payload in ((1, 1_000, plan), (2, 2_000, terminal)):
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(
+                FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
+                payload,
+                sequence,
+                timestamp,
+                1,
+                0,
+            )
+            + payload,
+        )
+
+    analysis = analyze_capture(io.BytesIO(output.getvalue()))
+
+    assert analysis.velocity_sweep_audits[0]["matches_firmware"] is True
+    assert analysis.velocity_sweep_audits[0]["digest"] == digest
 
 
 def test_velocity_frames_group_by_device_source_and_engine_run() -> None:

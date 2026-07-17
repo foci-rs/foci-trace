@@ -40,6 +40,7 @@ from .protocol import (
     FRAME_TYPE_PHASE_ADVANCE,
     FRAME_TYPE_STATUS,
     FRAME_TYPE_VELOCITY_OBSERVATION,
+    FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
     DecodeError,
     decode_frame,
 )
@@ -47,6 +48,7 @@ from .velocity_measurement import (
     VelocityMeasurementReport,
     VelocityObservation,
     analyze_velocity_observations,
+    audit_velocity_sweep,
     velocity_report_to_json,
 )
 
@@ -246,6 +248,7 @@ class CaptureAnalysis:
     )
     contour_segments: list[ContourSegmentReport] = field(default_factory=list)
     velocity_reports: list[VelocityCaptureGroup] = field(default_factory=list)
+    velocity_sweep_audits: list[dict[str, object]] = field(default_factory=list)
     corexy_plus: str | None = None
     corexy_minus: str | None = None
 
@@ -319,6 +322,14 @@ class _VelocityFrameObservation:
 
 
 @dataclass(frozen=True)
+class _VelocitySweepEvidenceFrame:
+    timestamp_ticks: int
+    source_index: int
+    raw_payload: bytes
+    payload: dict[str, object]
+
+
+@dataclass(frozen=True)
 class VelocityCaptureGroup:
     """Velocity observations correlated to one device, source, and engine run."""
 
@@ -361,6 +372,7 @@ class _DeviceState:
     phase_advance_observations: list[_PhaseAdvanceObservation] = field(default_factory=list)
     control_detail_observations: list[_ControlDetailObservation] = field(default_factory=list)
     velocity_observations: list[_VelocityFrameObservation] = field(default_factory=list)
+    velocity_sweep_evidence: list[_VelocitySweepEvidenceFrame] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -663,6 +675,11 @@ def _observe_velocity_observation(
                 direction=int(payload["direction"]),
                 stroke_index=int(payload["stroke_index"]),
                 target_cpms=int(payload["target_counts_per_ms"]),
+                peak_torque_target_abs=(
+                    None
+                    if payload.get("peak_torque_target_abs") is None
+                    else int(payload["peak_torque_target_abs"])
+                ),
             ),
             flags=int(payload["flags"]),
         )
@@ -1806,6 +1823,46 @@ def _velocity_capture_groups(
     return groups
 
 
+def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, object]]:
+    audits: list[dict[str, object]] = []
+    for device_index, state in sorted(states.items()):
+        run_sequences = sorted(
+            {
+                int(item.payload["run_sequence"])
+                for item in state.velocity_sweep_evidence
+                if "run_sequence" in item.payload
+            }
+        )
+        for run_sequence in run_sequences:
+            evidence = [
+                item
+                for item in state.velocity_sweep_evidence
+                if int(item.payload.get("run_sequence", -1)) == run_sequence
+            ]
+            if not evidence:
+                continue
+            source_indexes = {item.source_index for item in evidence}
+            if len(source_indexes) != 1:
+                raise ValueError("velocity sweep evidence changed source index")
+            source_index = next(iter(source_indexes))
+            start = min(item.timestamp_ticks for item in evidence)
+            end = max(item.timestamp_ticks for item in evidence)
+            raw = [
+                item.observation
+                for item in state.velocity_observations
+                if item.source_index == source_index and start <= item.timestamp_ticks <= end
+            ]
+            report = audit_velocity_sweep(
+                raw,
+                [(item.raw_payload, item.payload) for item in evidence],
+            )
+            report["device_index"] = device_index
+            report["source_index"] = source_index
+            report["serial"] = state.report.serial or state.report.metadata_serial
+            audits.append(report)
+    return audits
+
+
 def analyze_capture(
     source: BinaryIO | io.BytesIO,
     steady_after_s: float = 10.0,
@@ -1886,6 +1943,15 @@ def analyze_capture(
                 header.timestamp_ticks,
                 header.source_index,
             )
+        elif header.frame_type == FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE:
+            state.velocity_sweep_evidence.append(
+                _VelocitySweepEvidenceFrame(
+                    timestamp_ticks=header.timestamp_ticks,
+                    source_index=header.source_index,
+                    raw_payload=frame.raw_payload,
+                    payload=frame.payload,
+                )
+            )
         elif header.frame_type == FRAME_TYPE_CONTROL_DETAIL:
             _observe_control_detail(
                 state,
@@ -1953,6 +2019,7 @@ def analyze_capture(
         commissioning=commissioning_report,
         contour_segments=contour_segments,
         velocity_reports=_velocity_capture_groups(states, commissioning_report),
+        velocity_sweep_audits=_velocity_sweep_audits(states),
         corexy_plus=corexy_plus,
         corexy_minus=corexy_minus,
     )
@@ -2417,6 +2484,7 @@ def analysis_to_json(analysis: CaptureAnalysis) -> dict[str, object]:
 def velocity_analysis_to_json(analysis: CaptureAnalysis) -> dict[str, object]:
     """Convert velocity measurement groups to deterministic JSON-compatible values."""
     return {
+        "sweeps": analysis.velocity_sweep_audits,
         "groups": [
             {
                 "device_index": group.device_index,
@@ -2439,7 +2507,7 @@ def velocity_analysis_to_json(analysis: CaptureAnalysis) -> dict[str, object]:
                 "measurement": velocity_report_to_json(group.report),
             }
             for group in analysis.velocity_reports
-        ]
+        ],
     }
 
 
