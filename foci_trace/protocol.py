@@ -7,8 +7,8 @@ import struct
 from typing import Any
 
 FRAME_MAGIC = 0x43525446
-PROTOCOL_VERSION = 6
-SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, 5, PROTOCOL_VERSION)
+PROTOCOL_VERSION = 7
+SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, 5, 6, PROTOCOL_VERSION)
 HEADER_LEN = 32
 
 FRAME_TYPE_CRITICAL = 1
@@ -19,6 +19,7 @@ FRAME_TYPE_METADATA = 5
 FRAME_TYPE_CURRENT_PATH = 6
 FRAME_TYPE_PHASE_ADVANCE = 7
 FRAME_TYPE_VELOCITY_OBSERVATION = 8
+FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE = 9
 
 SUBSYSTEM_COMMISSIONING = 7
 
@@ -34,6 +35,11 @@ EVENT_COMMISSION_VELOCITY_VALIDATE_RESULT = 120
 EVENT_COMMISSION_VELOCITY_VALIDATE_GAIN = 121
 EVENT_COMMISSION_VELOCITY_VALIDATE_METRICS = 122
 EVENT_COMMISSION_VELOCITY_VALIDATE_LIMITS = 123
+EVENT_COMMISSION_VELOCITY_SWEEP_PLAN = 124
+EVENT_COMMISSION_VELOCITY_SWEEP_OBSERVATION = 125
+EVENT_COMMISSION_VELOCITY_SWEEP_RUNG = 126
+EVENT_COMMISSION_VELOCITY_SWEEP_TERMINAL = 128
+EVENT_COMMISSION_VELOCITY_SWEEP_COMPLETE = 129
 EVENT_COMMISSION_POSITION_TUNE_RESULT = 130
 EVENT_COMMISSION_POSITION_TUNE_TARGET = 131
 EVENT_COMMISSION_POSITION_TUNE_METRICS = 132
@@ -66,6 +72,11 @@ _COMMISSIONING_EVENT_NAMES = {
     EVENT_COMMISSION_VELOCITY_VALIDATE_GAIN: "commission_velocity_validate_gain",
     EVENT_COMMISSION_VELOCITY_VALIDATE_METRICS: "commission_velocity_validate_metrics",
     EVENT_COMMISSION_VELOCITY_VALIDATE_LIMITS: "commission_velocity_validate_limits",
+    EVENT_COMMISSION_VELOCITY_SWEEP_PLAN: "commission_velocity_sweep_plan",
+    EVENT_COMMISSION_VELOCITY_SWEEP_OBSERVATION: "commission_velocity_sweep_observation",
+    EVENT_COMMISSION_VELOCITY_SWEEP_RUNG: "commission_velocity_sweep_rung",
+    EVENT_COMMISSION_VELOCITY_SWEEP_TERMINAL: "commission_velocity_sweep_terminal",
+    EVENT_COMMISSION_VELOCITY_SWEEP_COMPLETE: "commission_velocity_sweep_complete",
     EVENT_COMMISSION_POSITION_TUNE_RESULT: "commission_position_tune_result",
     EVENT_COMMISSION_POSITION_TUNE_TARGET: "commission_position_tune_target",
     EVENT_COMMISSION_POSITION_TUNE_METRICS: "commission_position_tune_metrics",
@@ -249,6 +260,8 @@ def _decode_payload(version: int, frame_type: int, payload: bytes) -> dict[str, 
         return _decode_phase_advance(payload)
     if frame_type == FRAME_TYPE_VELOCITY_OBSERVATION:
         return _decode_velocity_observation(payload)
+    if frame_type == FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE:
+        return _decode_velocity_sweep_evidence(payload)
     return {"raw": payload}
 
 
@@ -350,7 +363,187 @@ def _decode_velocity_observation(payload: bytes) -> dict[str, Any]:
         "stroke_index": stroke_index,
         "direction": direction,
         "flags": flags,
+        "peak_torque_target_abs": (
+            struct.unpack_from("<H", payload, 16)[0] if len(payload) >= 18 else None
+        ),
     }
+
+
+class _EvidenceCursor:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+        self.offset = 0
+
+    def take(self, fmt: str) -> int:
+        size = struct.calcsize("<" + fmt)
+        if self.offset + size > len(self.payload):
+            raise DecodeError("velocity-sweep evidence record is truncated")
+        value = struct.unpack_from("<" + fmt, self.payload, self.offset)[0]
+        self.offset += size
+        return int(value)
+
+    def finish(self) -> None:
+        if self.offset != len(self.payload):
+            raise DecodeError("velocity-sweep evidence record has trailing bytes")
+
+
+def _take_fields(cursor: _EvidenceCursor, fields: tuple[tuple[str, str], ...]) -> dict[str, int]:
+    return {name: cursor.take(fmt) for name, fmt in fields}
+
+
+def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
+    _require(payload, 1, "velocity-sweep evidence")
+    cursor = _EvidenceCursor(payload)
+    kind = cursor.take("B")
+    if kind == 1:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("requested_velocity_mrev_s", "I"),
+                ("requested_velocity_source", "B"),
+                ("used_velocity_mrev_s", "I"),
+                ("effective_ceiling_mrev_s", "I"),
+                ("clamp_flags", "H"),
+                ("binding_source", "B"),
+                ("target_velocity_register", "i"),
+                ("p_start", "H"),
+                ("p_top", "H"),
+                ("rung_count", "B"),
+                ("observations_per_direction", "H"),
+                ("moving_stroke_us", "I"),
+                ("zero_settle_us", "I"),
+                ("nominal_workflow_ms", "I"),
+                ("maximum_workflow_ms", "I"),
+                ("max_stroke_travel_mrev", "I"),
+                ("settle_travel_reserve_mrev", "I"),
+                ("negative_position_headroom_mrev", "I"),
+                ("positive_position_headroom_mrev", "I"),
+                ("hard_torque_limit", "H"),
+                ("usable_torque_limit", "H"),
+            ),
+        )
+        decoded["record_kind"] = "plan"
+    elif kind == 2:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("rung_index", "B"),
+                ("slot", "B"),
+                ("target_velocity_register", "i"),
+                ("classification", "B"),
+                ("flags", "B"),
+                ("delta_sign", "B"),
+                ("delta_mantissa", "I"),
+                ("delta_shift", "B"),
+                ("elapsed_mantissa", "I"),
+                ("elapsed_shift", "B"),
+                ("rate_low", "i"),
+                ("rate_mean", "i"),
+                ("rate_high", "i"),
+                ("deficit_low", "i"),
+                ("deficit_high", "i"),
+                ("rate_shift", "B"),
+                ("suffix_len", "H"),
+                ("selected_level", "B"),
+                ("selected_blocks", "I"),
+                ("rate_variance_mantissa", "I"),
+                ("rate_variance_shift", "B"),
+                ("slope_mantissa", "i"),
+                ("slope_shift", "B"),
+                ("slope_half_width_mantissa", "I"),
+                ("slope_half_width_shift", "B"),
+                ("lag_one_q", "i"),
+                ("lag_one_half_width_q", "I"),
+                ("residual_mantissa", "I"),
+                ("residual_shift", "B"),
+                ("tested_suffixes", "B"),
+                ("velocity_p", "H"),
+                ("disturbance_q16", "i"),
+                ("disturbance_low_q16", "i"),
+                ("disturbance_high_q16", "i"),
+                ("disturbance_variance_mantissa", "I"),
+                ("disturbance_variance_shift", "B"),
+                ("predicted_torque_target_abs", "H"),
+            ),
+        )
+        decoded["record_kind"] = "observation"
+    elif kind == 3:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("rung_index", "B"),
+                ("velocity_p", "H"),
+                ("forward_low_q16", "i"),
+                ("forward_high_q16", "i"),
+                ("reverse_low_q16", "i"),
+                ("reverse_high_q16", "i"),
+                ("forward_p_low", "H"),
+                ("forward_p_high", "H"),
+                ("reverse_p_low", "H"),
+                ("reverse_p_high", "H"),
+                ("forward_class", "B"),
+                ("reverse_class", "B"),
+                ("forward_closure", "B"),
+                ("reverse_closure", "B"),
+                ("flags", "B"),
+                ("forward_eligible_rungs", "B"),
+                ("reverse_eligible_rungs", "B"),
+                ("forward_eligible_observations", "H"),
+                ("reverse_eligible_observations", "H"),
+            ),
+        )
+        decoded["record_kind"] = "rung"
+    elif kind == 4:
+        decoded = {
+            "record_kind": "terminal",
+            "run_sequence": cursor.take("I"),
+            "encoder_counts_per_rev": cursor.take("I"),
+            "f_pwm_hz": cursor.take("I"),
+        }
+        directions = []
+        direction_fields = (
+            ("direction_closure", "B"),
+            ("first_moving", "H"),
+            ("p_low", "H"),
+            ("p_high", "H"),
+            ("common_low_q16", "i"),
+            ("common_high_q16", "i"),
+            ("pooled_q16", "i"),
+            ("pooled_low_q16", "i"),
+            ("pooled_high_q16", "i"),
+            ("eligible_rungs", "B"),
+            ("eligible_observations", "H"),
+            ("flags", "B"),
+        )
+        for _ in range(2):
+            directions.append(_take_fields(cursor, direction_fields))
+        decoded["directions"] = directions
+        decoded.update(
+            _take_fields(
+                cursor,
+                (
+                    ("expected_observations", "H"),
+                    ("emitted_observations", "H"),
+                    ("expected_rungs", "H"),
+                    ("emitted_rungs", "H"),
+                    ("digest_low", "I"),
+                    ("digest_high", "I"),
+                    ("outcome", "B"),
+                    ("cause", "B"),
+                    ("sufficient_direction_mask", "B"),
+                ),
+            )
+        )
+    else:
+        raise DecodeError(f"unknown velocity-sweep evidence kind {kind}")
+    cursor.finish()
+    return decoded
 
 
 def _decode_control_detail(payload: bytes) -> dict[str, Any]:

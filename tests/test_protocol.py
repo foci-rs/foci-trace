@@ -10,6 +10,7 @@ from foci_trace.protocol import (
     FRAME_TYPE_METADATA,
     FRAME_TYPE_PHASE_ADVANCE,
     FRAME_TYPE_VELOCITY_OBSERVATION,
+    FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
     PROTOCOL_VERSION,
     DecodeError,
     FrameAssembler,
@@ -161,7 +162,7 @@ def test_decodes_phase_advance_frame() -> None:
 
 
 def test_decodes_signed_velocity_observation_frame() -> None:
-    payload = struct.pack("<iiIHbB", -4, -7, 1_037, 513, -1, 1)
+    payload = struct.pack("<iiIHbBH", -4, -7, 1_037, 513, -1, 1, 900)
 
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_OBSERVATION, payload) + payload)
 
@@ -172,7 +173,74 @@ def test_decodes_signed_velocity_observation_frame() -> None:
         "stroke_index": 513,
         "direction": -1,
         "flags": 1,
+        "peak_torque_target_abs": 900,
     }
+
+
+def test_decodes_version_six_velocity_observation_without_peak() -> None:
+    payload = struct.pack("<iiIHbB", -4, -7, 1_037, 513, -1, 1)
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_OBSERVATION, payload, version=6) + payload)
+
+    assert frame.payload["peak_torque_target_abs"] is None
+
+
+def test_decodes_canonical_velocity_sweep_plan() -> None:
+    values = (
+        7,
+        0,
+        5_000,
+        1,
+        4_800,
+        7_500,
+        1,
+        0,
+        3_200,
+        8,
+        128,
+        5,
+        2,
+        256_000,
+        200_000,
+        9_120,
+        10_000,
+        1_000,
+        250,
+        1_250,
+        1_250,
+        1_000,
+        900,
+    )
+    payload = bytes([1]) + struct.pack("<IHI BIIHBiHHBHIIIIIIIIHH".replace(" ", ""), *values)
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert frame.payload["record_kind"] == "plan"
+    assert frame.payload["run_sequence"] == 7
+    assert frame.payload["target_velocity_register"] == 3_200
+    assert frame.payload["rung_count"] == 5
+    assert frame.payload["usable_torque_limit"] == 900
+
+
+def test_decodes_canonical_velocity_sweep_terminal_digest() -> None:
+    direction = struct.pack("<BHHHiiiiiBHB", 0, 8, 8, 32, 10, 20, 15, 12, 18, 3, 6, 0x0D)
+    reverse = struct.pack("<BHHHiiiiiBHB", 1, 12, 12, 48, -20, -10, -15, -18, -12, 3, 6, 0x0D)
+    payload = (
+        bytes([4])
+        + struct.pack("<III", 7, 4_000, 25_000)
+        + direction
+        + reverse
+        + struct.pack("<HHHHIIBBB", 20, 20, 5, 5, 0x0105_C518, 0x53E2_5AF6, 0, 0, 3)
+    )
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert frame.payload["record_kind"] == "terminal"
+    assert frame.payload["encoder_counts_per_rev"] == 4_000
+    assert frame.payload["f_pwm_hz"] == 25_000
+    assert frame.payload["directions"][1]["pooled_q16"] == -15
+    assert frame.payload["digest_low"] == 0x0105_C518
+    assert frame.payload["digest_high"] == 0x53E2_5AF6
 
 
 def test_decode_v2_critical_keeps_legacy_torque_fields() -> None:

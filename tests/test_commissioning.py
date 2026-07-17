@@ -9,6 +9,7 @@ from foci_trace.protocol import (
     EVENT_COMMISSION_VELOCITY_VALIDATE_LIMITS,
     EVENT_COMMISSION_VELOCITY_VALIDATE_METRICS,
     EVENT_COMMISSION_VELOCITY_VALIDATE_RESULT,
+    EVENT_COMMISSION_VELOCITY_SWEEP_PLAN,
     FRAME_TYPE_CONTROL_DETAIL,
     FRAME_TYPE_CRITICAL,
     FRAME_TYPE_EVENT,
@@ -271,6 +272,37 @@ def test_failed_tune_decodes_velocity_validate_summary() -> None:
     assert data["runs"][0]["result"] == "velocity_validation_failed"
     assert data["runs"][0]["summaries"][0]["family"] == "velocity_validate_summary"
     assert len(data["runs"][0]["summaries"][0]["fragments"]) == 4
+
+
+def test_velocity_sweep_sequence_marker_is_retained() -> None:
+    builder = CommissioningCaptureBuilder()
+    _observe_event(
+        builder,
+        1,
+        1_000,
+        EVENT_COMMISSION_ENGINE_START,
+        engine_kind=ENGINE_OUTER_TUNE,
+        arg3=9,
+    )
+    _observe_event(
+        builder,
+        2,
+        2_000,
+        EVENT_COMMISSION_VELOCITY_SWEEP_PLAN,
+        engine_kind=ENGINE_OUTER_TUNE,
+        arg2=17,
+    )
+
+    data = commissioning_report_to_json(builder.finalize({0: CLOCK_HZ}))
+
+    assert data["runs"][0]["velocity_sweep_markers"] == [
+        {
+            "kind": "plan",
+            "sequence_or_cause": 17,
+            "detail": 0,
+            "timestamp_ticks": 2_000,
+        }
+    ]
 
 
 def test_partial_capture_reports_caveat_without_crashing() -> None:
