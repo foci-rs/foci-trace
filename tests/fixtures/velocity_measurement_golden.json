@@ -71,5 +71,15 @@
     "median_interval_us": 1000.0,
     "min_interval_us": 1000,
     "timing_discontinuity_count": 0
+  },
+  "stationary_tail": {
+    "pattern": [1, 0, 1, 1, 0],
+    "sample_count": 256,
+    "suffix_len": 256,
+    "selected_level": 4,
+    "selected_blocks": 16,
+    "selected_delta_counts": 154,
+    "selected_elapsed_us": 256000,
+    "settled_rate_mean_q": 601562
   }
 }
