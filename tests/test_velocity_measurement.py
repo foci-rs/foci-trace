@@ -145,7 +145,7 @@ def test_excluded_observation_zeros_unavailable_suffix_metrics() -> None:
     from foci_trace.velocity_measurement import _reconstruct_observation
 
     observations = [_observation(index) for index in range(256)]
-    record = {"velocity_p": 32, "target_velocity_register": 8, "slot": 0}
+    record = {"velocity_p": 32, "target_velocity_rpm": 8, "slot": 0}
     plan = {"hard_torque_limit": 2_816, "usable_torque_limit": 2_534}
     terminal = {"encoder_counts_per_rev": 4_000, "f_pwm_hz": 25_000}
 
@@ -160,16 +160,102 @@ def test_disturbance_promotes_encoder_rate_to_target_q16_domain() -> None:
 
     result = _disturbance(
         p=256,
-        target_register=8,
-        delta_counts=800,
-        elapsed_us=65_536,
+        target_velocity_rpm=176,
+        delta_counts=44,
+        elapsed_us=3_750,
         half_width_rate_q=0,
         variance_rate_q2=0,
         counts_per_rev=4_000,
-        f_pwm_hz=25_000,
     )
 
     assert result == (0, 0, 0, 0)
+
+
+def test_disturbance_is_symmetric_and_rejects_retired_target_domain() -> None:
+    from foci_trace.velocity_measurement import _disturbance
+
+    forward = _disturbance(
+        p=256,
+        target_velocity_rpm=176,
+        delta_counts=44,
+        elapsed_us=3_750,
+        half_width_rate_q=0,
+        variance_rate_q2=0,
+        counts_per_rev=4_000,
+    )
+    reverse = _disturbance(
+        p=256,
+        target_velocity_rpm=-176,
+        delta_counts=-44,
+        elapsed_us=3_750,
+        half_width_rate_q=0,
+        variance_rate_q2=0,
+        counts_per_rev=4_000,
+    )
+    mismatch = _disturbance(
+        p=256,
+        target_velocity_rpm=8,
+        delta_counts=44,
+        elapsed_us=3_750,
+        half_width_rate_q=0,
+        variance_rate_q2=0,
+        counts_per_rev=4_000,
+    )
+
+    assert forward == reverse == (0, 0, 0, 0)
+    assert mismatch[0] != 0
+
+
+def test_planned_mrev_per_second_rounds_to_mechanical_rpm() -> None:
+    from foci_trace.velocity_measurement import _mrev_s_to_rpm_nearest
+
+    assert _mrev_s_to_rpm_nearest(2_929) == 176
+
+
+def test_diagnostic_audit_compares_block_means_and_torque_reconstruction() -> None:
+    from foci_trace.velocity_measurement import _diagnostic_audit
+
+    observations = []
+    records = {}
+    for slot in range(4):
+        direction = 1 if slot % 2 == 0 else -1
+        records[(0, slot)] = {
+            "velocity_p": 384,
+            "target_velocity_rpm": direction * 176,
+        }
+        observations.extend(
+            [
+                VelocityObservation(
+                    delta_counts=direction * 44,
+                    elapsed_us=3_750,
+                    direction=direction,
+                    stroke_index=slot,
+                    target_cpms=direction,
+                    peak_torque_target_abs=264,
+                    pid_velocity_actual=direction * 176,
+                ),
+                VelocityObservation(
+                    delta_counts=direction * 44,
+                    elapsed_us=3_750,
+                    direction=direction,
+                    stroke_index=slot,
+                    target_cpms=direction,
+                    peak_torque_target_abs=264,
+                    actual_velocity_pptm=direction * 176,
+                ),
+            ]
+        )
+
+    audit = _diagnostic_audit(observations, records, 4_000, 2_534)
+
+    assert audit["pid_encoder"]["block_count"] == 4
+    assert audit["pid_encoder"]["difference_mean_rpm"] == pytest.approx(0.0)
+    assert audit["pid_encoder"]["difference_low_rpm"] <= 0
+    assert audit["pid_encoder"]["difference_high_rpm"] >= 0
+    assert audit["pptm_encoder"]["difference_mean_rpm"] == pytest.approx(0.0)
+    assert audit["torque"]["max_reconstructed_abs"] == 0
+    assert audit["torque"]["within_observed_peak_plus_one"] is True
+    assert audit["torque"]["below_usable_limit"] is True
 
 
 def test_sweep_confidence_uses_all_two_k_observations() -> None:
@@ -254,7 +340,8 @@ def test_sweep_audit_reconstructs_observations_rung_band_and_terminal() -> None:
         "evidence_sequence": 0,
         "rung_count": 1,
         "observations_per_direction": 2,
-        "used_velocity_mrev_s": 1_000,
+        "planned_velocity_mrev_s": 1_667,
+        "target_velocity_rpm": 100,
         "hard_torque_limit": 1_000,
         "usable_torque_limit": 900,
     }
@@ -294,7 +381,7 @@ def test_sweep_audit_reconstructs_observations_rung_band_and_terminal() -> None:
             "rung_index": 0,
             "slot": slot,
             "velocity_p": 100,
-            "target_velocity_register": direction * 100,
+            "target_velocity_rpm": direction * 100,
             "flags": int(slot == 0),
         }
         result = _reconstruct_observation(stroke, record, plan, terminal)

@@ -2039,7 +2039,7 @@ def test_capture_integrates_canonical_velocity_sweep_audit() -> None:
         7_500,
         1,
         0,
-        3_200,
+        288,
         8,
         8,
         0,

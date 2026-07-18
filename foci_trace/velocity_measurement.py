@@ -109,6 +109,7 @@ class VelocityObservation:
     target_cpms: int
     peak_torque_target_abs: int | None = None
     pid_velocity_actual: int | None = None
+    actual_velocity_pptm: int | None = None
 
 
 @dataclass(frozen=True)
@@ -612,33 +613,160 @@ def _ceil_div(numerator: int, denominator: int) -> int:
     return -((-numerator) // denominator)
 
 
+def _mrev_s_to_rpm_nearest(value: int) -> int:
+    if value <= 0:
+        raise ValueError("planned velocity must be positive")
+    return (value * 60 + 500) // 1_000
+
+
+_TWO_SIDED_T_95 = {
+    1: 12.706,
+    2: 4.303,
+    3: 3.182,
+    4: 2.776,
+    5: 2.571,
+    6: 2.447,
+    7: 2.365,
+    8: 2.306,
+    9: 2.262,
+    10: 2.228,
+    11: 2.201,
+    12: 2.179,
+    13: 2.160,
+    14: 2.145,
+    15: 2.131,
+}
+
+
+def _diagnostic_block_means(
+    observations: list[VelocityObservation],
+    field_name: str,
+    counts_per_rev: int,
+) -> dict[str, object]:
+    blocks: dict[int, list[tuple[Fraction, Fraction]]] = {}
+    for observation in observations:
+        value = getattr(observation, field_name)
+        if value is None or observation.direction == 0 or observation.elapsed_us <= 0:
+            continue
+        direction = observation.direction
+        chip_rpm = Fraction(int(value) * direction)
+        encoder_rpm = Fraction(
+            observation.delta_counts * direction * 60_000_000,
+            counts_per_rev * observation.elapsed_us,
+        )
+        blocks.setdefault(observation.stroke_index, []).append((chip_rpm, encoder_rpm))
+    block_means: list[tuple[Fraction, Fraction]] = []
+    for samples in blocks.values():
+        count = len(samples)
+        block_means.append(
+            (
+                sum((sample[0] for sample in samples), Fraction()) / count,
+                sum((sample[1] for sample in samples), Fraction()) / count,
+            )
+        )
+    if not block_means:
+        return {
+            "block_count": 0,
+            "chip_mean_rpm": None,
+            "encoder_mean_rpm": None,
+            "difference_mean_rpm": None,
+            "difference_low_rpm": None,
+            "difference_high_rpm": None,
+        }
+    chip_mean = sum((block[0] for block in block_means), Fraction()) / len(block_means)
+    encoder_mean = sum((block[1] for block in block_means), Fraction()) / len(block_means)
+    differences = [block[0] - block[1] for block in block_means]
+    difference_mean = sum(differences, Fraction()) / len(differences)
+    if len(differences) < 2:
+        difference_low = None
+        difference_high = None
+    else:
+        variance = sum((float(value - difference_mean) ** 2 for value in differences)) / (
+            len(differences) - 1
+        )
+        degrees_freedom = len(differences) - 1
+        multiplier = _TWO_SIDED_T_95.get(degrees_freedom, 2.131)
+        half_width = multiplier * math.sqrt(variance / len(differences))
+        difference_low = float(difference_mean) - half_width
+        difference_high = float(difference_mean) + half_width
+    return {
+        "block_count": len(block_means),
+        "chip_mean_rpm": float(chip_mean),
+        "encoder_mean_rpm": float(encoder_mean),
+        "difference_mean_rpm": float(difference_mean),
+        "difference_low_rpm": difference_low,
+        "difference_high_rpm": difference_high,
+    }
+
+
+def _diagnostic_audit(
+    observations: list[VelocityObservation],
+    observation_records: dict[tuple[int, int], dict[str, object]],
+    counts_per_rev: int,
+    usable_torque_limit: int,
+) -> dict[str, object]:
+    max_reconstructed = 0
+    max_observed = 0
+    peak_violations = 0
+    for observation in observations:
+        max_observed = max(max_observed, observation.peak_torque_target_abs or 0)
+        if observation.pid_velocity_actual is None:
+            continue
+        rung_index, slot = divmod(observation.stroke_index, 4)
+        record = observation_records.get((rung_index, slot))
+        if record is None:
+            continue
+        reconstructed = _ceil_div(
+            abs(
+                int(record["velocity_p"])
+                * (int(record["target_velocity_rpm"]) - observation.pid_velocity_actual)
+            ),
+            256,
+        )
+        max_reconstructed = max(max_reconstructed, reconstructed)
+        if reconstructed > (observation.peak_torque_target_abs or 0) + 1:
+            peak_violations += 1
+    return {
+        "pid_encoder": _diagnostic_block_means(observations, "pid_velocity_actual", counts_per_rev),
+        "pptm_encoder": _diagnostic_block_means(
+            observations, "actual_velocity_pptm", counts_per_rev
+        ),
+        "torque": {
+            "max_reconstructed_abs": max_reconstructed,
+            "max_observed_peak_abs": max_observed,
+            "peak_plus_one_violations": peak_violations,
+            "within_observed_peak_plus_one": peak_violations == 0,
+            "below_usable_limit": max_reconstructed < usable_torque_limit
+            and max_observed < usable_torque_limit,
+        },
+    }
+
+
 def _disturbance(
     *,
     p: int,
-    target_register: int,
+    target_velocity_rpm: int,
     delta_counts: int,
     elapsed_us: int,
     half_width_rate_q: int,
     variance_rate_q2: int,
     counts_per_rev: int,
-    f_pwm_hz: int,
 ) -> tuple[int, int, int, int]:
-    scale_denominator = counts_per_rev * f_pwm_hz
-    target_q16 = target_register * 65_536
-    target_numerator = target_q16 * scale_denominator * elapsed_us
-    encoder_numerator = delta_counts * 65_536 * 65_536 * 1_000_000
+    target_q16 = target_velocity_rpm * 65_536
+    target_numerator = target_q16 * counts_per_rev * elapsed_us
+    encoder_numerator = delta_counts * 60_000_000 * 65_536
     error_numerator = target_numerator - encoder_numerator
     disturbance_numerator = p * error_numerator
-    disturbance_denominator = 256 * scale_denominator * elapsed_us
+    disturbance_denominator = 256 * counts_per_rev * elapsed_us
     estimate = _trunc_div(disturbance_numerator, disturbance_denominator)
     common_denominator = disturbance_denominator * RATE_Q_SCALE
     common_mean = disturbance_numerator * RATE_Q_SCALE
-    common_half_width = p * half_width_rate_q * 65_536 * 65_536 * elapsed_us
+    common_half_width = p * half_width_rate_q * 60 * 65_536 * elapsed_us
     low = _floor_div(common_mean - common_half_width, common_denominator)
     high = _ceil_div(common_mean + common_half_width, common_denominator)
-    scale_numerator = p * 65_536 * 65_536
+    scale_numerator = p * 60 * 65_536
     variance_numerator = variance_rate_q2 * scale_numerator * scale_numerator
-    variance_denominator = (256 * counts_per_rev * f_pwm_hz * RATE_Q_SCALE) ** 2
+    variance_denominator = (256 * counts_per_rev * RATE_Q_SCALE) ** 2
     variance = _ceil_div(variance_numerator, variance_denominator)
     return estimate, low, high, variance
 
@@ -665,9 +793,9 @@ def _reconstruct_observation(
 ) -> dict[str, int]:
     stationarity = _stationary_suffix(raw[-256:])
     p = int(record["velocity_p"])
-    target_register = int(record["target_velocity_register"])
+    target_velocity_rpm = int(record["target_velocity_rpm"])
     predicted = max(
-        (p * abs(target_register) + 255) // 256,
+        (p * abs(target_velocity_rpm) + 255) // 256,
         max((item.peak_torque_target_abs or 0) for item in raw),
     )
     if not stationarity["usable"]:
@@ -687,19 +815,19 @@ def _reconstruct_observation(
     mean = stationarity["settled_rate_mean_q"]
     rate_low, rate_high = mean - half_width, mean + half_width
     direction = 1 if int(record["slot"]) % 2 == 0 else -1
-    target_rate_q = (
-        direction * int(plan["used_velocity_mrev_s"]) * int(terminal["encoder_counts_per_rev"])
+    target_rate_q_numerator = (
+        target_velocity_rpm * int(terminal["encoder_counts_per_rev"]) * RATE_Q_SCALE
     )
-    deficit_low, deficit_high = target_rate_q - rate_high, target_rate_q - rate_low
+    deficit_low = _floor_div(target_rate_q_numerator - rate_high * 60, 60)
+    deficit_high = _ceil_div(target_rate_q_numerator - rate_low * 60, 60)
     disturbance, disturbance_low, disturbance_high, disturbance_variance = _disturbance(
         p=p,
-        target_register=target_register,
+        target_velocity_rpm=target_velocity_rpm,
         delta_counts=stationarity["selected_delta_counts"],
         elapsed_us=stationarity["selected_elapsed_us"],
         half_width_rate_q=half_width,
         variance_rate_q2=stationarity["variance_of_mean_q2"],
         counts_per_rev=int(terminal["encoder_counts_per_rev"]),
-        f_pwm_hz=int(terminal["f_pwm_hz"]),
     )
     wrong_direction = rate_high < 0 if direction > 0 else rate_low > 0
     moving = rate_low > 0 if direction > 0 else rate_high < 0
@@ -881,6 +1009,7 @@ def audit_velocity_sweep(
     """Independently reconstruct one sweep and compare every firmware decision."""
     sample_indexes: dict[int, int] = {}
     pid_velocity_actual_samples: list[dict[str, int]] = []
+    actual_velocity_pptm_samples: list[dict[str, int]] = []
     for observation in raw_observations:
         sample_index = sample_indexes.get(observation.stroke_index, 0)
         sample_indexes[observation.stroke_index] = sample_index + 1
@@ -894,6 +1023,18 @@ def audit_velocity_sweep(
                     "delta_counts": observation.delta_counts,
                     "elapsed_us": observation.elapsed_us,
                     "pid_velocity_actual": observation.pid_velocity_actual,
+                }
+            )
+        if observation.actual_velocity_pptm is not None:
+            actual_velocity_pptm_samples.append(
+                {
+                    "stroke_index": observation.stroke_index,
+                    "sample_index": sample_index,
+                    "direction": observation.direction,
+                    "target_counts_per_ms": observation.target_cpms,
+                    "delta_counts": observation.delta_counts,
+                    "elapsed_us": observation.elapsed_us,
+                    "actual_velocity_pptm": observation.actual_velocity_pptm,
                 }
             )
     plans = [value for _raw, value in evidence_records if value["record_kind"] == "plan"]
@@ -929,6 +1070,7 @@ def audit_velocity_sweep(
             "reported_digest": None,
             "raw_observation_count": len(raw_observations),
             "pid_velocity_actual_samples": pid_velocity_actual_samples,
+            "actual_velocity_pptm_samples": actual_velocity_pptm_samples,
             "observation_count": observation_count,
             "rung_count": rung_count,
             "directions": [],
@@ -939,6 +1081,12 @@ def audit_velocity_sweep(
         }
     plan, terminal = plans[0], terminals[0]
     mismatches: list[str] = []
+    expected_target_rpm = _mrev_s_to_rpm_nearest(int(plan["planned_velocity_mrev_s"]))
+    if int(plan["target_velocity_rpm"]) != expected_target_rpm:
+        mismatches.append(
+            "plan target RPM: firmware=%d offline=%d"
+            % (int(plan["target_velocity_rpm"]), expected_target_rpm)
+        )
     sequences = [int(value["evidence_sequence"]) for _raw, value in records]
     if sequences != list(range(len(sequences))):
         mismatches.append(f"evidence sequence is not contiguous: {sequences}")
@@ -955,6 +1103,12 @@ def audit_velocity_sweep(
         for _raw, value in records
         if value["record_kind"] == "observation"
     }
+    diagnostic_audit = _diagnostic_audit(
+        raw_observations,
+        observation_records,
+        int(terminal["encoder_counts_per_rev"]),
+        int(plan["usable_torque_limit"]),
+    )
     offline_observations: dict[tuple[int, int], dict[str, int]] = {}
     exact_fields = (
         "classification",
@@ -1095,6 +1249,8 @@ def audit_velocity_sweep(
         "reported_digest": reported_digest,
         "observation_count": len(observation_records),
         "pid_velocity_actual_samples": pid_velocity_actual_samples,
+        "actual_velocity_pptm_samples": actual_velocity_pptm_samples,
+        "velocity_diagnostic_audit": diagnostic_audit,
         "rung_count": len(rung_records),
         "directions": finished_bands,
         "complete": True,

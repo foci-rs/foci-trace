@@ -12,6 +12,8 @@ from foci_trace.protocol import (
     FRAME_TYPE_VELOCITY_OBSERVATION,
     FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
     PROTOCOL_VERSION,
+    VELOCITY_OBSERVATION_FLAG_PID_VELOCITY_ACTUAL_VALID,
+    VELOCITY_OBSERVATION_FLAG_PPTM_ACTUAL_VALID,
     DecodeError,
     FrameAssembler,
     decode_frame,
@@ -162,7 +164,17 @@ def test_decodes_phase_advance_frame() -> None:
 
 
 def test_decodes_signed_velocity_observation_frame() -> None:
-    payload = struct.pack("<iiIHbBHi", -4, -7, 1_037, 513, -1, 3, 900, -8)
+    payload = struct.pack(
+        "<iiIHbBHi",
+        -4,
+        -7,
+        1_037,
+        513,
+        -1,
+        VELOCITY_OBSERVATION_FLAG_PID_VELOCITY_ACTUAL_VALID,
+        900,
+        -8,
+    )
 
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_OBSERVATION, payload) + payload)
 
@@ -172,10 +184,42 @@ def test_decodes_signed_velocity_observation_frame() -> None:
         "elapsed_us": 1_037,
         "stroke_index": 513,
         "direction": -1,
-        "flags": 3,
+        "flags": VELOCITY_OBSERVATION_FLAG_PID_VELOCITY_ACTUAL_VALID,
         "peak_torque_target_abs": 900,
         "pid_velocity_actual": -8,
+        "actual_velocity_pptm": None,
     }
+
+
+def test_decodes_version_nine_pptm_velocity_diagnostic() -> None:
+    payload = struct.pack(
+        "<iiIHbBHi",
+        4,
+        7,
+        1_037,
+        12,
+        1,
+        VELOCITY_OBSERVATION_FLAG_PPTM_ACTUAL_VALID,
+        321,
+        176,
+    )
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_OBSERVATION, payload) + payload)
+
+    assert PROTOCOL_VERSION == 9
+    assert frame.payload["pid_velocity_actual"] is None
+    assert frame.payload["actual_velocity_pptm"] == 176
+
+
+def test_rejects_velocity_observation_with_both_diagnostic_kinds() -> None:
+    flags = (
+        VELOCITY_OBSERVATION_FLAG_PID_VELOCITY_ACTUAL_VALID
+        | VELOCITY_OBSERVATION_FLAG_PPTM_ACTUAL_VALID
+    )
+    payload = struct.pack("<iiIHbBHi", 4, 7, 1_037, 12, 1, flags, 321, 176)
+
+    with pytest.raises(DecodeError, match="mutually exclusive"):
+        decode_frame(_header(FRAME_TYPE_VELOCITY_OBSERVATION, payload) + payload)
 
 
 def test_decodes_version_six_velocity_observation_without_peak() -> None:
@@ -185,6 +229,7 @@ def test_decodes_version_six_velocity_observation_without_peak() -> None:
 
     assert frame.payload["peak_torque_target_abs"] is None
     assert frame.payload["pid_velocity_actual"] is None
+    assert frame.payload["actual_velocity_pptm"] is None
 
 
 def test_decodes_canonical_velocity_sweep_plan() -> None:
@@ -197,7 +242,7 @@ def test_decodes_canonical_velocity_sweep_plan() -> None:
         7_500,
         1,
         0,
-        3_200,
+        288,
         8,
         128,
         5,
@@ -219,7 +264,8 @@ def test_decodes_canonical_velocity_sweep_plan() -> None:
 
     assert frame.payload["record_kind"] == "plan"
     assert frame.payload["run_sequence"] == 7
-    assert frame.payload["target_velocity_register"] == 3_200
+    assert frame.payload["planned_velocity_mrev_s"] == 4_800
+    assert frame.payload["target_velocity_rpm"] == 288
     assert frame.payload["rung_count"] == 5
     assert frame.payload["usable_torque_limit"] == 900
 

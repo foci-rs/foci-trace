@@ -7,8 +7,8 @@ import struct
 from typing import Any
 
 FRAME_MAGIC = 0x43525446
-PROTOCOL_VERSION = 8
-SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, 5, 6, 7, PROTOCOL_VERSION)
+PROTOCOL_VERSION = 9
+SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, PROTOCOL_VERSION)
 HEADER_LEN = 32
 
 FRAME_TYPE_CRITICAL = 1
@@ -22,6 +22,7 @@ FRAME_TYPE_VELOCITY_OBSERVATION = 8
 FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE = 9
 
 VELOCITY_OBSERVATION_FLAG_PID_VELOCITY_ACTUAL_VALID = 1 << 1
+VELOCITY_OBSERVATION_FLAG_PPTM_ACTUAL_VALID = 1 << 2
 
 SUBSYSTEM_COMMISSIONING = 7
 
@@ -261,7 +262,7 @@ def _decode_payload(version: int, frame_type: int, payload: bytes) -> dict[str, 
     if frame_type == FRAME_TYPE_PHASE_ADVANCE:
         return _decode_phase_advance(payload)
     if frame_type == FRAME_TYPE_VELOCITY_OBSERVATION:
-        return _decode_velocity_observation(payload)
+        return _decode_velocity_observation(version, payload)
     if frame_type == FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE:
         return _decode_velocity_sweep_evidence(payload)
     return {"raw": payload}
@@ -353,11 +354,16 @@ def _decode_phase_advance(payload: bytes) -> dict[str, Any]:
     }
 
 
-def _decode_velocity_observation(payload: bytes) -> dict[str, Any]:
+def _decode_velocity_observation(version: int, payload: bytes) -> dict[str, Any]:
     _require(payload, 16, "velocity observation")
     target, delta, elapsed_us, stroke_index, direction, flags = struct.unpack_from(
         "<iiIHbB", payload, 0
     )
+    diagnostic_value = struct.unpack_from("<i", payload, 18)[0] if len(payload) >= 22 else None
+    pid_valid = bool(flags & VELOCITY_OBSERVATION_FLAG_PID_VELOCITY_ACTUAL_VALID)
+    pptm_valid = bool(flags & VELOCITY_OBSERVATION_FLAG_PPTM_ACTUAL_VALID)
+    if version >= 9 and pid_valid and pptm_valid:
+        raise DecodeError("velocity diagnostic kinds must be mutually exclusive")
     return {
         "target_counts_per_ms": target,
         "delta_counts": delta,
@@ -368,9 +374,8 @@ def _decode_velocity_observation(payload: bytes) -> dict[str, Any]:
         "peak_torque_target_abs": (
             struct.unpack_from("<H", payload, 16)[0] if len(payload) >= 18 else None
         ),
-        "pid_velocity_actual": (
-            struct.unpack_from("<i", payload, 18)[0] if len(payload) >= 22 else None
-        ),
+        "pid_velocity_actual": diagnostic_value if version < 9 or pid_valid else None,
+        "actual_velocity_pptm": diagnostic_value if version >= 9 and pptm_valid else None,
     }
 
 
@@ -408,11 +413,11 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ("evidence_sequence", "H"),
                 ("requested_velocity_mrev_s", "I"),
                 ("requested_velocity_source", "B"),
-                ("used_velocity_mrev_s", "I"),
+                ("planned_velocity_mrev_s", "I"),
                 ("effective_ceiling_mrev_s", "I"),
                 ("clamp_flags", "H"),
                 ("binding_source", "B"),
-                ("target_velocity_register", "i"),
+                ("target_velocity_rpm", "i"),
                 ("p_start", "H"),
                 ("p_top", "H"),
                 ("rung_count", "B"),
@@ -438,7 +443,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ("evidence_sequence", "H"),
                 ("rung_index", "B"),
                 ("slot", "B"),
-                ("target_velocity_register", "i"),
+                ("target_velocity_rpm", "i"),
                 ("classification", "B"),
                 ("flags", "B"),
                 ("delta_sign", "B"),

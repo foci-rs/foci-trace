@@ -42,6 +42,7 @@ from .protocol import (
     FRAME_TYPE_VELOCITY_OBSERVATION,
     FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
     VELOCITY_OBSERVATION_FLAG_PID_VELOCITY_ACTUAL_VALID,
+    VELOCITY_OBSERVATION_FLAG_PPTM_ACTUAL_VALID,
     DecodeError,
     decode_frame,
 )
@@ -685,6 +686,12 @@ def _observe_velocity_observation(
                     int(payload["pid_velocity_actual"])
                     if int(payload["flags"]) & VELOCITY_OBSERVATION_FLAG_PID_VELOCITY_ACTUAL_VALID
                     and payload.get("pid_velocity_actual") is not None
+                    else None
+                ),
+                actual_velocity_pptm=(
+                    int(payload["actual_velocity_pptm"])
+                    if int(payload["flags"]) & VELOCITY_OBSERVATION_FLAG_PPTM_ACTUAL_VALID
+                    and payload.get("actual_velocity_pptm") is not None
                     else None
                 ),
             ),
