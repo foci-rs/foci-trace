@@ -7,6 +7,7 @@ from enum import Enum
 from fractions import Fraction
 import math
 from statistics import median
+import struct
 
 
 RATE_Q_SCALE = 1_000
@@ -78,6 +79,13 @@ CONFIDENCE_MULTIPLIERS_95_DF15 = (
     4.186888,
     4.194683,
 )
+
+
+def _f32(value: float | int) -> float:
+    """Round one value to the firmware's IEEE-754 single-precision domain."""
+    return struct.unpack("<f", struct.pack("<f", value))[0]
+
+
 FNV1A64_OFFSET = 0xCBF29CE484222325
 FNV1A64_PRIME = 0x100000001B3
 
@@ -463,33 +471,42 @@ def _stationarity_metrics(
     if denominator <= 0:
         return 4
     numerator = n * sum(x * y for x, y in zip(x_values, y_values, strict=True)) - sum_x * sum_y
-    slope_per_us = numerator / denominator
-    intercept = (sum_y - slope_per_us * sum_x) / n
+    slope_per_us = _f32(_f32(numerator) / _f32(denominator))
+    intercept = _f32(_f32(_f32(sum_y) - _f32(slope_per_us * _f32(sum_x))) / _f32(n))
     residuals = [
-        y - (intercept + slope_per_us * x) for x, y in zip(x_values, y_values, strict=True)
+        _f32(_f32(y) - _f32(intercept + _f32(slope_per_us * _f32(x))))
+        for x, y in zip(x_values, y_values, strict=True)
     ]
-    residual_sum = sum(value * value for value in residuals)
-    lag_product_sum = sum(current * previous for previous, current in zip(residuals, residuals[1:]))
-    multiplier = _confidence_multiplier(3)
-    residual_variance = residual_sum / (n - 2)
-    blocking_variance = variance_of_mean_q2 * n
+    residual_sum = _f32(0.0)
+    lag_product_sum = _f32(0.0)
+    previous_residual: float | None = None
+    for residual in residuals:
+        residual_sum = _f32(residual_sum + _f32(residual * residual))
+        if previous_residual is not None:
+            lag_product_sum = _f32(lag_product_sum + _f32(residual * previous_residual))
+        previous_residual = residual
+    multiplier = _f32(_confidence_multiplier(3))
+    residual_variance = _f32(residual_sum / _f32(n - 2))
+    blocking_variance = _f32(_f32(variance_of_mean_q2) * _f32(n))
     slope_variance = max(residual_variance, blocking_variance)
-    sxx = denominator / n
-    slope_per_second = slope_per_us * 1_000_000
-    slope_half_width = multiplier * math.sqrt(slope_variance / sxx) * 1_000_000
+    sxx = _f32(_f32(denominator) / _f32(n))
+    slope_per_second = _f32(slope_per_us * _f32(1_000_000))
+    slope_half_width = _f32(
+        _f32(multiplier * _f32(math.sqrt(_f32(slope_variance / sxx)))) * _f32(1_000_000)
+    )
     if abs(slope_per_second) > slope_half_width:
         return 2
-    lag_one = 0.0 if residual_sum == 0 else lag_product_sum / residual_sum
-    lag_null = -1.0 / n
-    lag_half_width = multiplier / math.sqrt(n)
-    if abs(lag_one - lag_null) > lag_half_width:
+    lag_one = _f32(0.0) if residual_sum == 0 else _f32(lag_product_sum / residual_sum)
+    lag_null = _f32(_f32(-1.0) / _f32(n))
+    lag_half_width = _f32(multiplier / _f32(math.sqrt(_f32(n))))
+    if abs(_f32(lag_one - lag_null)) > lag_half_width:
         return 3
     return {
         "slope_q": _round_away(slope_per_second),
         "slope_half_width_q": math.ceil(slope_half_width),
-        "lag_one_q": _round_away(lag_one * 1_000_000),
-        "lag_one_half_width_q": math.ceil(lag_half_width * 1_000_000),
-        "residual_magnitude_q2": math.ceil(residual_sum / n),
+        "lag_one_q": _round_away(_f32(lag_one * _f32(1_000_000))),
+        "lag_one_half_width_q": math.ceil(_f32(lag_half_width * _f32(1_000_000))),
+        "residual_magnitude_q2": math.ceil(_f32(residual_sum / _f32(n))),
     }
 
 
@@ -658,6 +675,9 @@ def _reconstruct_observation(
             "classification": classification,
             "predicted_torque_target_abs": predicted,
             **stationarity,
+            # The wire summary retains the exclusion class but has no usable
+            # suffix metrics to encode.
+            "tested_suffixes": 0,
         }
     family_size = int(plan["rung_count"]) * int(plan["observations_per_direction"])
     half_width = math.ceil(

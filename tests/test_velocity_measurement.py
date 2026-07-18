@@ -121,6 +121,40 @@ def test_stationary_tail_supports_full_and_tail_ring_captures(
         assert result["settled_rate_mean_q"] == golden["settled_rate_mean_q"]
 
 
+def test_stationary_tail_matches_firmware_single_precision_rounding() -> None:
+    live_deltas = {
+        0: (-1, 1_054),
+        3: (-1, 1_000),
+        9: (-1, 1_000),
+        52: (-1, 1_000),
+        53: (1, 1_000),
+        55: (-1, 1_000),
+    }
+    observations = [
+        _observation(delta, elapsed_us=elapsed)
+        for index in range(256)
+        for delta, elapsed in [live_deltas.get(index, (0, 1_000))]
+    ]
+
+    result = analyze_stationary_tail(observations)
+
+    assert result["residual_magnitude_q2"] == 1_663_058_048
+
+
+def test_excluded_observation_zeros_unavailable_suffix_metrics() -> None:
+    from foci_trace.velocity_measurement import _reconstruct_observation
+
+    observations = [_observation(index) for index in range(256)]
+    record = {"velocity_p": 32, "target_velocity_register": 8, "slot": 0}
+    plan = {"hard_torque_limit": 2_816, "usable_torque_limit": 2_534}
+    terminal = {"encoder_counts_per_rev": 4_000, "f_pwm_hz": 25_000}
+
+    result = _reconstruct_observation(observations, record, plan, terminal)
+
+    assert result["classification"] == 6
+    assert result["tested_suffixes"] == 0
+
+
 def test_sweep_confidence_uses_all_two_k_observations() -> None:
     from foci_trace.velocity_measurement import _confidence_multiplier
 
