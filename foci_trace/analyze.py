@@ -1742,6 +1742,7 @@ def _velocity_capture_groups(
             for item in state.velocity_observations
             if id(item) not in claimed_observation_ids
             if item.source_index == run.source_index
+            and item.observation.direction in (-1, 1)
             and item.timestamp_ticks >= start_ticks
             and (run.terminal_ticks is None or item.timestamp_ticks <= run.terminal_ticks)
             and (next_start is None or item.timestamp_ticks < next_start)

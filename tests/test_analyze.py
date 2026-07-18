@@ -2149,6 +2149,26 @@ def test_velocity_frames_group_by_device_source_and_engine_run() -> None:
                     + payload,
                 )
                 sequence += 1
+        settle = _velocity_observation_payload(
+            0,
+            0,
+            stroke_index=0x8000,
+            direction=0,
+        )
+        writer.write_firmware_frame(
+            device_index,
+            9_000,
+            _header(
+                FRAME_TYPE_VELOCITY_OBSERVATION,
+                settle,
+                sequence,
+                9_000,
+                1,
+                0,
+            )
+            + settle,
+        )
+        sequence += 1
         if complete:
             terminal = _commission_event_payload(EVENT_COMMISSION_ENGINE_TERMINAL, arg2=0, arg3=7)
             writer.write_firmware_frame(
