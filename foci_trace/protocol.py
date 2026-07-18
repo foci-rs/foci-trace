@@ -7,8 +7,8 @@ import struct
 from typing import Any
 
 FRAME_MAGIC = 0x43525446
-PROTOCOL_VERSION = 7
-SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, 5, 6, PROTOCOL_VERSION)
+PROTOCOL_VERSION = 8
+SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, 5, 6, 7, PROTOCOL_VERSION)
 HEADER_LEN = 32
 
 FRAME_TYPE_CRITICAL = 1
@@ -20,6 +20,8 @@ FRAME_TYPE_CURRENT_PATH = 6
 FRAME_TYPE_PHASE_ADVANCE = 7
 FRAME_TYPE_VELOCITY_OBSERVATION = 8
 FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE = 9
+
+VELOCITY_OBSERVATION_FLAG_PID_VELOCITY_ACTUAL_VALID = 1 << 1
 
 SUBSYSTEM_COMMISSIONING = 7
 
@@ -365,6 +367,9 @@ def _decode_velocity_observation(payload: bytes) -> dict[str, Any]:
         "flags": flags,
         "peak_torque_target_abs": (
             struct.unpack_from("<H", payload, 16)[0] if len(payload) >= 18 else None
+        ),
+        "pid_velocity_actual": (
+            struct.unpack_from("<i", payload, 18)[0] if len(payload) >= 22 else None
         ),
     }
 

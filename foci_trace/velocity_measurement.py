@@ -108,6 +108,7 @@ class VelocityObservation:
     stroke_index: int
     target_cpms: int
     peak_torque_target_abs: int | None = None
+    pid_velocity_actual: int | None = None
 
 
 @dataclass(frozen=True)
@@ -878,6 +879,23 @@ def audit_velocity_sweep(
     evidence_records: list[tuple[bytes, dict[str, object]]],
 ) -> dict[str, object]:
     """Independently reconstruct one sweep and compare every firmware decision."""
+    sample_indexes: dict[int, int] = {}
+    pid_velocity_actual_samples: list[dict[str, int]] = []
+    for observation in raw_observations:
+        sample_index = sample_indexes.get(observation.stroke_index, 0)
+        sample_indexes[observation.stroke_index] = sample_index + 1
+        if observation.pid_velocity_actual is not None:
+            pid_velocity_actual_samples.append(
+                {
+                    "stroke_index": observation.stroke_index,
+                    "sample_index": sample_index,
+                    "direction": observation.direction,
+                    "target_counts_per_ms": observation.target_cpms,
+                    "delta_counts": observation.delta_counts,
+                    "elapsed_us": observation.elapsed_us,
+                    "pid_velocity_actual": observation.pid_velocity_actual,
+                }
+            )
     plans = [value for _raw, value in evidence_records if value["record_kind"] == "plan"]
     terminals = [value for _raw, value in evidence_records if value["record_kind"] == "terminal"]
     records = [
@@ -910,6 +928,7 @@ def audit_velocity_sweep(
             "digest": digest,
             "reported_digest": None,
             "raw_observation_count": len(raw_observations),
+            "pid_velocity_actual_samples": pid_velocity_actual_samples,
             "observation_count": observation_count,
             "rung_count": rung_count,
             "directions": [],
@@ -1075,6 +1094,7 @@ def audit_velocity_sweep(
         "digest": digest,
         "reported_digest": reported_digest,
         "observation_count": len(observation_records),
+        "pid_velocity_actual_samples": pid_velocity_actual_samples,
         "rung_count": len(rung_records),
         "directions": finished_bands,
         "complete": True,

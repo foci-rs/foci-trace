@@ -213,16 +213,20 @@ def _velocity_observation_payload(
     stroke_index: int = 0,
     direction: int = 1,
     flags: int = 0,
+    pid_velocity_actual: int | None = None,
 ) -> bytes:
-    return struct.pack(
+    payload = struct.pack(
         "<iiIHbB",
         target_cpms,
         delta_counts,
         elapsed_us,
         stroke_index,
         direction,
-        flags,
+        flags | (0b10 if pid_velocity_actual is not None else 0),
     )
+    if pid_velocity_actual is not None:
+        payload += struct.pack("<Hi", 0, pid_velocity_actual)
+    return payload
 
 
 def _pack_i16_pair(low: int, high: int) -> int:
@@ -2075,7 +2079,7 @@ def test_capture_integrates_canonical_velocity_sweep_audit() -> None:
             0,
         )
     )
-    for sequence, timestamp, payload in ((1, 1_000, plan), (2, 2_000, terminal)):
+    for sequence, timestamp, payload in ((1, 1_000, plan), (3, 2_000, terminal)):
         writer.write_firmware_frame(
             0,
             timestamp,
@@ -2089,11 +2093,35 @@ def test_capture_integrates_canonical_velocity_sweep_audit() -> None:
             )
             + payload,
         )
+    feedback = _velocity_observation_payload(
+        11,
+        6,
+        elapsed_us=1_000,
+        stroke_index=0,
+        direction=1,
+        pid_velocity_actual=7,
+    )
+    writer.write_firmware_frame(
+        0,
+        1_500,
+        _header(FRAME_TYPE_VELOCITY_OBSERVATION, feedback, 2, 1_500, 1, 0) + feedback,
+    )
 
     analysis = analyze_capture(io.BytesIO(output.getvalue()))
 
     assert analysis.velocity_sweep_audits[0]["matches_firmware"] is True
     assert analysis.velocity_sweep_audits[0]["digest"] == digest
+    assert analysis.velocity_sweep_audits[0]["pid_velocity_actual_samples"] == [
+        {
+            "stroke_index": 0,
+            "sample_index": 0,
+            "direction": 1,
+            "target_counts_per_ms": 11,
+            "delta_counts": 6,
+            "elapsed_us": 1_000,
+            "pid_velocity_actual": 7,
+        }
+    ]
 
 
 def test_velocity_frames_group_by_device_source_and_engine_run() -> None:

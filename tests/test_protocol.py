@@ -162,7 +162,7 @@ def test_decodes_phase_advance_frame() -> None:
 
 
 def test_decodes_signed_velocity_observation_frame() -> None:
-    payload = struct.pack("<iiIHbBH", -4, -7, 1_037, 513, -1, 1, 900)
+    payload = struct.pack("<iiIHbBHi", -4, -7, 1_037, 513, -1, 3, 900, -8)
 
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_OBSERVATION, payload) + payload)
 
@@ -172,8 +172,9 @@ def test_decodes_signed_velocity_observation_frame() -> None:
         "elapsed_us": 1_037,
         "stroke_index": 513,
         "direction": -1,
-        "flags": 1,
+        "flags": 3,
         "peak_torque_target_abs": 900,
+        "pid_velocity_actual": -8,
     }
 
 
@@ -183,6 +184,7 @@ def test_decodes_version_six_velocity_observation_without_peak() -> None:
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_OBSERVATION, payload, version=6) + payload)
 
     assert frame.payload["peak_torque_target_abs"] is None
+    assert frame.payload["pid_velocity_actual"] is None
 
 
 def test_decodes_canonical_velocity_sweep_plan() -> None:
