@@ -155,6 +155,23 @@ def test_excluded_observation_zeros_unavailable_suffix_metrics() -> None:
     assert result["tested_suffixes"] == 0
 
 
+def test_disturbance_promotes_encoder_rate_to_target_q16_domain() -> None:
+    from foci_trace.velocity_measurement import _disturbance
+
+    result = _disturbance(
+        p=256,
+        target_register=8,
+        delta_counts=800,
+        elapsed_us=65_536,
+        half_width_rate_q=0,
+        variance_rate_q2=0,
+        counts_per_rev=4_000,
+        f_pwm_hz=25_000,
+    )
+
+    assert result == (0, 0, 0, 0)
+
+
 def test_sweep_confidence_uses_all_two_k_observations() -> None:
     from foci_trace.velocity_measurement import _confidence_multiplier
 
