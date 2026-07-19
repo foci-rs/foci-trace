@@ -338,8 +338,8 @@ class CommissioningCaptureBuilder:
             _add_caveat(run.caveats, f"partial capture: missing phase_start for {phase.phase_name}")
         phase.end_ticks = event.timestamp_ticks
         phase.status_code = status_code
-        if run.result == "inconclusive" and status_code == _sweep_terminal_cause(run):
-            phase.status_name = "inconclusive"
+        if _has_sweep_terminal_result(run) and status_code == _sweep_terminal_cause(run):
+            phase.status_name = run.result
             _add_caveat(
                 phase.caveats,
                 "legacy velocity-sweep cause occupied the generic phase status field",
@@ -355,7 +355,7 @@ class CommissioningCaptureBuilder:
         run = self._runs_by_seq.get((*active_key, engine_seq)) or self._current_run(event)
         run.events.append(event)
         run.terminal_ticks = event.timestamp_ticks
-        if run.result == "inconclusive":
+        if _has_sweep_terminal_result(run):
             status_code = event.args[2]
             cause = _sweep_terminal_cause(run)
             detail = _status_name(status_code)
@@ -368,8 +368,7 @@ class CommissioningCaptureBuilder:
             else:
                 _add_caveat(
                     run.caveats,
-                    "generic terminal disagrees with dedicated velocity-sweep "
-                    f"inconclusive terminal: {detail}",
+                    f"generic terminal disagrees with dedicated velocity-sweep terminal: {detail}",
                 )
             self._active_runs.pop(active_key, None)
             return
@@ -419,12 +418,14 @@ class CommissioningCaptureBuilder:
                 timestamp_ticks=event.timestamp_ticks,
             )
         )
-        if (
-            event.event_id == EVENT_COMMISSION_VELOCITY_SWEEP_TERMINAL
-            and event.level_name == "warn"
-        ):
+        terminal_result = {
+            "info": "complete",
+            "warn": "inconclusive",
+            "error": "fault",
+        }.get(event.level_name)
+        if event.event_id == EVENT_COMMISSION_VELOCITY_SWEEP_TERMINAL and terminal_result:
             run.result_code = None
-            run.result = "inconclusive"
+            run.result = terminal_result
             run.terminal_ticks = event.timestamp_ticks
 
     def _current_run(self, event: CommissioningEvent) -> CommissioningRun:
@@ -626,6 +627,12 @@ def _sweep_terminal_cause(run: CommissioningRun) -> int | None:
     if not terminals:
         return None
     return terminals[-1].sequence_or_cause
+
+
+def _has_sweep_terminal_result(run: CommissioningRun) -> bool:
+    return run.result in {"complete", "inconclusive", "fault"} and bool(
+        _sweep_terminal_cause(run) is not None
+    )
 
 
 def _add_caveat(caveats: list[str], caveat: str) -> None:

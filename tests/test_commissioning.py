@@ -372,6 +372,65 @@ def test_velocity_sweep_inconclusive_owns_terminal_result() -> None:
     assert run["phases"][0]["status"] == "inconclusive"
 
 
+def test_velocity_sweep_fault_owns_terminal_result() -> None:
+    builder = CommissioningCaptureBuilder()
+    _observe_event(
+        builder,
+        1,
+        1_000,
+        EVENT_COMMISSION_ENGINE_START,
+        engine_kind=ENGINE_OUTER_TUNE,
+        arg3=9,
+    )
+    _observe_event(
+        builder,
+        2,
+        2_000,
+        EVENT_COMMISSION_PHASE_START,
+        engine_kind=ENGINE_OUTER_TUNE,
+        arg2=10,
+        arg3=1,
+    )
+    _observe_event(
+        builder,
+        3,
+        3_000,
+        EVENT_COMMISSION_VELOCITY_SWEEP_TERMINAL,
+        engine_kind=ENGINE_OUTER_TUNE,
+        arg2=3,
+        arg3=0x1234,
+        level=3,
+    )
+    _observe_event(
+        builder,
+        4,
+        4_000,
+        EVENT_COMMISSION_PHASE_END,
+        engine_kind=ENGINE_OUTER_TUNE,
+        arg2=10,
+        arg3=3,
+        level=3,
+    )
+    _observe_event(
+        builder,
+        5,
+        5_000,
+        EVENT_COMMISSION_ENGINE_TERMINAL,
+        engine_kind=ENGINE_OUTER_TUNE,
+        arg2=3,
+        arg3=9,
+        level=3,
+    )
+
+    data = commissioning_report_to_json(builder.finalize({0: CLOCK_HZ}))
+    run = data["runs"][0]
+
+    assert run["result"] == "fault"
+    assert run["result_code"] is None
+    assert any("legacy generic terminal" in caveat for caveat in run["caveats"])
+    assert run["phases"][0]["status"] == "fault"
+
+
 def test_partial_capture_reports_caveat_without_crashing() -> None:
     builder = CommissioningCaptureBuilder()
     _observe_event(builder, 1, 1_000, EVENT_COMMISSION_ENGINE_START, arg2=1, arg3=4)
