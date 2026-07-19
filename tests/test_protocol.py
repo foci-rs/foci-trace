@@ -270,6 +270,196 @@ def test_decodes_canonical_velocity_sweep_plan() -> None:
     assert frame.payload["usable_torque_limit"] == 900
 
 
+def test_decodes_stage_b_canonical_records_and_plan_identity() -> None:
+    plan_values = (
+        7,
+        0,
+        0x0105_C518,
+        0x53E2_5AF6,
+        5_000,
+        1,
+        4_800,
+        7_500,
+        1,
+        0,
+        288,
+        8,
+        128,
+        5,
+        2,
+        256_000,
+        200_000,
+        9_120,
+        10_000,
+        1_000,
+        250,
+        1_250,
+        1_250,
+        1_000,
+        900,
+    )
+    records = [
+        (
+            bytes([1]) + struct.pack("<IHIIIBIIHBiHHBHIIIIIIIIHH", *plan_values),
+            "plan",
+        ),
+        (
+            bytes([4])
+            + struct.pack(
+                "<IHIBBBBBHHBiiiiiBiBiBiBiBBii",
+                7,
+                21,
+                0b11100,
+                0,
+                1,
+                0,
+                2,
+                4,
+                512,
+                1024,
+                3,
+                10,
+                20,
+                15,
+                12,
+                18,
+                0,
+                100,
+                0,
+                200,
+                0,
+                90,
+                0,
+                210,
+                0,
+                6,
+                10,
+                20,
+            ),
+            "directional_region",
+        ),
+        (
+            bytes([5]) + struct.pack("<IHIBBBHHB", 7, 22, 0b11100, 2, 4, 3, 512, 1024, 3),
+            "joint_region",
+        ),
+        (
+            bytes([6])
+            + struct.pack(
+                "<IHHBIBIIBIiiBBHHiBi iiBBHHiB".replace(" ", ""),
+                7,
+                23,
+                724,
+                3,
+                0b11100,
+                3,
+                0x0002_0000,
+                0x0004_0000,
+                0,
+                0b11100,
+                12,
+                18,
+                0,
+                0,
+                1,
+                1,
+                0,
+                0,
+                0b11100,
+                -18,
+                -12,
+                0,
+                0,
+                1,
+                1,
+                0,
+                0,
+            ),
+            "handoff",
+        ),
+        (
+            bytes([7])
+            + struct.pack("<IHBBB iB iB iB i", 7, 24, 2, 0, 0b110, 10, 0, 20, 0, 3, 0, -4),
+            "structured_boundary",
+        ),
+        (
+            bytes([8])
+            + struct.pack(
+                "<IHII BIIH iiii BBBBB HHHH II BB IIII".replace(" ", ""),
+                7,
+                25,
+                4_000,
+                25_000,
+                3,
+                0b11100,
+                0b11100,
+                724,
+                12,
+                18,
+                -18,
+                -12,
+                3,
+                1,
+                1,
+                0,
+                0,
+                20,
+                20,
+                5,
+                5,
+                0x0105_C518,
+                0x53E2_5AF6,
+                0,
+                3,
+                0x1122_3344,
+                0x0000_0001,
+                0x5566_7788,
+                0x0000_0002,
+            ),
+            "stage_b_terminal",
+        ),
+        (
+            bytes([9])
+            + struct.pack(
+                "<IHBHHIIIIiiiiiiiiIIII",
+                7,
+                26,
+                1,
+                724,
+                724,
+                0b11100,
+                0b11100,
+                0b11100,
+                0b11100,
+                12,
+                18,
+                -18,
+                -12,
+                13,
+                17,
+                -17,
+                -13,
+                1,
+                2,
+                3,
+                4,
+            ),
+            "reproduction",
+        ),
+    ]
+
+    decoded = []
+    for payload, expected_kind in records:
+        frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+        assert frame.payload["record_kind"] == expected_kind
+        decoded.append(frame.payload)
+
+    assert decoded[0]["plan_digest_low"] == 0x0105_C518
+    assert decoded[1]["member_mask"] == 0b11100
+    assert decoded[3]["directions"][1]["pooled_low_q16"] == -18
+    assert decoded[5]["selected_memberships"] == [0b11100, 0b11100]
+    assert decoded[6]["current_intervals"][1] == [-17, -13]
+
+
 def test_decodes_canonical_velocity_sweep_terminal_digest() -> None:
     direction = struct.pack("<BHHHiiiiiBHB", 0, 8, 8, 32, 10, 20, 15, 12, 18, 3, 6, 0x0D)
     reverse = struct.pack("<BHHHiiiiiBHB", 1, 12, 12, 48, -20, -10, -15, -18, -12, 3, 6, 0x0D)

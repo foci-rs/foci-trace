@@ -41,6 +41,7 @@ EVENT_COMMISSION_VELOCITY_VALIDATE_LIMITS = 123
 EVENT_COMMISSION_VELOCITY_SWEEP_PLAN = 124
 EVENT_COMMISSION_VELOCITY_SWEEP_OBSERVATION = 125
 EVENT_COMMISSION_VELOCITY_SWEEP_RUNG = 126
+EVENT_COMMISSION_VELOCITY_SWEEP_DERIVED = 127
 EVENT_COMMISSION_VELOCITY_SWEEP_TERMINAL = 128
 EVENT_COMMISSION_VELOCITY_SWEEP_COMPLETE = 129
 EVENT_COMMISSION_POSITION_TUNE_RESULT = 130
@@ -78,6 +79,7 @@ _COMMISSIONING_EVENT_NAMES = {
     EVENT_COMMISSION_VELOCITY_SWEEP_PLAN: "commission_velocity_sweep_plan",
     EVENT_COMMISSION_VELOCITY_SWEEP_OBSERVATION: "commission_velocity_sweep_observation",
     EVENT_COMMISSION_VELOCITY_SWEEP_RUNG: "commission_velocity_sweep_rung",
+    EVENT_COMMISSION_VELOCITY_SWEEP_DERIVED: "commission_velocity_sweep_derived",
     EVENT_COMMISSION_VELOCITY_SWEEP_TERMINAL: "commission_velocity_sweep_terminal",
     EVENT_COMMISSION_VELOCITY_SWEEP_COMPLETE: "commission_velocity_sweep_complete",
     EVENT_COMMISSION_POSITION_TUNE_RESULT: "commission_position_tune_result",
@@ -406,11 +408,15 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
     cursor = _EvidenceCursor(payload)
     kind = cursor.take("B")
     if kind == 1:
-        decoded = _take_fields(
-            cursor,
+        stage_b = len(payload) == 78
+        plan_fields = [
+            ("run_sequence", "I"),
+            ("evidence_sequence", "H"),
+        ]
+        if stage_b:
+            plan_fields.extend((("plan_digest_low", "I"), ("plan_digest_high", "I")))
+        plan_fields.extend(
             (
-                ("run_sequence", "I"),
-                ("evidence_sequence", "H"),
                 ("requested_velocity_mrev_s", "I"),
                 ("requested_velocity_source", "B"),
                 ("planned_velocity_mrev_s", "I"),
@@ -432,7 +438,11 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ("positive_position_headroom_mrev", "I"),
                 ("hard_torque_limit", "H"),
                 ("usable_torque_limit", "H"),
-            ),
+            )
+        )
+        decoded = _take_fields(
+            cursor,
+            tuple(plan_fields),
         )
         decoded["record_kind"] = "plan"
     elif kind == 2:
@@ -482,34 +492,53 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         )
         decoded["record_kind"] = "observation"
     elif kind == 3:
-        decoded = _take_fields(
-            cursor,
+        fields = [
+            ("run_sequence", "I"),
+            ("evidence_sequence", "H"),
+            ("rung_index", "B"),
+            ("velocity_p", "H"),
+            ("forward_low_q16", "i"),
+            ("forward_high_q16", "i"),
+            ("reverse_low_q16", "i"),
+            ("reverse_high_q16", "i"),
+        ]
+        if len(payload) != 32:
+            fields.extend(
+                (
+                    ("forward_p_low", "H"),
+                    ("forward_p_high", "H"),
+                    ("reverse_p_low", "H"),
+                    ("reverse_p_high", "H"),
+                )
+            )
+        fields.extend(
             (
-                ("run_sequence", "I"),
-                ("evidence_sequence", "H"),
-                ("rung_index", "B"),
-                ("velocity_p", "H"),
-                ("forward_low_q16", "i"),
-                ("forward_high_q16", "i"),
-                ("reverse_low_q16", "i"),
-                ("reverse_high_q16", "i"),
-                ("forward_p_low", "H"),
-                ("forward_p_high", "H"),
-                ("reverse_p_low", "H"),
-                ("reverse_p_high", "H"),
                 ("forward_class", "B"),
                 ("reverse_class", "B"),
-                ("forward_closure", "B"),
-                ("reverse_closure", "B"),
+            )
+        )
+        if len(payload) != 32:
+            fields.extend(
+                (
+                    ("forward_closure", "B"),
+                    ("reverse_closure", "B"),
+                )
+            )
+        fields.extend(
+            (
                 ("flags", "B"),
-                ("forward_eligible_rungs", "B"),
-                ("reverse_eligible_rungs", "B"),
                 ("forward_eligible_observations", "H"),
                 ("reverse_eligible_observations", "H"),
-            ),
+            )
         )
+        if len(payload) != 32:
+            fields[-2:-2] = [
+                ("forward_eligible_rungs", "B"),
+                ("reverse_eligible_rungs", "B"),
+            ]
+        decoded = _take_fields(cursor, tuple(fields))
         decoded["record_kind"] = "rung"
-    elif kind == 4:
+    elif kind == 4 and len(payload) != 71:
         decoded = {
             "record_kind": "terminal",
             "run_sequence": cursor.take("I"),
@@ -550,6 +579,177 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ),
             )
         )
+    elif kind == 4:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("member_mask", "I"),
+                ("direction", "B"),
+                ("region_kind", "B"),
+                ("closure", "B"),
+                ("first_rung", "B"),
+                ("last_rung", "B"),
+                ("p_low", "H"),
+                ("p_high", "H"),
+                ("member_count", "B"),
+                ("common_low_q16", "i"),
+                ("common_high_q16", "i"),
+                ("pooled_q16", "i"),
+                ("pooled_low_q16", "i"),
+                ("pooled_high_q16", "i"),
+                ("variance_floor_observations", "B"),
+                ("settled_rate_mean_min_mantissa", "i"),
+                ("settled_rate_mean_min_shift", "B"),
+                ("settled_rate_mean_max_mantissa", "i"),
+                ("settled_rate_mean_max_shift", "B"),
+                ("settled_rate_envelope_low_mantissa", "i"),
+                ("settled_rate_envelope_low_shift", "B"),
+                ("settled_rate_envelope_high_mantissa", "i"),
+                ("settled_rate_envelope_high_shift", "B"),
+                ("boundary_rung_plus_one", "B"),
+                ("tested_low_q16", "i"),
+                ("tested_high_q16", "i"),
+            ),
+        )
+        decoded["record_kind"] = "directional_region"
+    elif kind == 5:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("member_mask", "I"),
+                ("first_rung", "B"),
+                ("last_rung", "B"),
+                ("member_count", "B"),
+                ("p_low", "H"),
+                ("p_high", "H"),
+                ("closure", "B"),
+            ),
+        )
+        decoded["record_kind"] = "joint_region"
+    elif kind == 6:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("nominated_p", "H"),
+                ("coverage_mask", "B"),
+                ("joint_member_mask", "I"),
+                ("nominated_rung", "B"),
+                ("distance_to_start_q16", "I"),
+                ("distance_to_top_q16", "I"),
+                ("nomination_flags", "B"),
+            ),
+        )
+        directions = []
+        for _ in range(2):
+            directions.append(
+                _take_fields(
+                    cursor,
+                    (
+                        ("member_mask", "I"),
+                        ("pooled_low_q16", "i"),
+                        ("pooled_high_q16", "i"),
+                        ("coverage", "B"),
+                        ("signed_rung_distance", "B"),
+                        ("gain_ratio_num", "H"),
+                        ("gain_ratio_den", "H"),
+                        ("settled_rate_difference_mantissa", "i"),
+                        ("settled_rate_difference_shift", "B"),
+                    ),
+                )
+            )
+        decoded["directions"] = directions
+        decoded["record_kind"] = "handoff"
+    elif kind == 7:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("rung_index", "B"),
+                ("slot", "B"),
+                ("passing_suffix_mask", "B"),
+                ("common_rate_low_mantissa", "i"),
+                ("common_rate_low_shift", "B"),
+                ("common_rate_high_mantissa", "i"),
+                ("common_rate_high_shift", "B"),
+                ("binding_slope_margin_mantissa", "i"),
+                ("binding_slope_margin_shift", "B"),
+                ("binding_lag_one_margin_q", "i"),
+            ),
+        )
+        decoded["record_kind"] = "structured_boundary"
+    elif kind == 8:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("encoder_counts_per_rev", "I"),
+                ("f_pwm_hz", "I"),
+                ("model_direction_mask", "B"),
+            ),
+        )
+        decoded["selected_memberships"] = [cursor.take("I") for _ in range(2)]
+        decoded["nominated_p"] = cursor.take("H")
+        decoded["selected_intervals"] = [[cursor.take("i"), cursor.take("i")] for _ in range(2)]
+        decoded.update(
+            _take_fields(
+                cursor,
+                (
+                    ("coverage_mask", "B"),
+                    ("forward_region_count", "B"),
+                    ("reverse_region_count", "B"),
+                    ("forward_fragment_count", "B"),
+                    ("reverse_fragment_count", "B"),
+                    ("expected_observations", "H"),
+                    ("emitted_observations", "H"),
+                    ("expected_rungs", "H"),
+                    ("emitted_rungs", "H"),
+                    ("digest_low", "I"),
+                    ("digest_high", "I"),
+                    ("outcome", "B"),
+                    ("cause", "B"),
+                    ("run_started_low", "I"),
+                    ("run_started_high", "I"),
+                    ("run_completed_low", "I"),
+                    ("run_completed_high", "I"),
+                ),
+            )
+        )
+        decoded["record_kind"] = "stage_b_terminal"
+    elif kind == 9:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("outcome", "B"),
+                ("previous_nominated_p", "H"),
+                ("current_nominated_p", "H"),
+            ),
+        )
+        decoded["previous_memberships"] = [cursor.take("I") for _ in range(2)]
+        decoded["current_memberships"] = [cursor.take("I") for _ in range(2)]
+        decoded["previous_intervals"] = [[cursor.take("i"), cursor.take("i")] for _ in range(2)]
+        decoded["current_intervals"] = [[cursor.take("i"), cursor.take("i")] for _ in range(2)]
+        decoded.update(
+            _take_fields(
+                cursor,
+                (
+                    ("previous_digest_low", "I"),
+                    ("previous_digest_high", "I"),
+                    ("current_digest_low", "I"),
+                    ("current_digest_high", "I"),
+                ),
+            )
+        )
+        decoded["record_kind"] = "reproduction"
     else:
         raise DecodeError(f"unknown velocity-sweep evidence kind {kind}")
     cursor.finish()
