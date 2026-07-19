@@ -368,7 +368,10 @@ def test_velocity_sweep_inconclusive_owns_terminal_result() -> None:
 
     assert run["result"] == "inconclusive"
     assert run["result_code"] is None
-    assert any("legacy generic terminal" in caveat for caveat in run["caveats"])
+    assert run["terminal_ticks"] == 3_000
+    assert any(
+        "dedicated velocity-sweep terminal is authoritative" in caveat for caveat in run["caveats"]
+    )
     assert run["phases"][0]["status"] == "inconclusive"
 
 
@@ -427,7 +430,10 @@ def test_velocity_sweep_fault_owns_terminal_result() -> None:
 
     assert run["result"] == "fault"
     assert run["result_code"] is None
-    assert any("legacy generic terminal" in caveat for caveat in run["caveats"])
+    assert run["terminal_ticks"] == 3_000
+    assert any(
+        "dedicated velocity-sweep terminal is authoritative" in caveat for caveat in run["caveats"]
+    )
     assert run["phases"][0]["status"] == "fault"
 
 

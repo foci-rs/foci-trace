@@ -354,7 +354,6 @@ class CommissioningCaptureBuilder:
         engine_seq = event.args[3]
         run = self._runs_by_seq.get((*active_key, engine_seq)) or self._current_run(event)
         run.events.append(event)
-        run.terminal_ticks = event.timestamp_ticks
         if _has_sweep_terminal_result(run):
             status_code = event.args[2]
             cause = _sweep_terminal_cause(run)
@@ -363,7 +362,7 @@ class CommissioningCaptureBuilder:
                 _add_caveat(
                     run.caveats,
                     "legacy generic terminal reused velocity-sweep cause "
-                    f"{cause} ({detail}); dedicated inconclusive terminal is authoritative",
+                    f"{cause} ({detail}); dedicated velocity-sweep terminal is authoritative",
                 )
             else:
                 _add_caveat(
@@ -372,6 +371,7 @@ class CommissioningCaptureBuilder:
                 )
             self._active_runs.pop(active_key, None)
             return
+        run.terminal_ticks = event.timestamp_ticks
         run.result_code = event.args[2]
         run.result = _status_name(event.args[2])
         self._active_runs.pop(active_key, None)
