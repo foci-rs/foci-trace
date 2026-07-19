@@ -10,6 +10,7 @@ from foci_trace.protocol import (
     EVENT_COMMISSION_VELOCITY_VALIDATE_METRICS,
     EVENT_COMMISSION_VELOCITY_VALIDATE_RESULT,
     EVENT_COMMISSION_VELOCITY_SWEEP_PLAN,
+    EVENT_COMMISSION_VELOCITY_SWEEP_TERMINAL,
     FRAME_TYPE_CONTROL_DETAIL,
     FRAME_TYPE_CRITICAL,
     FRAME_TYPE_EVENT,
@@ -124,8 +125,15 @@ def _observe_event(
     engine_kind: int = ENGINE_COMMISSION,
     arg2: int = 0,
     arg3: int = 0,
+    level: int = 1,
 ) -> None:
-    payload = _event_payload(event_id, engine_kind=engine_kind, arg2=arg2, arg3=arg3)
+    payload = _event_payload(
+        event_id,
+        level=level,
+        engine_kind=engine_kind,
+        arg2=arg2,
+        arg3=arg3,
+    )
     frame = decode_frame(
         _header(
             FRAME_TYPE_EVENT,
@@ -303,6 +311,65 @@ def test_velocity_sweep_sequence_marker_is_retained() -> None:
             "timestamp_ticks": 2_000,
         }
     ]
+
+
+def test_velocity_sweep_inconclusive_owns_terminal_result() -> None:
+    builder = CommissioningCaptureBuilder()
+    _observe_event(
+        builder,
+        1,
+        1_000,
+        EVENT_COMMISSION_ENGINE_START,
+        engine_kind=ENGINE_OUTER_TUNE,
+        arg3=9,
+    )
+    _observe_event(
+        builder,
+        2,
+        2_000,
+        EVENT_COMMISSION_PHASE_START,
+        engine_kind=ENGINE_OUTER_TUNE,
+        arg2=10,
+        arg3=1,
+    )
+    _observe_event(
+        builder,
+        3,
+        3_000,
+        EVENT_COMMISSION_VELOCITY_SWEEP_TERMINAL,
+        engine_kind=ENGINE_OUTER_TUNE,
+        arg2=4,
+        arg3=0x1234,
+        level=2,
+    )
+    _observe_event(
+        builder,
+        4,
+        4_000,
+        EVENT_COMMISSION_PHASE_END,
+        engine_kind=ENGINE_OUTER_TUNE,
+        arg2=10,
+        arg3=4,
+        level=2,
+    )
+    _observe_event(
+        builder,
+        5,
+        5_000,
+        EVENT_COMMISSION_ENGINE_TERMINAL,
+        engine_kind=ENGINE_OUTER_TUNE,
+        arg2=4,
+        arg3=9,
+        level=2,
+    )
+
+    data = commissioning_report_to_json(builder.finalize({0: CLOCK_HZ}))
+    run = data["runs"][0]
+
+    assert run["result"] == "inconclusive"
+    assert run["result_code"] is None
+    assert any("legacy generic terminal" in caveat for caveat in run["caveats"])
+    assert run["phases"][0]["status"] == "inconclusive"
 
 
 def test_partial_capture_reports_caveat_without_crashing() -> None:
