@@ -1,11 +1,13 @@
 import io
 import json
+from pathlib import Path
 import struct
 
 import pytest
 
 from foci_trace.analyze import (
     analyze_capture,
+    format_analysis,
     format_summary,
     summarize_capture,
     velocity_analysis_to_json,
@@ -2122,6 +2124,44 @@ def test_capture_integrates_canonical_velocity_sweep_audit() -> None:
             "pid_velocity_actual": 7,
         }
     ]
+
+
+def test_retained_foc_182_captures_replay_expected_stage_b_regions() -> None:
+    capture_dir = (
+        Path(__file__).resolve().parents[4]
+        / "docs/artifacts/trace-captures/2026-07-17-foc-182-characterization"
+    )
+    fixtures = {
+        "X": (
+            "foc-182-rpm-512ms-declared-window-stepper-x-20260718-222243.bin",
+            [[512, 724, 1024, 1448, 2048], [1024, 1448, 2048]],
+            [[17_111_029, 17_143_936], [-19_015_885, -17_736_330]],
+        ),
+        "Y": (
+            "foc-182-rpm-512ms-declared-window-stepper-y-20260718-223138.bin",
+            [[1024, 1448, 2048], [1024, 1448, 2048]],
+            [[17_079_270, 17_178_385], [-19_848_903, -18_877_667]],
+        ),
+    }
+
+    for _axis, (filename, selected_ps, common_intervals) in fixtures.items():
+        with (capture_dir / filename).open("rb") as source:
+            analysis = analyze_capture(source)
+        replay = analysis.velocity_sweep_audits[0]["stage_b_replay"]
+        selected = [
+            [region for region in direction if region["kind"] == "valid"][-1]
+            for direction in replay["directions"]
+        ]
+        assert [region["selected_ps"] for region in selected] == selected_ps
+        assert [region["common_interval"] for region in selected] == common_intervals
+        assert replay["nominated_p"] == 1448
+        assert replay["coverage"] == ["full", "full"]
+        assert "p=1448 coverage=full,full" in format_analysis(analysis)
+        if _axis == "X":
+            assert "17/1" in replay["structured_boundaries"]
+            assert "17/3" in replay["structured_boundaries"]
+            assert "18/3" in replay["structured_boundaries"]
+            assert "18/1" not in replay["structured_boundaries"]
 
 
 def test_velocity_frames_group_by_device_source_and_engine_run() -> None:

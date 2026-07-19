@@ -534,3 +534,171 @@ def test_sweep_audit_reports_partial_capture_without_raising(
     assert report["complete"] is False
     assert report["matches_firmware"] is False
     assert any(expected_caveat in caveat for caveat in report["caveats"])
+
+
+def test_stage_b_first_fit_reseeds_boundary_and_preserves_counterexample() -> None:
+    from foci_trace.velocity_measurement import _segment_directional_regions
+
+    rungs = [
+        {"rung_index": index, "velocity_p": 100 + index, "class": 0, "low": low, "high": high}
+        for index, (low, high) in enumerate(((0, 2), (1, 10), (9, 11), (10, 12)))
+    ]
+
+    regions = _segment_directional_regions(rungs)
+
+    assert [region["member_mask"] for region in regions] == [0b0011, 0b1100]
+    assert [region["kind"] for region in regions] == ["fragment", "fragment"]
+    assert regions[0]["common_interval"] == [1, 2]
+    assert regions[0]["closure"] == "disjoint_interval"
+    assert regions[0]["boundary_rung"] == 2
+
+
+def test_stage_b_segments_multiple_regions_and_joint_nomination_ties() -> None:
+    from foci_trace.velocity_measurement import (
+        _joint_operable_regions,
+        _nominate_joint_region,
+        _segment_directional_regions,
+    )
+
+    gains = [256, 362, 512, 724, 1024, 1448, 2048]
+    rungs = [
+        {"rung_index": 0, "velocity_p": gains[0], "class": 0, "low": 0, "high": 4},
+        {"rung_index": 1, "velocity_p": gains[1], "class": 0, "low": 1, "high": 3},
+        {"rung_index": 2, "velocity_p": gains[2], "class": 0, "low": 2, "high": 2},
+        {"rung_index": 3, "velocity_p": gains[3], "class": 2, "low": 0, "high": 0},
+        {"rung_index": 4, "velocity_p": gains[4], "class": 0, "low": 10, "high": 14},
+        {"rung_index": 5, "velocity_p": gains[5], "class": 0, "low": 11, "high": 13},
+        {"rung_index": 6, "velocity_p": gains[6], "class": 0, "low": 12, "high": 12},
+    ]
+    regions = _segment_directional_regions(rungs)
+    assert [region["member_mask"] for region in regions] == [0b0000111, 0b1110000]
+    assert [region["kind"] for region in regions] == ["valid", "valid"]
+
+    joint = _joint_operable_regions(
+        [
+            {"rung_index": index, "forward_operable": index != 3, "reverse_operable": index != 3}
+            for index in range(7)
+        ]
+    )
+    assert [region["member_mask"] for region in joint] == [0b0000111, 0b1110000]
+    nomination = _nominate_joint_region(joint, gains, gains[0], gains[-1])
+    assert nomination["member_mask"] == 0b1110000
+    assert nomination["rung_index"] == 5
+    assert nomination["p"] == 1448
+    exact_tie = _nominate_joint_region(
+        [
+            {"member_mask": 0b0001100, "first_rung": 2, "last_rung": 3, "member_count": 2},
+            {"member_mask": 0b0110000, "first_rung": 4, "last_rung": 5, "member_count": 2},
+        ],
+        gains,
+        gains[0],
+        gains[-1],
+    )
+    assert exact_tie["member_mask"] == 0b0001100
+
+
+def test_stage_b_handoff_prefers_full_then_nearest_and_compares_candidates() -> None:
+    from foci_trace.velocity_measurement import (
+        _compare_stage_b_candidates,
+        _select_directional_region,
+    )
+
+    gains = [256, 362, 512, 724, 1024, 1448, 2048]
+    regions = [
+        {"member_mask": 0b0000110, "pooled_interval": [1, 2]},
+        {"member_mask": 0b0011100, "pooled_interval": [3, 4]},
+        {"member_mask": 0b1100000, "pooled_interval": [5, 6]},
+    ]
+
+    selected = _select_directional_region(regions, 3, gains)
+    assert selected["member_mask"] == 0b0011100
+    assert selected["coverage"] == "full"
+    transferred = _select_directional_region([regions[0], regions[2]], 3, gains)
+    assert transferred["member_mask"] == 0b0000110
+    assert transferred["coverage"] == "transferred"
+    assert transferred["gain_ratio"] == [724, 512]
+
+    first = {
+        "plan_digest": 7,
+        "nominated_p": 724,
+        "memberships": [0b0011100, 0b0011100],
+        "intervals": [[1, 4], [-4, -1]],
+    }
+    assert _compare_stage_b_candidates(first, dict(first))["outcome"] == "complete"
+    changed = {**first, "memberships": [0b0111000, 0b0011100]}
+    mismatch = _compare_stage_b_candidates(first, changed)
+    assert mismatch["outcome"] == "reproduction_mismatch"
+    assert mismatch["replacement"] == changed
+    changed_plan = {**first, "plan_digest": 8}
+    assert _compare_stage_b_candidates(first, changed_plan)["outcome"] == "plan_mismatch"
+
+
+def test_stage_b_audit_accepts_exact_zero_rung_fault_terminal() -> None:
+    from foci_trace.velocity_measurement import FNV1A64_OFFSET, FNV1A64_PRIME, audit_velocity_sweep
+
+    plan_raw = b"stage-b-plan"
+    digest = FNV1A64_OFFSET
+    for byte in plan_raw:
+        digest ^= byte
+        digest = (digest * FNV1A64_PRIME) & 0xFFFF_FFFF_FFFF_FFFF
+    plan = {
+        "record_kind": "plan",
+        "run_sequence": 4,
+        "evidence_sequence": 0,
+        "plan_digest_low": 1,
+        "plan_digest_high": 0,
+        "rung_count": 0,
+        "observations_per_direction": 2,
+        "planned_velocity_mrev_s": 1_000,
+        "target_velocity_rpm": 60,
+        "p_start": 1,
+        "p_top": 1,
+        "hard_torque_limit": 1_000,
+        "usable_torque_limit": 900,
+    }
+    terminal = {
+        "record_kind": "stage_b_terminal",
+        "run_sequence": 4,
+        "evidence_sequence": 1,
+        "encoder_counts_per_rev": 4_000,
+        "f_pwm_hz": 25_000,
+        "model_direction_mask": 0,
+        "selected_memberships": [0, 0],
+        "nominated_p": 0,
+        "selected_intervals": [[0, 0], [0, 0]],
+        "coverage_mask": 0,
+        "forward_region_count": 0,
+        "reverse_region_count": 0,
+        "forward_fragment_count": 0,
+        "reverse_fragment_count": 0,
+        "expected_observations": 0,
+        "emitted_observations": 0,
+        "expected_rungs": 0,
+        "emitted_rungs": 0,
+        "digest_low": digest & 0xFFFF_FFFF,
+        "digest_high": digest >> 32,
+        "outcome": 3,
+        "cause": 9,
+    }
+
+    report = audit_velocity_sweep([], [(plan_raw, plan), (b"terminal", terminal)])
+
+    assert report["matches_firmware"] is True
+    assert report["nominated_p"] == 0
+
+
+def test_structured_boundary_reports_longer_tail_without_changing_binding() -> None:
+    from foci_trace.velocity_measurement import analyze_structured_boundary
+
+    observations = [
+        _observation(
+            (10 if (index // 4) % 2 == 0 else -10) if index >= 192 else (1, -1, 0, -1, 1)[index % 5]
+        )
+        for index in range(256)
+    ]
+
+    boundary = analyze_structured_boundary(observations)
+
+    assert boundary is not None
+    assert boundary["passing_suffix_mask"] & 0b010
+    assert boundary["binding_lag_one_margin_q"] < 0

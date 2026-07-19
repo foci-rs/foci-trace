@@ -575,6 +575,120 @@ def analyze_stationary_tail(observations: list[VelocityObservation]) -> dict[str
     return _stationary_suffix(observations[-256:])
 
 
+def _suffix_diagnostic(observations: list[VelocityObservation]) -> dict[str, object]:
+    levels = [_Level() for _ in range(5)]
+    for observation in observations:
+        _observe(levels, observation)
+    selection = _select_level(levels)
+    if selection is None:
+        return {"usable_plateau": False}
+    variance = _q(levels[selection].moments)
+    assert variance is not None
+    block_observations = 1 << selection
+    block_count = len(observations) // block_observations
+    blocks = []
+    for block_index in range(block_count):
+        selected = observations[
+            block_index * block_observations : (block_index + 1) * block_observations
+        ]
+        blocks.append(
+            _Block(
+                sum(item.delta_counts for item in selected),
+                sum(item.elapsed_us for item in selected),
+                len(selected),
+            )
+        )
+    elapsed = 0
+    x_values = []
+    y_values = []
+    for block in blocks:
+        x_values.append(elapsed + block.elapsed_us // 2)
+        elapsed += block.elapsed_us
+        y_values.append(block.rate_q)
+    count = len(blocks)
+    sum_x = sum(x_values)
+    sum_y = sum(y_values)
+    denominator = count * sum(value * value for value in x_values) - sum_x * sum_x
+    numerator = count * sum(x * y for x, y in zip(x_values, y_values, strict=True)) - sum_x * sum_y
+    slope_per_us = _f32(_f32(numerator) / _f32(denominator))
+    intercept = _f32(_f32(_f32(sum_y) - _f32(slope_per_us * _f32(sum_x))) / _f32(count))
+    residual_sum = _f32(0.0)
+    lag_product_sum = _f32(0.0)
+    previous_residual: float | None = None
+    for x, y in zip(x_values, y_values, strict=True):
+        residual = _f32(_f32(y) - _f32(intercept + _f32(slope_per_us * _f32(x))))
+        residual_sum = _f32(residual_sum + _f32(residual * residual))
+        if previous_residual is not None:
+            lag_product_sum = _f32(lag_product_sum + _f32(residual * previous_residual))
+        previous_residual = residual
+    multiplier = _f32(_confidence_multiplier(3))
+    residual_variance = _f32(residual_sum / _f32(count - 2))
+    blocking_variance = _f32(_f32(variance) * _f32(count))
+    slope_variance = max(residual_variance, blocking_variance)
+    sxx = _f32(_f32(denominator) / _f32(count))
+    slope_per_second = _f32(slope_per_us * _f32(1_000_000))
+    slope_half_width = _f32(
+        _f32(multiplier * _f32(math.sqrt(_f32(slope_variance / sxx)))) * _f32(1_000_000)
+    )
+    slope_margin = _f32(slope_half_width - _f32(abs(slope_per_second)))
+    lag_one = _f32(0.0) if residual_sum == 0 else _f32(lag_product_sum / residual_sum)
+    lag_null = _f32(_f32(-1.0) / _f32(count))
+    lag_half_width = _f32(multiplier / _f32(math.sqrt(_f32(count))))
+    lag_margin = _f32(lag_half_width - _f32(abs(_f32(lag_one - lag_null))))
+    exact_delta = levels[selection].exact_delta_counts
+    exact_elapsed = levels[selection].exact_elapsed_us
+    mean = _trunc_div(exact_delta * 1_000_000 * RATE_Q_SCALE, exact_elapsed)
+    half_width = _confidence_half_width(variance, 3)
+    return {
+        "usable_plateau": True,
+        "slope_passed": slope_margin >= 0,
+        "lag_one_passed": lag_margin >= 0,
+        "settled_rate_interval_q": [mean - half_width, mean + half_width],
+        "slope_rejection_margin_q": _round_away(slope_margin),
+        "lag_one_rejection_margin_q": _round_away(_f32(lag_margin * _f32(1_000_000))),
+    }
+
+
+def analyze_structured_boundary(
+    observations: list[VelocityObservation],
+) -> dict[str, object] | None:
+    """Classify non-binding longer-tail structure without changing eligibility."""
+    diagnostics = [
+        _suffix_diagnostic(observations[-suffix_len:])
+        for suffix_len in (64, 128, 256)
+        if suffix_len <= len(observations)
+    ]
+    if not diagnostics:
+        return None
+    binding = diagnostics[0]
+    if not binding["usable_plateau"] or (binding["slope_passed"] and binding["lag_one_passed"]):
+        return None
+    passing_suffix_mask = 0
+    common: list[int] | None = None
+    for index, diagnostic in enumerate(diagnostics):
+        passed = bool(diagnostic.get("slope_passed") and diagnostic.get("lag_one_passed"))
+        if diagnostic["usable_plateau"] and (index == 0 or passed):
+            interval = list(diagnostic["settled_rate_interval_q"])
+            common = (
+                interval
+                if common is None
+                else [max(common[0], interval[0]), min(common[1], interval[1])]
+            )
+            if common[0] > common[1]:
+                common = None
+        if passed:
+            passing_suffix_mask |= 1 << index
+    if passing_suffix_mask & ~1 == 0 or common is None:
+        return None
+    return {
+        "passing_suffix_mask": passing_suffix_mask,
+        "common_rate_interval_q": common,
+        "binding_slope_margin_q": int(binding["slope_rejection_margin_q"]),
+        "binding_lag_one_margin_q": int(binding["lag_one_rejection_margin_q"]),
+        "diagnostics": diagnostics,
+    }
+
+
 def _upper_bound_unsigned(value: int) -> tuple[int, int]:
     for shift in range(128):
         mantissa = (value + (1 << shift) - 1) >> shift
@@ -910,6 +1024,8 @@ def _reconstruct_observation(
         "disturbance_variance_q2": disturbance_variance,
         "disturbance_variance_mantissa": disturbance_variance_mantissa,
         "disturbance_variance_shift": disturbance_variance_shift,
+        "settled_rate_low_q": rate_low,
+        "settled_rate_high_q": rate_high,
     }
 
 
@@ -1024,11 +1140,814 @@ def _finish_band(band: dict[str, object]) -> dict[str, int]:
     }
 
 
+def _compact_variance(value: int) -> int:
+    """Mirror firmware's outward-rounded u16 variance compaction."""
+    for shift in range(49):
+        rounded = (value + (1 << shift) - 1) >> shift
+        if rounded <= 0xFFFF:
+            return rounded << shift
+    raise ValueError("variance does not fit the firmware compact domain")
+
+
+def _pool_region_observations(observations: list[dict[str, int]]) -> dict[str, object]:
+    weighted_point = 0
+    weighted_low = 0
+    weighted_high = 0
+    weight_sum = 0
+    variance_floor_observations = 0
+    for observation in observations:
+        variance = _compact_variance(int(observation.get("disturbance_variance_q2", 0)))
+        variance_floor_observations += int(variance == 0)
+        weight = max((1 << 32) // max(variance, 1), 1)
+        weighted_point += int(observation["disturbance_q16"]) * weight
+        weighted_low += int(observation["disturbance_low_q16"]) * weight
+        weighted_high += int(observation["disturbance_high_q16"]) * weight
+        weight_sum += weight
+    if not weight_sum:
+        return {
+            "pooled_q16": 0,
+            "pooled_interval": [0, 0],
+            "variance_floor_observations": 0,
+        }
+    return {
+        "pooled_q16": _trunc_div(weighted_point, weight_sum),
+        "pooled_interval": [
+            _floor_div(weighted_low, weight_sum),
+            _ceil_div(weighted_high, weight_sum),
+        ],
+        "variance_floor_observations": variance_floor_observations,
+    }
+
+
+def _compact_signed_rate(value: int, *, upper: bool) -> int:
+    """Mirror firmware's conservative i16 rate compaction and decode."""
+    for shift in range(49):
+        divisor = 1 << shift
+        quotient = _trunc_div(value, divisor)
+        remainder = value - quotient * divisor
+        if upper and value > 0 and remainder:
+            quotient += 1
+        elif not upper and value < 0 and remainder:
+            quotient -= 1
+        if -(1 << 15) <= quotient < (1 << 15):
+            return quotient << shift
+    raise ValueError("signed rate does not fit the firmware compact domain")
+
+
+def _close_directional_region(
+    active: dict[str, object], closure: str, boundary_rung: int | None
+) -> dict[str, object]:
+    member_indexes = list(active["member_indexes"])
+    observations = list(active["observations"])
+    rate_means = list(active["rate_means"])
+    rate_lows = list(active["rate_lows"])
+    rate_highs = list(active["rate_highs"])
+    member_mask = sum(1 << index for index in member_indexes)
+    result = {
+        "member_mask": member_mask,
+        "member_indexes": member_indexes,
+        "selected_ps": list(active["selected_ps"]),
+        "first_rung": member_indexes[0],
+        "last_rung": member_indexes[-1],
+        "member_count": len(member_indexes),
+        "kind": "valid" if len(member_indexes) >= 3 else "fragment",
+        "common_interval": list(active["common_interval"]),
+        "closure": closure,
+        "boundary_rung": boundary_rung,
+        "tested_intersection": list(active["common_interval"]),
+        "settled_rate_mean_min_q": min(rate_means, default=0),
+        "settled_rate_mean_max_q": max(rate_means, default=0),
+        "settled_rate_envelope_low_q": min(rate_lows, default=0),
+        "settled_rate_envelope_high_q": max(rate_highs, default=0),
+    }
+    result.update(_pool_region_observations(observations))
+    return result
+
+
+def _segment_directional_regions(rungs: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Apply the firmware's causal close-and-reseed directional fold."""
+    regions: list[dict[str, object]] = []
+    active: dict[str, object] | None = None
+    for rung in rungs:
+        rung_index = int(rung["rung_index"])
+        classification = int(rung["class"])
+        if classification != 0:
+            if active is not None:
+                closure = (
+                    "current_headroom"
+                    if classification == 3
+                    else "safety_terminus"
+                    if classification == 7
+                    else "ineligible_gap"
+                )
+                regions.append(_close_directional_region(active, closure, rung_index))
+                active = None
+            continue
+        interval = [int(rung["low"]), int(rung["high"])]
+        if active is None:
+            active = {
+                "member_indexes": [rung_index],
+                "selected_ps": [int(rung["velocity_p"])],
+                "common_interval": interval,
+                "observations": list(rung.get("observations", [])),
+                "rate_means": list(rung.get("rate_means", [])),
+                "rate_lows": list(rung.get("rate_lows", [])),
+                "rate_highs": list(rung.get("rate_highs", [])),
+            }
+            continue
+        member_indexes = list(active["member_indexes"])
+        contiguous = rung_index == member_indexes[-1] + 1
+        common = list(active["common_interval"])
+        intersection = [max(common[0], interval[0]), min(common[1], interval[1])]
+        if contiguous and intersection[0] <= intersection[1]:
+            member_indexes.append(rung_index)
+            active["member_indexes"] = member_indexes
+            active["selected_ps"] = [*list(active["selected_ps"]), int(rung["velocity_p"])]
+            active["common_interval"] = intersection
+            for key, source in (
+                ("observations", "observations"),
+                ("rate_means", "rate_means"),
+                ("rate_lows", "rate_lows"),
+                ("rate_highs", "rate_highs"),
+            ):
+                active[key] = [*list(active[key]), *list(rung.get(source, []))]
+            continue
+        regions.append(
+            _close_directional_region(
+                active,
+                "disjoint_interval" if contiguous else "ineligible_gap",
+                rung_index,
+            )
+        )
+        active = {
+            "member_indexes": [rung_index],
+            "selected_ps": [int(rung["velocity_p"])],
+            "common_interval": interval,
+            "observations": list(rung.get("observations", [])),
+            "rate_means": list(rung.get("rate_means", [])),
+            "rate_lows": list(rung.get("rate_lows", [])),
+            "rate_highs": list(rung.get("rate_highs", [])),
+        }
+    if active is not None:
+        regions.append(_close_directional_region(active, "end_of_ladder", None))
+    return regions
+
+
+def _joint_operable_regions(rungs: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Find maximal contiguous rungs operable in both signed directions."""
+    regions: list[dict[str, object]] = []
+    active: list[int] = []
+    for rung in rungs:
+        rung_index = int(rung["rung_index"])
+        operable = bool(rung["forward_operable"]) and bool(rung["reverse_operable"])
+        if operable and (not active or rung_index == active[-1] + 1):
+            active.append(rung_index)
+            continue
+        if active:
+            classes = (int(rung.get("forward_class", 0)), int(rung.get("reverse_class", 0)))
+            closure = (
+                "safety_terminus"
+                if 7 in classes
+                else "current_headroom"
+                if 3 in classes
+                else "ineligible_gap"
+            )
+            regions.append(
+                {
+                    "member_mask": sum(1 << index for index in active),
+                    "first_rung": active[0],
+                    "last_rung": active[-1],
+                    "member_count": len(active),
+                    "closure": closure,
+                }
+            )
+            active = [rung_index] if operable else []
+    if active:
+        regions.append(
+            {
+                "member_mask": sum(1 << index for index in active),
+                "first_rung": active[0],
+                "last_rung": active[-1],
+                "member_count": len(active),
+                "closure": "end_of_ladder",
+            }
+        )
+    return regions
+
+
+def _ratio_margin(p: int, p_start: int, p_top: int) -> Fraction:
+    return Fraction(p, p_start) if p * p <= p_start * p_top else Fraction(p_top, p)
+
+
+def _nominate_joint_region(
+    regions: list[dict[str, object]], gains: list[int], p_start: int, p_top: int
+) -> dict[str, object]:
+    """Select the firmware-owned lower-middle nomination and deterministic ties."""
+    candidates = []
+    for region in regions:
+        first = int(region["first_rung"])
+        count = int(region["member_count"])
+        rung_index = first + (count - 1) // 2
+        p = gains[rung_index]
+        candidates.append(
+            {
+                **region,
+                "rung_index": rung_index,
+                "p": p,
+                "distance_to_start_q16": (p << 16) // max(p_start, 1),
+                "distance_to_top_q16": (p_top << 16) // max(p, 1),
+                "reduced_margin": count == 1,
+                "_margin": _ratio_margin(p, p_start, p_top),
+            }
+        )
+    if not candidates:
+        return {}
+    chosen = candidates[0]
+    for candidate in candidates[1:]:
+        if int(candidate["member_count"]) > int(chosen["member_count"]) or (
+            int(candidate["member_count"]) == int(chosen["member_count"])
+            and (
+                candidate["_margin"] > chosen["_margin"]
+                or (
+                    candidate["_margin"] == chosen["_margin"]
+                    and int(candidate["p"]) < int(chosen["p"])
+                )
+            )
+        ):
+            chosen = candidate
+    return {key: value for key, value in chosen.items() if key != "_margin"}
+
+
+def _select_directional_region(
+    regions: list[dict[str, object]], nominated_rung: int, gains: list[int]
+) -> dict[str, object]:
+    """Select full coverage, otherwise the nearest lower-first directional region."""
+    selected: dict[str, object] | None = None
+    for region in regions:
+        mask = int(region["member_mask"])
+        first = (mask & -mask).bit_length() - 1
+        last = mask.bit_length() - 1
+        if first <= nominated_rung <= last:
+            coverage, distance, edge = "full", 0, nominated_rung
+        elif nominated_rung < first:
+            coverage, distance, edge = "transferred", first - nominated_rung, first
+        else:
+            coverage, distance, edge = "transferred", last - nominated_rung, last
+        proposed = {
+            **region,
+            "coverage": coverage,
+            "signed_rung_distance": distance,
+            "gain_ratio": [
+                max(gains[edge], gains[nominated_rung]),
+                min(gains[edge], gains[nominated_rung]),
+            ]
+            if coverage == "transferred"
+            else [1, 1],
+        }
+        if selected is None:
+            selected = proposed
+            continue
+        if (
+            coverage == "full"
+            and selected["coverage"] != "full"
+            or abs(distance) < abs(int(selected["signed_rung_distance"]))
+            or (
+                abs(distance) == abs(int(selected["signed_rung_distance"]))
+                and first
+                < ((int(selected["member_mask"]) & -int(selected["member_mask"])).bit_length() - 1)
+            )
+        ):
+            selected = proposed
+    return selected or {}
+
+
+def _compare_stage_b_candidates(
+    previous: dict[str, object], current: dict[str, object]
+) -> dict[str, object]:
+    """Mirror RAM-only two-run reproduction semantics."""
+    if int(previous["plan_digest"]) != int(current["plan_digest"]):
+        return {"outcome": "plan_mismatch", "replacement": previous}
+    intervals_overlap = all(
+        max(int(left[0]), int(right[0])) <= min(int(left[1]), int(right[1]))
+        for left, right in zip(previous["intervals"], current["intervals"], strict=True)
+    )
+    if (
+        int(previous["nominated_p"]) == int(current["nominated_p"])
+        and list(previous["memberships"]) == list(current["memberships"])
+        and intervals_overlap
+    ):
+        return {"outcome": "complete", "replacement": None}
+    return {"outcome": "reproduction_mismatch", "replacement": current}
+
+
+def replay_stage_b_regions(
+    raw_observations: list[VelocityObservation],
+    evidence_records: list[tuple[bytes, dict[str, object]]],
+) -> dict[str, object]:
+    """Replay proportional-sweep regions from raw observation evidence."""
+    plans = [value for _raw, value in evidence_records if value["record_kind"] == "plan"]
+    terminals = [
+        value
+        for _raw, value in evidence_records
+        if value["record_kind"] in ("terminal", "stage_b_terminal")
+    ]
+    if len(plans) != 1 or len(terminals) != 1:
+        raise ValueError("one plan and one terminal are required for Stage B replay")
+    plan, terminal = plans[0], terminals[0]
+    by_stroke: dict[int, list[VelocityObservation]] = {}
+    for observation in raw_observations:
+        by_stroke.setdefault(observation.stroke_index, []).append(observation)
+    records = {
+        (int(value["rung_index"]), int(value["slot"])): value
+        for _raw, value in evidence_records
+        if value["record_kind"] == "observation"
+    }
+    reconstructed: dict[tuple[int, int], dict[str, int]] = {}
+    for key, record in records.items():
+        raw = by_stroke.get(key[0] * 4 + key[1])
+        if not raw:
+            continue
+        reconstructed[key] = _reconstruct_observation(raw, record, plan, terminal)
+    directional_inputs: list[list[dict[str, object]]] = [[], []]
+    joint_inputs = []
+    gains = []
+    for rung_index in range(int(plan["rung_count"])):
+        if any((rung_index, slot) not in reconstructed for slot in range(4)):
+            break
+        p = int(records[(rung_index, 0)]["velocity_p"])
+        gains.append(p)
+        operable = []
+        for direction_index, slots in ((0, (0, 2)), (1, (1, 3))):
+            observations = [reconstructed[(rung_index, slot)] for slot in slots]
+            classification, low, high, _moving = _rung_class(*observations)
+            means = [item.get("settled_rate_mean_q", 0) for item in observations]
+            directional_inputs[direction_index].append(
+                {
+                    "rung_index": rung_index,
+                    "velocity_p": p,
+                    "class": classification,
+                    "low": low,
+                    "high": high,
+                    "observations": observations,
+                    "rate_means": [
+                        _compact_signed_rate(min(means), upper=False),
+                        _compact_signed_rate(max(means), upper=True),
+                    ],
+                    "rate_lows": [
+                        _compact_signed_rate(item.get("settled_rate_low_q", 0), upper=False)
+                        for item in observations
+                    ],
+                    "rate_highs": [
+                        _compact_signed_rate(item.get("settled_rate_high_q", 0), upper=True)
+                        for item in observations
+                    ],
+                }
+            )
+            operable.append(all(item["classification"] in (0, 2) for item in observations))
+        joint_inputs.append(
+            {
+                "rung_index": rung_index,
+                "forward_operable": operable[0],
+                "reverse_operable": operable[1],
+                "forward_class": int(directional_inputs[0][-1]["class"]),
+                "reverse_class": int(directional_inputs[1][-1]["class"]),
+            }
+        )
+    directional = [_segment_directional_regions(items) for items in directional_inputs]
+    joint = _joint_operable_regions(joint_inputs)
+    nomination = _nominate_joint_region(
+        joint,
+        gains,
+        int(plan.get("p_start", gains[0] if gains else 1)),
+        int(plan.get("p_top", gains[-1] if gains else 1)),
+    )
+    nominated_rung = int(nomination["rung_index"]) if nomination else 0
+    selected = [
+        _select_directional_region(
+            [region for region in regions if region["kind"] == "valid"],
+            nominated_rung,
+            gains,
+        )
+        for regions in directional
+    ]
+    structured_boundaries = {}
+    for key, observation in reconstructed.items():
+        if not 4 <= int(observation["classification"]) <= 8:
+            continue
+        boundary = analyze_structured_boundary(by_stroke.get(key[0] * 4 + key[1], []))
+        if boundary is not None:
+            structured_boundaries[f"{key[0]}/{key[1]}"] = boundary
+    return {
+        "directions": directional,
+        "joint_regions": joint,
+        "nomination": nomination,
+        "nominated_p": int(nomination.get("p", 0)),
+        "selected": selected,
+        "coverage": [item.get("coverage") for item in selected],
+        "gains": gains,
+        "structured_boundaries": structured_boundaries,
+    }
+
+
+def _audit_stage_b_velocity_sweep(
+    raw_observations: list[VelocityObservation],
+    evidence_records: list[tuple[bytes, dict[str, object]]],
+) -> dict[str, object]:
+    """Audit the proportional-sweep canonical record stream against an independent replay."""
+    plans = [value for _raw, value in evidence_records if value["record_kind"] == "plan"]
+    terminals = [
+        value for _raw, value in evidence_records if value["record_kind"] == "stage_b_terminal"
+    ]
+    if len(plans) != 1 or len(terminals) != 1:
+        return {
+            "run_sequence": int((plans or terminals or [{}])[0].get("run_sequence", 0)),
+            "plan": dict(plans[0]) if len(plans) == 1 else None,
+            "terminal": dict(terminals[0]) if len(terminals) == 1 else None,
+            "complete": False,
+            "matches_firmware": False,
+            "mismatches": ["partial Stage B capture: one plan and terminal are required"],
+            "caveats": ["partial Stage B capture"],
+        }
+    plan, terminal = plans[0], terminals[0]
+    nonterminal = [
+        (raw, value)
+        for raw, value in evidence_records
+        if value["record_kind"] != "stage_b_terminal"
+    ]
+    digest = FNV1A64_OFFSET
+    for raw, _value in nonterminal:
+        for byte in raw:
+            digest ^= byte
+            digest = (digest * FNV1A64_PRIME) & 0xFFFF_FFFF_FFFF_FFFF
+    reported_digest = int(terminal["digest_low"]) | (int(terminal["digest_high"]) << 32)
+    mismatches: list[str] = []
+    if digest != reported_digest:
+        mismatches.append(
+            f"terminal digest: firmware=0x{reported_digest:016x} offline=0x{digest:016x}"
+        )
+    main_records = [
+        value for _raw, value in nonterminal if value["record_kind"] != "structured_boundary"
+    ]
+    sequences = [int(value["evidence_sequence"]) for value in main_records]
+    if sequences != list(range(len(sequences))):
+        mismatches.append(f"Stage B evidence sequence is not contiguous: {sequences}")
+    previous: dict[str, object] | None = None
+    for _raw, value in nonterminal:
+        if value["record_kind"] == "structured_boundary":
+            if previous is None or previous["record_kind"] != "observation":
+                mismatches.append("structured boundary does not follow an observation")
+            elif int(value["evidence_sequence"]) != int(previous["evidence_sequence"]):
+                mismatches.append("structured boundary sequence differs from its observation")
+        else:
+            previous = value
+
+    replay = replay_stage_b_regions(raw_observations, evidence_records)
+    by_stroke: dict[int, list[VelocityObservation]] = {}
+    for observation in raw_observations:
+        by_stroke.setdefault(observation.stroke_index, []).append(observation)
+    observation_records = {
+        (int(value["rung_index"]), int(value["slot"])): value
+        for _raw, value in evidence_records
+        if value["record_kind"] == "observation"
+    }
+    reconstructed: dict[tuple[int, int], dict[str, int]] = {}
+    exact_fields = (
+        "classification",
+        "delta_sign",
+        "delta_mantissa",
+        "delta_shift",
+        "elapsed_mantissa",
+        "elapsed_shift",
+        "rate_low",
+        "rate_mean",
+        "rate_high",
+        "deficit_low",
+        "deficit_high",
+        "rate_shift",
+        "suffix_len",
+        "selected_level",
+        "selected_blocks",
+        "rate_variance_mantissa",
+        "rate_variance_shift",
+        "slope_mantissa",
+        "slope_shift",
+        "slope_half_width_mantissa",
+        "slope_half_width_shift",
+        "lag_one_q",
+        "lag_one_half_width_q",
+        "residual_mantissa",
+        "residual_shift",
+        "tested_suffixes",
+        "disturbance_q16",
+        "disturbance_low_q16",
+        "disturbance_high_q16",
+        "disturbance_variance_mantissa",
+        "disturbance_variance_shift",
+        "predicted_torque_target_abs",
+    )
+    for key, record in sorted(observation_records.items()):
+        raw = by_stroke.get(key[0] * 4 + key[1], [])
+        if not raw:
+            mismatches.append(f"observation {key[0]}/{key[1]} has no raw samples")
+            continue
+        offline = _reconstruct_observation(raw, record, plan, terminal)
+        for name in exact_fields:
+            offline.setdefault(name, 0)
+        _compare_fields(mismatches, f"observation {key[0]}/{key[1]}", record, offline, exact_fields)
+        reconstructed[key] = offline
+
+    boundary_records = [
+        value for _raw, value in evidence_records if value["record_kind"] == "structured_boundary"
+    ]
+    expected_boundaries: dict[tuple[int, int], dict[str, object]] = {}
+    for key in observation_records:
+        raw = by_stroke.get(key[0] * 4 + key[1], [])
+        boundary = analyze_structured_boundary(raw)
+        if boundary is not None:
+            expected_boundaries[key] = boundary
+    for record in boundary_records:
+        key = (int(record["rung_index"]), int(record["slot"]))
+        boundary = expected_boundaries.pop(key, None)
+        if boundary is None:
+            mismatches.append(f"unexpected structured boundary {key}")
+            continue
+        low_mantissa, low_shift = _upper_bound_signed(boundary["common_rate_interval_q"][0])
+        high_mantissa, high_shift = _upper_bound_signed(boundary["common_rate_interval_q"][1])
+        slope_mantissa, slope_shift = _upper_bound_signed(boundary["binding_slope_margin_q"])
+        expected = {
+            "passing_suffix_mask": boundary["passing_suffix_mask"],
+            "common_rate_low_mantissa": low_mantissa,
+            "common_rate_low_shift": low_shift,
+            "common_rate_high_mantissa": high_mantissa,
+            "common_rate_high_shift": high_shift,
+            "binding_slope_margin_mantissa": slope_mantissa,
+            "binding_slope_margin_shift": slope_shift,
+            "binding_lag_one_margin_q": boundary["binding_lag_one_margin_q"],
+        }
+        _compare_fields(mismatches, f"structured boundary {key}", record, expected, tuple(expected))
+    if expected_boundaries:
+        mismatches.append(f"missing structured boundaries {sorted(expected_boundaries)}")
+
+    rung_records = {
+        int(value["rung_index"]): value
+        for _raw, value in evidence_records
+        if value["record_kind"] == "rung"
+    }
+    for rung_index, rung in sorted(rung_records.items()):
+        pairs = []
+        for slots in ((0, 2), (1, 3)):
+            if any((rung_index, slot) not in reconstructed for slot in slots):
+                break
+            pairs.append(
+                _rung_class(
+                    reconstructed[(rung_index, slots[0])],
+                    reconstructed[(rung_index, slots[1])],
+                )
+            )
+        if len(pairs) != 2:
+            mismatches.append(f"rung {rung_index} is missing reconstructed observations")
+            continue
+        offline = {
+            "forward_class": pairs[0][0],
+            "forward_low_q16": pairs[0][1],
+            "forward_high_q16": pairs[0][2],
+            "reverse_class": pairs[1][0],
+            "reverse_low_q16": pairs[1][1],
+            "reverse_high_q16": pairs[1][2],
+            "flags": int(pairs[0][3])
+            | (int(pairs[1][3]) << 1)
+            | (
+                int(
+                    any(
+                        int(observation_records[(rung_index, slot)]["flags"]) & 1 for slot in (0, 2)
+                    )
+                )
+                << 2
+            )
+            | (
+                int(
+                    any(
+                        int(observation_records[(rung_index, slot)]["flags"]) & 1 for slot in (1, 3)
+                    )
+                )
+                << 3
+            ),
+            "forward_eligible_observations": 2 if pairs[0][0] == 0 else 0,
+            "reverse_eligible_observations": 2 if pairs[1][0] == 0 else 0,
+        }
+        _compare_fields(mismatches, f"rung {rung_index}", rung, offline, tuple(offline))
+
+    closure_codes = {
+        "disjoint_interval": 0,
+        "ineligible_gap": 1,
+        "current_headroom": 2,
+        "safety_terminus": 3,
+        "end_of_ladder": 4,
+    }
+    expected_regions = {
+        (direction, int(region["member_mask"])): region
+        for direction, regions in enumerate(replay["directions"])
+        for region in regions
+    }
+    reported_regions = [
+        value for _raw, value in evidence_records if value["record_kind"] == "directional_region"
+    ]
+    for record in reported_regions:
+        key = (int(record["direction"]), int(record["member_mask"]))
+        region = expected_regions.pop(key, None)
+        if region is None:
+            mismatches.append(f"unexpected directional region {key}")
+            continue
+        expected = {
+            "region_kind": 0 if region["kind"] == "valid" else 1,
+            "closure": closure_codes[str(region["closure"])],
+            "first_rung": region["first_rung"],
+            "last_rung": region["last_rung"],
+            "p_low": region["selected_ps"][0],
+            "p_high": region["selected_ps"][-1],
+            "member_count": region["member_count"],
+            "common_low_q16": region["common_interval"][0],
+            "common_high_q16": region["common_interval"][1],
+            "pooled_q16": region["pooled_q16"],
+            "pooled_low_q16": region["pooled_interval"][0],
+            "pooled_high_q16": region["pooled_interval"][1],
+            "variance_floor_observations": region["variance_floor_observations"],
+            "boundary_rung_plus_one": 0
+            if region["boundary_rung"] is None
+            else int(region["boundary_rung"]) + 1,
+            "tested_low_q16": region["tested_intersection"][0],
+            "tested_high_q16": region["tested_intersection"][1],
+        }
+        _compare_fields(mismatches, f"directional region {key}", record, expected, tuple(expected))
+        for prefix, source in (
+            ("settled_rate_mean_min", "settled_rate_mean_min_q"),
+            ("settled_rate_mean_max", "settled_rate_mean_max_q"),
+            ("settled_rate_envelope_low", "settled_rate_envelope_low_q"),
+            ("settled_rate_envelope_high", "settled_rate_envelope_high_q"),
+        ):
+            decoded = int(record[f"{prefix}_mantissa"]) << int(record[f"{prefix}_shift"])
+            if decoded != int(region[source]):
+                mismatches.append(
+                    f"directional region {key} {prefix}: firmware={decoded} offline={region[source]}"
+                )
+    if expected_regions:
+        mismatches.append(f"missing directional regions {sorted(expected_regions)}")
+
+    joint_closure_codes = {
+        "ineligible_gap": 0,
+        "current_headroom": 1,
+        "safety_terminus": 2,
+        "end_of_ladder": 3,
+    }
+    expected_joint = {int(region["member_mask"]): region for region in replay["joint_regions"]}
+    for record in (
+        value for _raw, value in evidence_records if value["record_kind"] == "joint_region"
+    ):
+        region = expected_joint.pop(int(record["member_mask"]), None)
+        if region is None:
+            mismatches.append(f"unexpected joint region {record['member_mask']}")
+            continue
+        expected = {
+            "first_rung": region["first_rung"],
+            "last_rung": region["last_rung"],
+            "member_count": region["member_count"],
+            "p_low": replay["gains"][int(region["first_rung"])],
+            "p_high": replay["gains"][int(region["last_rung"])],
+            "closure": joint_closure_codes[str(region["closure"])],
+        }
+        _compare_fields(mismatches, "joint region", record, expected, tuple(expected))
+    if expected_joint:
+        mismatches.append(f"missing joint regions {sorted(expected_joint)}")
+
+    handoffs = [value for _raw, value in evidence_records if value["record_kind"] == "handoff"]
+    if replay["nomination"] and len(handoffs) != 1:
+        mismatches.append(f"expected one Stage B handoff, found {len(handoffs)}")
+    elif not replay["nomination"] and handoffs:
+        mismatches.append("Stage B handoff exists without a joint nomination")
+    elif replay["nomination"]:
+        handoff = handoffs[0]
+        nomination = replay["nomination"]
+        expected = {
+            "nominated_p": replay["nominated_p"],
+            "coverage_mask": sum(
+                (1 << index)
+                for index, item in enumerate(replay["selected"])
+                if item["coverage"] == "full"
+            ),
+            "joint_member_mask": nomination["member_mask"],
+            "nominated_rung": nomination["rung_index"],
+            "distance_to_start_q16": nomination["distance_to_start_q16"],
+            "distance_to_top_q16": nomination["distance_to_top_q16"],
+            "nomination_flags": int(nomination["reduced_margin"]),
+        }
+        _compare_fields(mismatches, "Stage B handoff", handoff, expected, tuple(expected))
+        for direction, selected in zip(handoff["directions"], replay["selected"], strict=True):
+            expected_direction = {
+                "member_mask": selected["member_mask"],
+                "pooled_low_q16": selected["pooled_interval"][0],
+                "pooled_high_q16": selected["pooled_interval"][1],
+                "coverage": 0 if selected["coverage"] == "full" else 1,
+                "signed_rung_distance": int(selected["signed_rung_distance"]) & 0xFF,
+                "gain_ratio_num": selected["gain_ratio"][0],
+                "gain_ratio_den": selected["gain_ratio"][1],
+            }
+            _compare_fields(
+                mismatches,
+                "Stage B directional handoff",
+                direction,
+                expected_direction,
+                tuple(expected_direction),
+            )
+
+    expected_memberships = [int(item.get("member_mask", 0)) for item in replay["selected"]]
+    expected_intervals = [list(item.get("pooled_interval", [0, 0])) for item in replay["selected"]]
+    terminal_expected = {
+        "model_direction_mask": sum(
+            (1 << index)
+            for index, regions in enumerate(replay["directions"])
+            if any(region["kind"] == "valid" for region in regions)
+        ),
+        "nominated_p": replay["nominated_p"],
+        "coverage_mask": sum(
+            (1 << index)
+            for index, item in enumerate(replay["selected"])
+            if item.get("coverage") == "full"
+        ),
+        "expected_observations": int(plan["rung_count"])
+        * int(plan["observations_per_direction"])
+        * 2,
+        "emitted_observations": len(observation_records),
+        "expected_rungs": int(plan["rung_count"]),
+        "emitted_rungs": len(rung_records),
+    }
+    _compare_fields(
+        mismatches, "Stage B terminal", terminal, terminal_expected, tuple(terminal_expected)
+    )
+    if list(terminal["selected_memberships"]) != expected_memberships:
+        mismatches.append("Stage B terminal selected memberships differ from replay")
+    if list(terminal["selected_intervals"]) != expected_intervals:
+        mismatches.append("Stage B terminal selected intervals differ from replay")
+    region_counts = [
+        sum(region["kind"] == "valid" for region in regions) for regions in replay["directions"]
+    ]
+    fragment_counts = [
+        sum(region["kind"] == "fragment" for region in regions) for regions in replay["directions"]
+    ]
+    if [terminal["forward_region_count"], terminal["reverse_region_count"]] != region_counts:
+        mismatches.append("Stage B terminal directional region counts differ from replay")
+    if [terminal["forward_fragment_count"], terminal["reverse_fragment_count"]] != fragment_counts:
+        mismatches.append("Stage B terminal directional fragment counts differ from replay")
+
+    reproduction = [
+        value for _raw, value in evidence_records if value["record_kind"] == "reproduction"
+    ]
+    if int(terminal["outcome"]) == 1 and len(reproduction) != 1:
+        mismatches.append("complete Stage B terminal lacks one reproduction record")
+    if reproduction:
+        current = reproduction[-1]
+        if int(current["current_nominated_p"]) != int(terminal["nominated_p"]):
+            mismatches.append("reproduction nomination differs from terminal")
+        if list(current["current_memberships"]) != list(terminal["selected_memberships"]):
+            mismatches.append("reproduction memberships differ from terminal")
+        if list(current["current_intervals"]) != list(terminal["selected_intervals"]):
+            mismatches.append("reproduction intervals differ from terminal")
+
+    pid_samples = [
+        {
+            "stroke_index": item.stroke_index,
+            "pid_velocity_actual": item.pid_velocity_actual,
+        }
+        for item in raw_observations
+        if item.pid_velocity_actual is not None
+    ]
+    return {
+        "run_sequence": int(plan["run_sequence"]),
+        "plan": dict(plan),
+        "terminal": dict(terminal),
+        "digest": digest,
+        "reported_digest": reported_digest,
+        "observation_count": len(observation_records),
+        "rung_count": len(rung_records),
+        "stage_b_replay": replay,
+        "directions": replay["directions"],
+        "nominated_p": replay["nominated_p"],
+        "coverage": replay["coverage"],
+        "pid_velocity_actual_samples": pid_samples,
+        "actual_velocity_pptm_samples": [],
+        "complete": True,
+        "matches_firmware": not mismatches,
+        "mismatches": mismatches,
+        "caveats": [],
+    }
+
+
 def audit_velocity_sweep(
     raw_observations: list[VelocityObservation],
     evidence_records: list[tuple[bytes, dict[str, object]]],
 ) -> dict[str, object]:
     """Independently reconstruct one sweep and compare every firmware decision."""
+    if any(value["record_kind"] == "stage_b_terminal" for _raw, value in evidence_records):
+        return _audit_stage_b_velocity_sweep(raw_observations, evidence_records)
     sample_indexes: dict[int, int] = {}
     pid_velocity_actual_samples: list[dict[str, int]] = []
     actual_velocity_pptm_samples: list[dict[str, int]] = []
@@ -1271,6 +2190,7 @@ def audit_velocity_sweep(
     ):
         if int(terminal[name]) != offline_value:
             mismatches.append(f"terminal {name}: firmware={terminal[name]} offline={offline_value}")
+    stage_b_replay = replay_stage_b_regions(raw_observations, evidence_records)
     return {
         "run_sequence": int(plan["run_sequence"]),
         "plan": dict(plan),
@@ -1283,6 +2203,7 @@ def audit_velocity_sweep(
         "velocity_diagnostic_audit": diagnostic_audit,
         "rung_count": len(rung_records),
         "directions": finished_bands,
+        "stage_b_replay": stage_b_replay,
         "complete": True,
         "matches_firmware": not mismatches,
         "mismatches": mismatches,

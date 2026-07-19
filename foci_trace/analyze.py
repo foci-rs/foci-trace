@@ -2401,6 +2401,24 @@ def format_analysis(
     commissioning_text = format_commissioning_report(analysis.commissioning)
     if commissioning_text:
         text = "\n".join(part for part in (text, commissioning_text) if part)
+    stage_b_lines = []
+    for sweep in analysis.velocity_sweep_audits:
+        replay = sweep.get("stage_b_replay")
+        if not isinstance(replay, dict):
+            continue
+        stage_b_lines.append(
+            "stage_b dev={device} source={source} run={run} p={p} coverage={coverage} "
+            "matches_firmware={matches}".format(
+                device=sweep.get("device_index", "?"),
+                source=sweep.get("source_index", "?"),
+                run=sweep.get("run_sequence", "?"),
+                p=replay.get("nominated_p", 0),
+                coverage=",".join(str(value) for value in replay.get("coverage", [])),
+                matches=str(bool(sweep.get("matches_firmware"))).lower(),
+            )
+        )
+    if stage_b_lines:
+        text = "\n".join(part for part in (text, *stage_b_lines) if part)
     if not include_contour:
         return text
     lines = [text] if text else []
