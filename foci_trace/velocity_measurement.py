@@ -425,6 +425,12 @@ def _confidence_multiplier(family_size: int) -> float:
     return CONFIDENCE_MULTIPLIERS_95_DF15[family_size - 1]
 
 
+def _confidence_half_width(variance_of_mean_q2: int, family_size: int) -> int:
+    variance = _f32(variance_of_mean_q2)
+    multiplier = _f32(_confidence_multiplier(family_size))
+    return math.ceil(_f32(multiplier * _f32(math.sqrt(variance))))
+
+
 def _has_two_doubling_plateau(levels: list[_Level]) -> bool:
     consecutive = 0
     for lower, upper in zip(levels, levels[1:]):
@@ -752,6 +758,14 @@ def _diagnostic_audit(
     }
 
 
+def _torque_evidence_matches_terminal(
+    terminal: dict[str, object], torque_audit: dict[str, object]
+) -> bool:
+    if not bool(torque_audit["within_observed_peak_plus_one"]):
+        return False
+    return bool(torque_audit["below_usable_limit"]) or int(terminal["cause"]) == 4
+
+
 def _disturbance(
     *,
     p: int,
@@ -819,9 +833,7 @@ def _reconstruct_observation(
             "tested_suffixes": 0,
         }
     family_size = int(plan["rung_count"]) * int(plan["observations_per_direction"])
-    half_width = math.ceil(
-        _confidence_multiplier(family_size) * math.sqrt(stationarity["variance_of_mean_q2"])
-    )
+    half_width = _confidence_half_width(stationarity["variance_of_mean_q2"], family_size)
     mean = stationarity["settled_rate_mean_q"]
     rate_low, rate_high = mean - half_width, mean + half_width
     direction = 1 if int(record["slot"]) % 2 == 0 else -1
@@ -1125,7 +1137,7 @@ def audit_velocity_sweep(
         torque_audit = diagnostic_audit["torque"]
         if not torque_audit["within_observed_peak_plus_one"]:
             mismatches.append("reconstructed torque exceeds observed peak plus one count")
-        if not torque_audit["below_usable_limit"]:
+        if not _torque_evidence_matches_terminal(terminal, torque_audit):
             mismatches.append("diagnostic torque evidence reaches the usable limit")
     offline_observations: dict[tuple[int, int], dict[str, int]] = {}
     exact_fields = (

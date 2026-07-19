@@ -161,6 +161,57 @@ def test_excluded_observation_zeros_unavailable_suffix_metrics() -> None:
     assert result["tested_suffixes"] == 0
 
 
+def test_sweep_confidence_width_matches_firmware_single_precision(monkeypatch) -> None:
+    import foci_trace.velocity_measurement as measurement
+
+    monkeypatch.setattr(
+        measurement,
+        "_stationary_suffix",
+        lambda _raw: {
+            "usable": 1,
+            "selected_delta_counts": 0,
+            "selected_elapsed_us": 256_000,
+            "selected_level": 3,
+            "selected_blocks": 16,
+            "variance_of_mean_q2": 1_105_940_631,
+            "settled_rate_mean_q": -124_974,
+            "suffix_len": 256,
+            "slope_q": 0,
+            "slope_half_width_q": 1,
+            "lag_one_q": 0,
+            "lag_one_half_width_q": 1,
+            "residual_magnitude_q2": 1,
+            "tested_suffixes": 3,
+        },
+    )
+    observations = [_observation(0)]
+    record = {"velocity_p": 1, "target_velocity_rpm": -176, "slot": 1}
+    plan = {
+        "rung_count": 23,
+        "observations_per_direction": 2,
+        "hard_torque_limit": 2_816,
+        "usable_torque_limit": 2_534,
+    }
+    terminal = {"encoder_counts_per_rev": 4_000, "f_pwm_hz": 25_000}
+
+    result = measurement._reconstruct_observation(observations, record, plan, terminal)
+
+    assert result["rate_low"] == -259_051
+    assert result["rate_high"] == 9_103
+
+
+def test_current_headroom_terminal_accepts_expected_torque_boundary() -> None:
+    import foci_trace.velocity_measurement as measurement
+
+    assert hasattr(measurement, "_torque_evidence_matches_terminal")
+    matches = measurement._torque_evidence_matches_terminal(
+        {"cause": 4},
+        {"below_usable_limit": False, "within_observed_peak_plus_one": True},
+    )
+
+    assert matches is True
+
+
 def test_disturbance_promotes_encoder_rate_to_target_q16_domain() -> None:
     from foci_trace.velocity_measurement import _disturbance
 
