@@ -384,12 +384,13 @@ def test_decodes_stage_b_canonical_records_and_plan_identity() -> None:
         (
             bytes([8])
             + struct.pack(
-                "<IHII BIIH iiii BBBBB HHHH II BB IIII".replace(" ", ""),
+                "<IHII BIIIH iiii BBBBB HHHH II BB IIII".replace(" ", ""),
                 7,
                 25,
                 4_000,
                 25_000,
                 3,
+                0b11100,
                 0b11100,
                 0b11100,
                 724,
@@ -420,12 +421,14 @@ def test_decodes_stage_b_canonical_records_and_plan_identity() -> None:
         (
             bytes([9])
             + struct.pack(
-                "<IHBHHIIIIiiiiiiiiIIII",
+                "<IHBHHIIIIIIiiiiiiiiIIII",
                 7,
                 26,
                 1,
                 724,
                 724,
+                0b11100,
+                0b11100,
                 0b11100,
                 0b11100,
                 0b11100,
@@ -446,6 +449,8 @@ def test_decodes_stage_b_canonical_records_and_plan_identity() -> None:
             "reproduction",
         ),
     ]
+    assert len(records[5][0]) == 85
+    assert len(records[6][0]) == 84
 
     decoded = []
     for payload, expected_kind in records:
@@ -456,7 +461,8 @@ def test_decodes_stage_b_canonical_records_and_plan_identity() -> None:
     assert decoded[0]["plan_digest_low"] == 0x0105_C518
     assert decoded[1]["member_mask"] == 0b11100
     assert decoded[3]["directions"][1]["pooled_low_q16"] == -18
-    assert decoded[5]["selected_memberships"] == [0b11100, 0b11100]
+    assert decoded[5]["selected_memberships"] == [0b11100, 0b11100, 0b11100]
+    assert decoded[6]["previous_memberships"] == [0b11100, 0b11100, 0b11100]
     assert decoded[6]["current_intervals"][1] == [-17, -13]
 
 

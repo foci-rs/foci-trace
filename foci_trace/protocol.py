@@ -695,7 +695,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ("model_direction_mask", "B"),
             ),
         )
-        decoded["selected_memberships"] = [cursor.take("I") for _ in range(2)]
+        decoded["selected_memberships"] = [cursor.take("I") for _ in range(3)]
         decoded["nominated_p"] = cursor.take("H")
         decoded["selected_intervals"] = [[cursor.take("i"), cursor.take("i")] for _ in range(2)]
         decoded.update(
@@ -734,8 +734,8 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ("current_nominated_p", "H"),
             ),
         )
-        decoded["previous_memberships"] = [cursor.take("I") for _ in range(2)]
-        decoded["current_memberships"] = [cursor.take("I") for _ in range(2)]
+        decoded["previous_memberships"] = [cursor.take("I") for _ in range(3)]
+        decoded["current_memberships"] = [cursor.take("I") for _ in range(3)]
         decoded["previous_intervals"] = [[cursor.take("i"), cursor.take("i")] for _ in range(2)]
         decoded["current_intervals"] = [[cursor.take("i"), cursor.take("i")] for _ in range(2)]
         decoded.update(

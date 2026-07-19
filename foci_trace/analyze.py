@@ -50,6 +50,7 @@ from .velocity_measurement import (
     VelocityMeasurementReport,
     VelocityObservation,
     analyze_velocity_observations,
+    audit_stage_b_reproduction_pair,
     audit_velocity_sweep,
     velocity_report_to_json,
 )
@@ -1840,6 +1841,7 @@ def _velocity_capture_groups(
 
 def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, object]]:
     audits: list[dict[str, object]] = []
+    retained_candidates: dict[tuple[int, int], dict[str, object]] = {}
     for device_index, state in sorted(states.items()):
         run_sequences = sorted(
             {
@@ -1874,6 +1876,26 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
             report["device_index"] = device_index
             report["source_index"] = source_index
             report["serial"] = state.report.serial or state.report.metadata_serial
+            candidate_key = (device_index, source_index)
+            if report.get("reproduction") is not None:
+                previous = retained_candidates.get(candidate_key)
+                if previous is not None:
+                    pair_audit = audit_stage_b_reproduction_pair(previous, report)
+                    report["reproduction_pair_audit"] = pair_audit
+                    if not pair_audit["matches_firmware"]:
+                        report["matches_firmware"] = False
+                        report["mismatches"].extend(pair_audit["mismatches"])
+                    report["caveats"] = [
+                        caveat for caveat in report["caveats"] if "prior capture" not in caveat
+                    ]
+            terminal = report.get("terminal")
+            if isinstance(terminal, dict):
+                outcome = int(terminal.get("outcome", -1))
+                cause = int(terminal.get("cause", -1))
+                if outcome == 0 or (outcome == 2 and cause == 5):
+                    retained_candidates[candidate_key] = report
+                else:
+                    retained_candidates.pop(candidate_key, None)
             audits.append(report)
     return audits
 

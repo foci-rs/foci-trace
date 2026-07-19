@@ -88,6 +88,9 @@ def _f32(value: float | int) -> float:
 
 FNV1A64_OFFSET = 0xCBF29CE484222325
 FNV1A64_PRIME = 0x100000001B3
+STAGE_B_OUTCOME_COMPLETE = 1
+STAGE_B_OUTCOME_INCONCLUSIVE = 2
+STAGE_B_CAUSE_REPRODUCTION_MISMATCH = 5
 
 
 class AccuracyDecision(str, Enum):
@@ -1440,6 +1443,166 @@ def _compare_stage_b_candidates(
     return {"outcome": "reproduction_mismatch", "replacement": current}
 
 
+def _stage_b_record_identity(value: dict[str, object]) -> tuple[object, ...]:
+    """Return the causal identity of one canonical Stage B record."""
+    kind = str(value["record_kind"])
+    if kind in ("observation", "structured_boundary"):
+        return kind, int(value["rung_index"]), int(value["slot"])
+    if kind == "rung":
+        return kind, int(value["rung_index"])
+    if kind == "directional_region":
+        return kind, int(value["direction"]), int(value["member_mask"])
+    if kind == "joint_region":
+        return kind, int(value["member_mask"])
+    return (kind,)
+
+
+def _compare_stage_b_causal_order(
+    records: list[dict[str, object]], replay: dict[str, object]
+) -> str:
+    """Compare the stream with the firmware's independently replayed causal order."""
+    expected: list[tuple[object, ...]] = [("plan",)]
+    boundary_keys = {
+        tuple(int(part) for part in str(key).split("/"))
+        for key in dict(replay["structured_boundaries"])
+    }
+    directional_at_boundary: dict[int, list[tuple[object, ...]]] = {}
+    directional_at_end: list[tuple[object, ...]] = []
+    for direction, regions in enumerate(replay["directions"]):
+        for region in regions:
+            token = ("directional_region", direction, int(region["member_mask"]))
+            boundary = region.get("boundary_rung")
+            if boundary is None:
+                directional_at_end.append(token)
+            else:
+                directional_at_boundary.setdefault(int(boundary), []).append(token)
+    joint_at_boundary: dict[int, list[tuple[object, ...]]] = {}
+    joint_at_end: list[tuple[object, ...]] = []
+    for region in replay["joint_regions"]:
+        token = ("joint_region", int(region["member_mask"]))
+        if region["closure"] == "end_of_ladder":
+            joint_at_end.append(token)
+        else:
+            joint_at_boundary.setdefault(int(region["last_rung"]) + 1, []).append(token)
+
+    reported_rungs = {
+        int(value["rung_index"]) for value in records if value["record_kind"] == "rung"
+    }
+    observation_slots = {
+        (int(value["rung_index"]), int(value["slot"]))
+        for value in records
+        if value["record_kind"] == "observation"
+    }
+    rung_indexes = sorted(reported_rungs | {rung for rung, _slot in observation_slots})
+    for rung_index in rung_indexes:
+        for slot in range(4):
+            if (rung_index, slot) not in observation_slots:
+                continue
+            expected.append(("observation", rung_index, slot))
+            if (rung_index, slot) in boundary_keys:
+                expected.append(("structured_boundary", rung_index, slot))
+        expected.extend(directional_at_boundary.get(rung_index, ()))
+        expected.extend(joint_at_boundary.get(rung_index, ()))
+        if rung_index in reported_rungs:
+            expected.append(("rung", rung_index))
+    expected.extend(directional_at_end)
+    expected.extend(joint_at_end)
+    if replay["nomination"]:
+        expected.append(("handoff",))
+    if any(value["record_kind"] == "reproduction" for value in records):
+        expected.append(("reproduction",))
+    expected.append(("stage_b_terminal",))
+
+    observed = [_stage_b_record_identity(value) for value in records]
+    if observed == expected:
+        return ""
+    return f"Stage B causal order differs: firmware={observed} offline={expected}"
+
+
+def _stage_b_candidate_from_terminal(
+    audit: dict[str, object], *, plan_digest: int
+) -> dict[str, object]:
+    terminal = audit["terminal"]
+    return {
+        "plan_digest": plan_digest,
+        "nominated_p": int(terminal["nominated_p"]),
+        "memberships": list(terminal["selected_memberships"]),
+        "intervals": [list(value) for value in terminal["selected_intervals"]],
+    }
+
+
+def audit_stage_b_reproduction_pair(
+    previous: dict[str, object], current: dict[str, object]
+) -> dict[str, object]:
+    """Verify a current reproduction record against its prior capture."""
+    mismatches: list[str] = []
+    reproduction = current.get("reproduction")
+    if not isinstance(reproduction, dict):
+        return {"matches_firmware": False, "mismatches": ["current capture lacks reproduction"]}
+    previous_plan = int(previous["plan_identity"])
+    current_plan = int(current["plan_identity"])
+    previous_candidate = _stage_b_candidate_from_terminal(previous, plan_digest=previous_plan)
+    current_candidate = _stage_b_candidate_from_terminal(current, plan_digest=current_plan)
+    reported_previous_digest = int(reproduction["previous_digest_low"]) | (
+        int(reproduction["previous_digest_high"]) << 32
+    )
+    reported_current_digest = int(reproduction["current_digest_low"]) | (
+        int(reproduction["current_digest_high"]) << 32
+    )
+    if reported_previous_digest != int(previous["reported_digest"]):
+        mismatches.append("reproduction previous digest differs from prior terminal")
+    if reported_current_digest != int(current["pre_reproduction_digest"]):
+        mismatches.append("reproduction current digest differs from current prefix")
+    for name, expected, reported in (
+        (
+            "previous nomination",
+            previous_candidate["nominated_p"],
+            reproduction["previous_nominated_p"],
+        ),
+        (
+            "current nomination",
+            current_candidate["nominated_p"],
+            reproduction["current_nominated_p"],
+        ),
+        (
+            "previous memberships",
+            previous_candidate["memberships"],
+            reproduction["previous_memberships"],
+        ),
+        (
+            "current memberships",
+            current_candidate["memberships"],
+            reproduction["current_memberships"],
+        ),
+        (
+            "previous intervals",
+            previous_candidate["intervals"],
+            reproduction["previous_intervals"],
+        ),
+        (
+            "current intervals",
+            current_candidate["intervals"],
+            reproduction["current_intervals"],
+        ),
+    ):
+        if reported != expected:
+            mismatches.append(f"reproduction {name} differs from capture")
+    comparison = _compare_stage_b_candidates(previous_candidate, current_candidate)
+    expected_outcome = 1 if comparison["outcome"] == "complete" else 2
+    if int(reproduction["outcome"]) != expected_outcome:
+        mismatches.append("reproduction outcome differs from independent comparison")
+    terminal_outcome = int(current["terminal"]["outcome"])
+    expected_terminal_outcome = (
+        STAGE_B_OUTCOME_COMPLETE if expected_outcome == 1 else STAGE_B_OUTCOME_INCONCLUSIVE
+    )
+    if terminal_outcome != expected_terminal_outcome:
+        mismatches.append("terminal outcome differs from reproduction comparison")
+    expected_cause = 0 if expected_outcome == 1 else STAGE_B_CAUSE_REPRODUCTION_MISMATCH
+    if int(current["terminal"].get("cause", 0)) != expected_cause:
+        mismatches.append("terminal cause differs from reproduction comparison")
+    return {"matches_firmware": not mismatches, "mismatches": mismatches}
+
+
 def replay_stage_b_regions(
     raw_observations: list[VelocityObservation],
     evidence_records: list[tuple[bytes, dict[str, object]]],
@@ -1575,7 +1738,10 @@ def _audit_stage_b_velocity_sweep(
         if value["record_kind"] != "stage_b_terminal"
     ]
     digest = FNV1A64_OFFSET
+    pre_reproduction_digest: int | None = None
     for raw, _value in nonterminal:
+        if _value["record_kind"] == "reproduction":
+            pre_reproduction_digest = digest
         for byte in raw:
             digest ^= byte
             digest = (digest * FNV1A64_PRIME) & 0xFFFF_FFFF_FFFF_FFFF
@@ -1591,6 +1757,8 @@ def _audit_stage_b_velocity_sweep(
     sequences = [int(value["evidence_sequence"]) for value in main_records]
     if sequences != list(range(len(sequences))):
         mismatches.append(f"Stage B evidence sequence is not contiguous: {sequences}")
+    if int(terminal["evidence_sequence"]) != len(main_records):
+        mismatches.append("Stage B terminal sequence does not follow the final evidence record")
     previous: dict[str, object] | None = None
     for _raw, value in nonterminal:
         if value["record_kind"] == "structured_boundary":
@@ -1602,6 +1770,11 @@ def _audit_stage_b_velocity_sweep(
             previous = value
 
     replay = replay_stage_b_regions(raw_observations, evidence_records)
+    causal_mismatch = _compare_stage_b_causal_order(
+        [value for _raw, value in evidence_records], replay
+    )
+    if causal_mismatch:
+        mismatches.append(causal_mismatch)
     by_stroke: dict[int, list[VelocityObservation]] = {}
     for observation in raw_observations:
         by_stroke.setdefault(observation.stroke_index, []).append(observation)
@@ -1859,7 +2032,10 @@ def _audit_stage_b_velocity_sweep(
                 tuple(expected_direction),
             )
 
-    expected_memberships = [int(item.get("member_mask", 0)) for item in replay["selected"]]
+    expected_memberships = [
+        *(int(item.get("member_mask", 0)) for item in replay["selected"]),
+        int(replay["nomination"].get("member_mask", 0)),
+    ]
     expected_intervals = [list(item.get("pooled_interval", [0, 0])) for item in replay["selected"]]
     terminal_expected = {
         "model_direction_mask": sum(
@@ -1903,6 +2079,8 @@ def _audit_stage_b_velocity_sweep(
     ]
     if int(terminal["outcome"]) == 1 and len(reproduction) != 1:
         mismatches.append("complete Stage B terminal lacks one reproduction record")
+    if len(reproduction) > 1:
+        mismatches.append(f"expected at most one reproduction record, found {len(reproduction)}")
     if reproduction:
         current = reproduction[-1]
         if int(current["current_nominated_p"]) != int(terminal["nominated_p"]):
@@ -1911,6 +2089,39 @@ def _audit_stage_b_velocity_sweep(
             mismatches.append("reproduction memberships differ from terminal")
         if list(current["current_intervals"]) != list(terminal["selected_intervals"]):
             mismatches.append("reproduction intervals differ from terminal")
+        reported_current_digest = int(current["current_digest_low"]) | (
+            int(current["current_digest_high"]) << 32
+        )
+        if pre_reproduction_digest != reported_current_digest:
+            mismatches.append("reproduction current digest differs from canonical prefix")
+        previous_candidate = {
+            "plan_digest": int(plan["plan_digest_low"]) | (int(plan["plan_digest_high"]) << 32),
+            "nominated_p": int(current["previous_nominated_p"]),
+            "memberships": list(current["previous_memberships"]),
+            "intervals": [list(value) for value in current["previous_intervals"]],
+        }
+        current_candidate = {
+            "plan_digest": previous_candidate["plan_digest"],
+            "nominated_p": int(current["current_nominated_p"]),
+            "memberships": list(current["current_memberships"]),
+            "intervals": [list(value) for value in current["current_intervals"]],
+        }
+        comparison = _compare_stage_b_candidates(previous_candidate, current_candidate)
+        expected_reproduction_outcome = 1 if comparison["outcome"] == "complete" else 2
+        if int(current["outcome"]) != expected_reproduction_outcome:
+            mismatches.append("reproduction outcome differs from independent comparison")
+        expected_terminal = (
+            STAGE_B_OUTCOME_COMPLETE
+            if expected_reproduction_outcome == 1
+            else STAGE_B_OUTCOME_INCONCLUSIVE
+        )
+        if int(terminal["outcome"]) != expected_terminal:
+            mismatches.append("terminal outcome differs from reproduction comparison")
+        expected_cause = (
+            0 if expected_reproduction_outcome == 1 else STAGE_B_CAUSE_REPRODUCTION_MISMATCH
+        )
+        if int(terminal["cause"]) != expected_cause:
+            mismatches.append("terminal cause differs from reproduction comparison")
 
     pid_samples = [
         {
@@ -1920,12 +2131,21 @@ def _audit_stage_b_velocity_sweep(
         for item in raw_observations
         if item.pid_velocity_actual is not None
     ]
+    plan_identity = int(plan["plan_digest_low"]) | (int(plan["plan_digest_high"]) << 32)
+    caveats = (
+        ["reproduction requires the prior capture for cross-run digest verification"]
+        if reproduction
+        else []
+    )
     return {
         "run_sequence": int(plan["run_sequence"]),
         "plan": dict(plan),
         "terminal": dict(terminal),
         "digest": digest,
         "reported_digest": reported_digest,
+        "pre_reproduction_digest": pre_reproduction_digest,
+        "plan_identity": plan_identity,
+        "reproduction": dict(reproduction[-1]) if reproduction else None,
         "observation_count": len(observation_records),
         "rung_count": len(rung_records),
         "stage_b_replay": replay,
@@ -1937,7 +2157,7 @@ def _audit_stage_b_velocity_sweep(
         "complete": True,
         "matches_firmware": not mismatches,
         "mismatches": mismatches,
-        "caveats": [],
+        "caveats": caveats,
     }
 
 

@@ -633,6 +633,81 @@ def test_stage_b_handoff_prefers_full_then_nearest_and_compares_candidates() -> 
     assert _compare_stage_b_candidates(first, changed_plan)["outcome"] == "plan_mismatch"
 
 
+def test_stage_b_causal_order_rejects_reordered_directional_closures() -> None:
+    from foci_trace.velocity_measurement import _compare_stage_b_causal_order
+
+    replay = {
+        "gains": [256],
+        "structured_boundaries": {},
+        "directions": [
+            [{"member_mask": 1, "boundary_rung": None}],
+            [{"member_mask": 1, "boundary_rung": None}],
+        ],
+        "joint_regions": [{"member_mask": 1, "closure": "end_of_ladder", "last_rung": 0}],
+        "nomination": {"member_mask": 1},
+    }
+    records = [
+        {"record_kind": "plan"},
+        *({"record_kind": "observation", "rung_index": 0, "slot": slot} for slot in range(4)),
+        {"record_kind": "rung", "rung_index": 0},
+        {"record_kind": "directional_region", "direction": 1, "member_mask": 1},
+        {"record_kind": "directional_region", "direction": 0, "member_mask": 1},
+        {"record_kind": "joint_region", "member_mask": 1},
+        {"record_kind": "handoff"},
+        {"record_kind": "stage_b_terminal"},
+    ]
+
+    mismatch = _compare_stage_b_causal_order(records, replay)
+
+    assert "causal order" in mismatch
+
+
+def test_stage_b_reproduction_pair_joins_previous_digest_and_candidate() -> None:
+    from foci_trace.velocity_measurement import audit_stage_b_reproduction_pair
+
+    previous = {
+        "terminal": {
+            "selected_memberships": [7, 7, 7],
+            "selected_intervals": [[10, 20], [-20, -10]],
+            "nominated_p": 724,
+        },
+        "reported_digest": 0x1111,
+        "plan_identity": 0x2222,
+    }
+    current = {
+        "terminal": {
+            "selected_memberships": [7, 7, 7],
+            "selected_intervals": [[15, 25], [-25, -15]],
+            "nominated_p": 724,
+            "outcome": 1,
+        },
+        "plan_identity": 0x2222,
+        "pre_reproduction_digest": 0x3333,
+        "reproduction": {
+            "outcome": 1,
+            "previous_nominated_p": 724,
+            "current_nominated_p": 724,
+            "previous_memberships": [7, 7, 7],
+            "current_memberships": [7, 7, 7],
+            "previous_intervals": [[10, 20], [-20, -10]],
+            "current_intervals": [[15, 25], [-25, -15]],
+            "previous_digest_low": 0x1111,
+            "previous_digest_high": 0,
+            "current_digest_low": 0x3333,
+            "current_digest_high": 0,
+        },
+    }
+
+    result = audit_stage_b_reproduction_pair(previous, current)
+
+    assert result == {"matches_firmware": True, "mismatches": []}
+
+    current["reproduction"]["previous_memberships"] = [3, 7, 7]
+    mismatch = audit_stage_b_reproduction_pair(previous, current)
+    assert mismatch["matches_firmware"] is False
+    assert any("previous memberships" in item for item in mismatch["mismatches"])
+
+
 def test_stage_b_audit_accepts_exact_zero_rung_fault_terminal() -> None:
     from foci_trace.velocity_measurement import FNV1A64_OFFSET, FNV1A64_PRIME, audit_velocity_sweep
 
@@ -663,7 +738,7 @@ def test_stage_b_audit_accepts_exact_zero_rung_fault_terminal() -> None:
         "encoder_counts_per_rev": 4_000,
         "f_pwm_hz": 25_000,
         "model_direction_mask": 0,
-        "selected_memberships": [0, 0],
+        "selected_memberships": [0, 0, 0],
         "nominated_p": 0,
         "selected_intervals": [[0, 0], [0, 0]],
         "coverage_mask": 0,
