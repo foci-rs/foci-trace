@@ -1,4 +1,9 @@
-from foci_trace.protocol import Frame, FrameHeader, FRAME_TYPE_CRITICAL
+from foci_trace.protocol import (
+    FRAME_TYPE_CRITICAL,
+    FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
+    Frame,
+    FrameHeader,
+)
 from foci_trace.summary import LiveSummary
 
 
@@ -27,3 +32,41 @@ def test_summary_tracks_gaps_and_error_maxima() -> None:
     assert "pos_err=7" in text
     assert "vel_err=8" in text
     assert "voltage_limited=1" in text
+
+
+def test_summary_tracks_stage_b_regions_nomination_and_terminal() -> None:
+    summary = LiveSummary()
+    payloads = [
+        {"record_kind": "directional_region", "region_kind": 0},
+        {"record_kind": "directional_region", "region_kind": 1},
+        {"record_kind": "handoff", "nominated_p": 1448},
+        {"record_kind": "stage_b_terminal", "outcome": 0},
+    ]
+    for sequence, payload in enumerate(payloads, 1):
+        summary.observe(
+            0,
+            sequence,
+            Frame(
+                header=FrameHeader(
+                    9,
+                    32,
+                    FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
+                    0,
+                    0,
+                    1,
+                    0,
+                    sequence,
+                    sequence,
+                    1,
+                ),
+                payload=payload,
+                raw_payload=b"",
+            ),
+        )
+
+    text = summary.render()
+
+    assert "stage_b_regions=1" in text
+    assert "stage_b_fragments=1" in text
+    assert "stage_b_p=1448" in text
+    assert "stage_b_outcome=0" in text

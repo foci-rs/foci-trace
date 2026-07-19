@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .protocol import FRAME_TYPE_CRITICAL, FRAME_TYPE_EVENT, FRAME_TYPE_STATUS, Frame
+from .protocol import (
+    FRAME_TYPE_CRITICAL,
+    FRAME_TYPE_EVENT,
+    FRAME_TYPE_STATUS,
+    FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
+    Frame,
+)
 
 EVENT_SPI_SAMPLE_DURATION = 11
 
@@ -25,6 +31,10 @@ class DeviceSummary:
     endpoint_pressure: int = 0
     first_spi_cycles: int = 0
     max_spi_cycles: int = 0
+    stage_b_regions: int = 0
+    stage_b_fragments: int = 0
+    stage_b_nominated_p: int = 0
+    stage_b_outcome: int | None = None
 
 
 class LiveSummary:
@@ -64,6 +74,17 @@ class LiveSummary:
         ):
             device.first_spi_cycles = int(frame.payload["args"][0])
             device.max_spi_cycles = int(frame.payload["args"][1])
+        elif frame.header.frame_type == FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE:
+            kind = frame.payload.get("record_kind")
+            if kind == "directional_region":
+                if int(frame.payload["region_kind"]) == 0:
+                    device.stage_b_regions += 1
+                else:
+                    device.stage_b_fragments += 1
+            elif kind == "handoff":
+                device.stage_b_nominated_p = int(frame.payload["nominated_p"])
+            elif kind == "stage_b_terminal":
+                device.stage_b_outcome = int(frame.payload["outcome"])
 
     def render(self) -> str:
         """Render one compact summary line."""
@@ -74,7 +95,9 @@ class LiveSummary:
                 "dev{idx} frames={frames} gaps={gaps} pos_err={pos} vel_err={vel} "
                 "voltage_limited={limited} status=0x{status:08x} spi_errors={spi} "
                 "qhi={qhi} endpoint_pressure={endpoint_pressure} "
-                "first_spi_cycles={first_spi} max_spi_cycles={max_spi}".format(
+                "first_spi_cycles={first_spi} max_spi_cycles={max_spi} "
+                "stage_b_regions={regions} stage_b_fragments={fragments} "
+                "stage_b_p={stage_b_p} stage_b_outcome={stage_b_outcome}".format(
                     idx=device_index,
                     frames=item.frames,
                     gaps=item.gaps,
@@ -87,6 +110,12 @@ class LiveSummary:
                     endpoint_pressure=item.endpoint_pressure,
                     first_spi=item.first_spi_cycles,
                     max_spi=item.max_spi_cycles,
+                    regions=item.stage_b_regions,
+                    fragments=item.stage_b_fragments,
+                    stage_b_p=item.stage_b_nominated_p,
+                    stage_b_outcome=(
+                        "none" if item.stage_b_outcome is None else item.stage_b_outcome
+                    ),
                 )
             )
         return " | ".join(parts)
