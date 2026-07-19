@@ -708,6 +708,7 @@ def _diagnostic_audit(
     max_reconstructed = 0
     max_observed = 0
     peak_violations = 0
+    torque_sample_count = 0
     for observation in observations:
         max_observed = max(max_observed, observation.peak_torque_target_abs or 0)
         if observation.pid_velocity_actual is None:
@@ -716,6 +717,7 @@ def _diagnostic_audit(
         record = observation_records.get((rung_index, slot))
         if record is None:
             continue
+        torque_sample_count += 1
         reconstructed = _ceil_div(
             abs(
                 int(record["velocity_p"])
@@ -726,17 +728,25 @@ def _diagnostic_audit(
         max_reconstructed = max(max_reconstructed, reconstructed)
         if reconstructed > (observation.peak_torque_target_abs or 0) + 1:
             peak_violations += 1
+    pid_encoder = _diagnostic_block_means(observations, "pid_velocity_actual", counts_per_rev)
+    pptm_encoder = _diagnostic_block_means(observations, "actual_velocity_pptm", counts_per_rev)
+    complete = (
+        int(pid_encoder["block_count"]) >= 2
+        and int(pptm_encoder["block_count"]) >= 2
+        and torque_sample_count > 0
+    )
     return {
-        "pid_encoder": _diagnostic_block_means(observations, "pid_velocity_actual", counts_per_rev),
-        "pptm_encoder": _diagnostic_block_means(
-            observations, "actual_velocity_pptm", counts_per_rev
-        ),
+        "complete": complete,
+        "pid_encoder": pid_encoder,
+        "pptm_encoder": pptm_encoder,
         "torque": {
+            "sample_count": torque_sample_count,
             "max_reconstructed_abs": max_reconstructed,
             "max_observed_peak_abs": max_observed,
             "peak_plus_one_violations": peak_violations,
-            "within_observed_peak_plus_one": peak_violations == 0,
-            "below_usable_limit": max_reconstructed < usable_torque_limit
+            "within_observed_peak_plus_one": torque_sample_count > 0 and peak_violations == 0,
+            "below_usable_limit": torque_sample_count > 0
+            and max_reconstructed < usable_torque_limit
             and max_observed < usable_torque_limit,
         },
     }
@@ -1109,6 +1119,14 @@ def audit_velocity_sweep(
         int(terminal["encoder_counts_per_rev"]),
         int(plan["usable_torque_limit"]),
     )
+    if int(plan["rung_count"]) > 0:
+        if not diagnostic_audit["complete"]:
+            mismatches.append("velocity diagnostic evidence is incomplete")
+        torque_audit = diagnostic_audit["torque"]
+        if not torque_audit["within_observed_peak_plus_one"]:
+            mismatches.append("reconstructed torque exceeds observed peak plus one count")
+        if not torque_audit["below_usable_limit"]:
+            mismatches.append("diagnostic torque evidence reaches the usable limit")
     offline_observations: dict[tuple[int, int], dict[str, int]] = {}
     exact_fields = (
         "classification",

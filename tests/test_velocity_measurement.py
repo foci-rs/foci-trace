@@ -23,6 +23,9 @@ def _observation(
     direction: int = 1,
     stroke_index: int = 0,
     target_cpms: int = 1,
+    peak_torque_target_abs: int | None = None,
+    pid_velocity_actual: int | None = None,
+    actual_velocity_pptm: int | None = None,
 ) -> VelocityObservation:
     return VelocityObservation(
         delta_counts=delta_counts,
@@ -30,6 +33,9 @@ def _observation(
         direction=direction,
         stroke_index=stroke_index,
         target_cpms=target_cpms,
+        peak_torque_target_abs=peak_torque_target_abs,
+        pid_velocity_actual=pid_velocity_actual,
+        actual_velocity_pptm=actual_velocity_pptm,
     )
 
 
@@ -256,6 +262,18 @@ def test_diagnostic_audit_compares_block_means_and_torque_reconstruction() -> No
     assert audit["torque"]["max_reconstructed_abs"] == 0
     assert audit["torque"]["within_observed_peak_plus_one"] is True
     assert audit["torque"]["below_usable_limit"] is True
+    assert audit["complete"] is True
+
+
+def test_diagnostic_audit_fails_closed_without_samples() -> None:
+    from foci_trace.velocity_measurement import _diagnostic_audit
+
+    audit = _diagnostic_audit([], {}, 4_000, 2_534)
+
+    assert audit["complete"] is False
+    assert audit["torque"]["sample_count"] == 0
+    assert audit["torque"]["within_observed_peak_plus_one"] is False
+    assert audit["torque"]["below_usable_limit"] is False
 
 
 def test_sweep_confidence_uses_all_two_k_observations() -> None:
@@ -370,6 +388,9 @@ def test_sweep_audit_reconstructs_observations_rung_band_and_terminal() -> None:
                 direction=direction,
                 stroke_index=slot,
                 target_cpms=direction,
+                peak_torque_target_abs=100,
+                pid_velocity_actual=direction * 60 if index == 0 else None,
+                actual_velocity_pptm=direction * 60 if index == 1 else None,
             )
             for index in range(256)
         ]
