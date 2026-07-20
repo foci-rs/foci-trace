@@ -592,6 +592,67 @@ def test_sweep_audit_reconstructs_observations_rung_band_and_terminal() -> None:
     assert report["directions"][0]["eligible_rungs"] == 1
 
 
+def test_stage_b_replay_uses_eight_slots_and_four_k_confidence() -> None:
+    from foci_trace.velocity_measurement import _reconstruct_observation, replay_stage_b_regions
+
+    plan = {
+        "record_kind": "plan",
+        "run_sequence": 10,
+        "evidence_sequence": 0,
+        "rung_count": 1,
+        "observations_per_direction": 4,
+        "planned_velocity_mrev_s": 1_667,
+        "target_velocity_rpm": 100,
+        "p_start": 100,
+        "p_top": 100,
+        "hard_torque_limit": 1_000,
+        "usable_torque_limit": 900,
+    }
+    terminal = {
+        "record_kind": "stage_b_terminal",
+        "run_sequence": 10,
+        "encoder_counts_per_rev": 1_000,
+        "f_pwm_hz": 25_000,
+    }
+    raw_observations = []
+    evidence = [(b"plan", plan)]
+    pattern = (1, 0, 1, 1, 0)
+    for slot in range(8):
+        direction = 1 if slot % 2 == 0 else -1
+        stroke = [
+            _observation(
+                direction * pattern[index % len(pattern)],
+                direction=direction,
+                stroke_index=slot,
+                target_cpms=direction,
+                peak_torque_target_abs=100,
+            )
+            for index in range(256)
+        ]
+        raw_observations.extend(stroke)
+        record = {
+            "record_kind": "observation",
+            "run_sequence": 10,
+            "evidence_sequence": slot + 1,
+            "rung_index": 0,
+            "slot": slot,
+            "velocity_p": 100,
+            "target_velocity_rpm": direction * 100,
+            "flags": int(slot == 0),
+        }
+        record.update(_reconstruct_observation(stroke, record, plan, terminal))
+        evidence.append((bytes([2, slot]), record))
+    evidence.append((b"terminal", terminal))
+
+    replay = replay_stage_b_regions(raw_observations, evidence)
+
+    assert replay["slot_count"] == 8
+    assert replay["directional_rungs"][0][0]["collected_mask"] == 0b1111
+    assert replay["directional_rungs"][1][0]["collected_mask"] == 0b1111
+    assert replay["directional_rungs"][0][0]["operable_count"] == 4
+    assert replay["directional_rungs"][1][0]["operable_count"] == 4
+
+
 def test_rung_disjoint_pair_has_no_reportable_disturbance_interval() -> None:
     from foci_trace.velocity_measurement import _rung_class
 

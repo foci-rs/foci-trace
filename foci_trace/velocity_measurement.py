@@ -1020,6 +1020,7 @@ def _reconstruct_observation(
         classification = 4 + stationarity["exclusion"]
         return {
             "classification": classification,
+            "target_velocity_rpm": target_velocity_rpm,
             "predicted_torque_target_abs": predicted,
             **stationarity,
             # The wire summary retains the exclusion class but has no usable
@@ -1075,6 +1076,7 @@ def _reconstruct_observation(
     return {
         **stationarity,
         "classification": classification,
+        "target_velocity_rpm": target_velocity_rpm,
         "predicted_torque_target_abs": predicted,
         "delta_sign": int(stationarity["selected_delta_counts"] < 0),
         "delta_mantissa": delta_mantissa,
@@ -1786,8 +1788,9 @@ def _compare_stage_b_causal_order(
         if value["record_kind"] == "observation"
     }
     rung_indexes = sorted(reported_rungs | {rung for rung, _slot in observation_slots})
+    slot_count = int(replay.get("slot_count", 4))
     for rung_index in rung_indexes:
-        for slot in range(4):
+        for slot in range(slot_count):
             if (rung_index, slot) not in observation_slots:
                 continue
             expected.append(("observation", rung_index, slot))
@@ -1917,9 +1920,13 @@ def replay_stage_b_regions(
         for _raw, value in evidence_records
         if value["record_kind"] == "observation"
     }
+    observations_per_direction = int(plan["observations_per_direction"])
+    slot_count = 2 * observations_per_direction
+    if observations_per_direction not in (2, 4):
+        raise ValueError("Stage B replay supports two or four observations per direction")
     reconstructed: dict[tuple[int, int], dict[str, int]] = {}
     for key, record in records.items():
-        raw = by_stroke.get(key[0] * 4 + key[1])
+        raw = by_stroke.get(key[0] * slot_count + key[1])
         if not raw:
             continue
         reconstructed[key] = _reconstruct_observation(raw, record, plan, terminal)
@@ -1927,19 +1934,20 @@ def replay_stage_b_regions(
     joint_inputs = []
     gains = []
     for rung_index in range(int(plan["rung_count"])):
-        if any((rung_index, slot) not in reconstructed for slot in range(4)):
+        if any((rung_index, slot) not in reconstructed for slot in range(slot_count)):
             break
         p = int(records[(rung_index, 0)]["velocity_p"])
         gains.append(p)
         operable = []
-        for direction_index, slots in ((0, (0, 2)), (1, (1, 3))):
+        for direction_index in range(2):
+            slots = tuple(
+                direction_index + 2 * index for index in range(observations_per_direction)
+            )
             observations = [reconstructed[(rung_index, slot)] for slot in slots]
-            classification, low, high, _moving = _rung_class(*observations)
-            means = [item.get("settled_rate_mean_q", 0) for item in observations]
-            directional_inputs[direction_index].append(
-                {
-                    "rung_index": rung_index,
-                    "velocity_p": p,
+            if observations_per_direction == 2:
+                classification, low, high, _moving = _rung_class(*observations)
+                means = [item.get("settled_rate_mean_q", 0) for item in observations]
+                analysis: dict[str, object] = {
                     "class": classification,
                     "low": low,
                     "high": high,
@@ -1957,8 +1965,27 @@ def replay_stage_b_regions(
                         for item in observations
                     ],
                 }
+                direction_operable = all(item["classification"] in (0, 2) for item in observations)
+            else:
+                initial_lead_in = any(
+                    int(records[(rung_index, slot)].get("flags", 0)) & 1 for slot in slots
+                )
+                analysis = _analyze_four_observation_direction(
+                    observations,
+                    direction=1 if direction_index == 0 else -1,
+                    p=p,
+                    counts_per_rev=int(terminal["encoder_counts_per_rev"]),
+                    initial_lead_in=initial_lead_in,
+                )
+                direction_operable = bool(int(analysis["directional_flags"]) & 1)
+            directional_inputs[direction_index].append(
+                {
+                    "rung_index": rung_index,
+                    "velocity_p": p,
+                    **analysis,
+                }
             )
-            operable.append(all(item["classification"] in (0, 2) for item in observations))
+            operable.append(direction_operable)
         joint_inputs.append(
             {
                 "rung_index": rung_index,
@@ -2007,11 +2034,12 @@ def replay_stage_b_regions(
     for key, observation in reconstructed.items():
         if not 4 <= int(observation["classification"]) <= 8:
             continue
-        boundary = analyze_structured_boundary(by_stroke.get(key[0] * 4 + key[1], []))
+        boundary = analyze_structured_boundary(by_stroke.get(key[0] * slot_count + key[1], []))
         if boundary is not None:
             structured_boundaries[f"{key[0]}/{key[1]}"] = boundary
     return {
         "directions": directional,
+        "directional_rungs": directional_inputs,
         "joint_regions": joint,
         "nomination": nomination,
         "nominated_p": int(nomination.get("p", 0)),
@@ -2020,6 +2048,7 @@ def replay_stage_b_regions(
         "coverage": [item.get("coverage") for item in selected],
         "gains": gains,
         "structured_boundaries": structured_boundaries,
+        "slot_count": slot_count,
     }
 
 
@@ -2043,6 +2072,8 @@ def _audit_stage_b_velocity_sweep(
             "caveats": ["partial Stage B capture"],
         }
     plan, terminal = plans[0], terminals[0]
+    observations_per_direction = int(plan["observations_per_direction"])
+    slot_count = 2 * observations_per_direction
     nonterminal = [
         (raw, value)
         for raw, value in evidence_records
@@ -2130,7 +2161,7 @@ def _audit_stage_b_velocity_sweep(
         "predicted_torque_target_abs",
     )
     for key, record in sorted(observation_records.items()):
-        raw = by_stroke.get(key[0] * 4 + key[1], [])
+        raw = by_stroke.get(key[0] * slot_count + key[1], [])
         if not raw:
             mismatches.append(f"observation {key[0]}/{key[1]} has no raw samples")
             continue
@@ -2145,7 +2176,7 @@ def _audit_stage_b_velocity_sweep(
     ]
     expected_boundaries: dict[tuple[int, int], dict[str, object]] = {}
     for key in observation_records:
-        raw = by_stroke.get(key[0] * 4 + key[1], [])
+        raw = by_stroke.get(key[0] * slot_count + key[1], [])
         boundary = analyze_structured_boundary(raw)
         if boundary is not None:
             expected_boundaries[key] = boundary
@@ -2178,6 +2209,57 @@ def _audit_stage_b_velocity_sweep(
         if value["record_kind"] == "rung"
     }
     for rung_index, rung in sorted(rung_records.items()):
+        if observations_per_direction == 4:
+            if any(rung_index >= len(items) for items in replay["directional_rungs"]):
+                mismatches.append(f"rung {rung_index} is missing reconstructed observations")
+                continue
+            analyses = [items[rung_index] for items in replay["directional_rungs"]]
+            for prefix, analysis in zip(("forward", "reverse"), analyses, strict=True):
+                expected = {
+                    f"{prefix}_class": analysis["class"],
+                    f"{prefix}_component_count": analysis["component_count"],
+                    f"{prefix}_collected_mask": analysis["collected_mask"],
+                    f"{prefix}_eligible_mask": analysis["eligible_mask"],
+                    f"{prefix}_included_mask": analysis["included_mask"],
+                    f"{prefix}_operable_count": analysis["operable_count"],
+                    f"{prefix}_directional_flags": analysis["directional_flags"],
+                    f"{prefix}_pooled_q16": analysis["pooled_q16"],
+                    f"{prefix}_pooled_low_q16": analysis["pooled_interval"][0],
+                    f"{prefix}_pooled_high_q16": analysis["pooled_interval"][1],
+                    f"{prefix}_variance_floor_observations": analysis[
+                        "variance_floor_observations"
+                    ],
+                }
+                _compare_fields(
+                    mismatches,
+                    f"rung {rung_index} {prefix}",
+                    rung,
+                    expected,
+                    tuple(expected),
+                )
+                if rung[f"{prefix}_components"] != analysis["components"]:
+                    mismatches.append(
+                        f"rung {rung_index} {prefix} components: "
+                        f"firmware={rung[f'{prefix}_components']} "
+                        f"offline={analysis['components']}"
+                    )
+                if rung[f"{prefix}_rate_bounds_q"] != analysis["wire_rate_bounds_q"]:
+                    mismatches.append(
+                        f"rung {rung_index} {prefix} rate bounds: "
+                        f"firmware={rung[f'{prefix}_rate_bounds_q']} "
+                        f"offline={analysis['wire_rate_bounds_q']}"
+                    )
+            expected_flags = (
+                (int(analyses[0]["directional_flags"]) & 1)
+                | ((int(analyses[1]["directional_flags"]) & 1) << 1)
+                | ((int(analyses[0]["directional_flags"]) & 2) << 1)
+                | ((int(analyses[1]["directional_flags"]) & 2) << 2)
+            )
+            if int(rung["flags"]) != expected_flags:
+                mismatches.append(
+                    f"rung {rung_index} flags: firmware={rung['flags']} offline={expected_flags}"
+                )
+            continue
         pairs = []
         for slots in ((0, 2), (1, 3)):
             if any((rung_index, slot) not in reconstructed for slot in slots):

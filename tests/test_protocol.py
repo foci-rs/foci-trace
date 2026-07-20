@@ -482,6 +482,71 @@ def test_decodes_compact_stage_b_rung_from_hardware_capture() -> None:
     assert frame.payload["flags"] == 4
 
 
+def test_decodes_canonical_four_observation_rung() -> None:
+    def direction(
+        classification: int,
+        components: list[tuple[int, int]],
+        masks: tuple[int, int, int],
+        operable_count: int,
+        flags: int,
+        pooled: tuple[int, int, int, int],
+        rates: tuple[int, int, int, int],
+        rate_shift: int,
+    ) -> bytes:
+        padded = [*components, *([(0, 0)] * (2 - len(components)))]
+        result = struct.pack(
+            "<BBBBBBB",
+            classification,
+            len(components),
+            *masks,
+            operable_count,
+            flags,
+        )
+        result += b"".join(struct.pack("<ii", *component) for component in padded)
+        result += struct.pack("<iiiB", *pooled)
+        result += b"".join(struct.pack("<iB", rate, rate_shift) for rate in rates)
+        return result
+
+    payload = struct.pack("<BIHBH", 3, 7, 12, 4, 724)
+    payload += direction(
+        0,
+        [(100, 120)],
+        (0b1111, 0b1111, 0b0111),
+        4,
+        0b11,
+        (110, 104, 116, 1),
+        (50, 60, 40, 70),
+        2,
+    )
+    payload += direction(
+        1,
+        [(-140, -130), (-110, -100)],
+        (0b1111, 0b1111, 0),
+        3,
+        0b01,
+        (0, 0, 0, 0),
+        (-70, -40, -80, -30),
+        1,
+    )
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert len(payload) == 122
+    assert frame.payload["record_kind"] == "rung"
+    assert frame.payload["forward_class"] == 0
+    assert frame.payload["forward_components"] == [[100, 120]]
+    assert frame.payload["forward_included_mask"] == 0b0111
+    assert frame.payload["forward_pooled_q16"] == 110
+    assert frame.payload["forward_rate_bounds_q"] == [200, 240, 160, 280]
+    assert frame.payload["reverse_class"] == 1
+    assert frame.payload["reverse_components"] == [[-140, -130], [-110, -100]]
+    assert frame.payload["reverse_operable_count"] == 3
+    assert frame.payload["flags"] == 0b0111
+
+    with pytest.raises(DecodeError):
+        decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload[:-1]) + payload[:-1])
+
+
 def test_decodes_canonical_velocity_sweep_terminal_digest() -> None:
     direction = struct.pack("<BHHHiiiiiBHB", 0, 8, 8, 32, 10, 20, 15, 12, 18, 3, 6, 0x0D)
     reverse = struct.pack("<BHHHiiiiiBHB", 1, 12, 12, 48, -20, -10, -15, -18, -12, 3, 6, 0x0D)

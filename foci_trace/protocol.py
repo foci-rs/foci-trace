@@ -492,6 +492,66 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         )
         decoded["record_kind"] = "observation"
     elif kind == 3:
+        if len(payload) == 122:
+            decoded = _take_fields(
+                cursor,
+                (
+                    ("run_sequence", "I"),
+                    ("evidence_sequence", "H"),
+                    ("rung_index", "B"),
+                    ("velocity_p", "H"),
+                ),
+            )
+            directional = []
+            for prefix in ("forward", "reverse"):
+                values = _take_fields(
+                    cursor,
+                    (
+                        ("class", "B"),
+                        ("component_count", "B"),
+                        ("collected_mask", "B"),
+                        ("eligible_mask", "B"),
+                        ("included_mask", "B"),
+                        ("operable_count", "B"),
+                        ("directional_flags", "B"),
+                    ),
+                )
+                components = [
+                    [cursor.take("i"), cursor.take("i")],
+                    [cursor.take("i"), cursor.take("i")],
+                ]
+                pooled = _take_fields(
+                    cursor,
+                    (
+                        ("pooled_q16", "i"),
+                        ("pooled_low_q16", "i"),
+                        ("pooled_high_q16", "i"),
+                        ("variance_floor_observations", "B"),
+                    ),
+                )
+                rate_bounds = []
+                for _ in range(4):
+                    mantissa = cursor.take("i")
+                    shift = cursor.take("B")
+                    rate_bounds.append(mantissa << shift)
+                count = values["component_count"]
+                if count > 2:
+                    raise DecodeError("velocity-sweep rung has too many components")
+                values["components"] = components[:count]
+                values["rate_bounds_q"] = rate_bounds
+                values.update(pooled)
+                directional.append(values)
+                for name, value in values.items():
+                    decoded[f"{prefix}_{name}"] = value
+            decoded["flags"] = (
+                (directional[0]["directional_flags"] & 1)
+                | ((directional[1]["directional_flags"] & 1) << 1)
+                | ((directional[0]["directional_flags"] & 2) << 1)
+                | ((directional[1]["directional_flags"] & 2) << 2)
+            )
+            decoded["record_kind"] = "rung"
+            cursor.finish()
+            return decoded
         compact_stage_b_rung = len(payload) == 33
         fields = [
             ("run_sequence", "I"),
