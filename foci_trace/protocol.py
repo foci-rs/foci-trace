@@ -811,6 +811,100 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             )
         )
         decoded["record_kind"] = "reproduction"
+        decoded["schema_revision"] = 2
+    elif kind == 10:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("outcome", "B"),
+                ("reason_mask", "B"),
+                ("previous_nominated_p", "H"),
+                ("current_nominated_p", "H"),
+                ("final_p", "H"),
+                ("reduced_margin", "B"),
+                ("schema_revision", "H"),
+            ),
+        )
+        decoded["record_kind"] = "reproduction_v3_header"
+    elif 11 <= kind <= 13:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("object", "B"),
+                ("previous", "I"),
+                ("current", "I"),
+                ("core", "I"),
+                ("previous_only", "I"),
+                ("current_only", "I"),
+                ("low_delta", "b"),
+                ("high_delta", "b"),
+            ),
+        )
+        decoded["record_kind"] = "reproduction_v3_membership"
+    elif 14 <= kind <= 15:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("direction", "B"),
+                ("previous_low", "i"),
+                ("previous_high", "i"),
+                ("current_low", "i"),
+                ("current_high", "i"),
+                ("overlap_low", "i"),
+                ("overlap_high", "i"),
+            ),
+        )
+        decoded["record_kind"] = "reproduction_v3_pooled"
+    elif 16 <= kind <= 17:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("direction", "B"),
+                ("previous_low", "i"),
+                ("previous_high", "i"),
+                ("current_low", "i"),
+                ("current_high", "i"),
+                ("conservative_low", "i"),
+                ("conservative_high", "i"),
+                ("nonempty", "B"),
+            ),
+        )
+        decoded["record_kind"] = "reproduction_v3_common"
+    elif 18 <= kind <= 19:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("direction", "B"),
+                ("coverage", "B"),
+                ("signed_rung_distance", "i"),
+                ("gain_ratio_num", "H"),
+                ("gain_ratio_den", "H"),
+            ),
+        )
+        decoded["record_kind"] = "reproduction_v3_coverage"
+    elif kind == 20:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("previous_digest_low", "I"),
+                ("previous_digest_high", "I"),
+                ("current_digest_low", "I"),
+                ("current_digest_high", "I"),
+            ),
+        )
+        decoded["record_kind"] = "reproduction_v3_digest"
     else:
         raise DecodeError(f"unknown velocity-sweep evidence kind {kind}")
     cursor.finish()

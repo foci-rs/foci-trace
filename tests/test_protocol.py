@@ -482,6 +482,48 @@ def test_decodes_compact_stage_b_rung_from_hardware_capture() -> None:
     assert frame.payload["flags"] == 4
 
 
+def test_decodes_stage_b_reproduction_v3_fragments() -> None:
+    fragments = [
+        (
+            struct.pack("<BIHBBHHHBH", 10, 7, 33, 1, 0, 1448, 1024, 1448, 0, 3),
+            "reproduction_v3_header",
+        ),
+        (
+            struct.pack("<BIHBIIIIIbb", 11, 7, 33, 0, 0x38, 0x3C, 0x38, 0, 4, -1, 0),
+            "reproduction_v3_membership",
+        ),
+        (
+            struct.pack("<BIHBiiiiii", 14, 7, 33, 0, 100, 120, 105, 125, 105, 120),
+            "reproduction_v3_pooled",
+        ),
+        (
+            struct.pack("<BIHBiiiiiiB", 16, 7, 33, 0, 104, 115, 108, 118, 108, 115, 1),
+            "reproduction_v3_common",
+        ),
+        (
+            struct.pack("<BIHBBiHH", 18, 7, 33, 0, 1, -2, 1448, 724),
+            "reproduction_v3_coverage",
+        ),
+        (
+            struct.pack("<BIHIIII", 20, 7, 33, 1, 2, 3, 4),
+            "reproduction_v3_digest",
+        ),
+    ]
+
+    decoded = [
+        decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload).payload
+        for payload, _kind in fragments
+    ]
+
+    assert [value["record_kind"] for value in decoded] == [kind for _payload, kind in fragments]
+    assert decoded[0]["schema_revision"] == 3
+    assert decoded[1]["low_delta"] == -1
+    assert decoded[2]["overlap_high"] == 120
+    assert decoded[3]["nonempty"] == 1
+    assert decoded[4]["signed_rung_distance"] == -2
+    assert decoded[5]["current_digest_high"] == 4
+
+
 def test_decodes_canonical_four_observation_rung() -> None:
     def direction(
         classification: int,
