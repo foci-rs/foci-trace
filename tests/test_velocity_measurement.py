@@ -513,6 +513,23 @@ def test_sweep_audit_reconstructs_observations_rung_band_and_terminal() -> None:
     assert report["directions"][0]["eligible_rungs"] == 1
 
 
+def test_rung_disjoint_pair_has_no_reportable_disturbance_interval() -> None:
+    from foci_trace.velocity_measurement import _rung_class
+
+    first = {
+        "classification": 0,
+        "disturbance_low_q16": 10,
+        "disturbance_high_q16": 20,
+    }
+    second = {
+        "classification": 0,
+        "disturbance_low_q16": 30,
+        "disturbance_high_q16": 40,
+    }
+
+    assert _rung_class(first, second) == (4, 0, 0, True)
+
+
 @pytest.mark.parametrize(
     ("record_kind", "expected_caveat"), [("plan", "missing terminal"), ("terminal", "missing plan")]
 )

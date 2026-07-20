@@ -1041,7 +1041,7 @@ def _rung_class(first: dict[str, int], second: dict[str, int]) -> tuple[int, int
     low = max(first.get("disturbance_low_q16", 0), second.get("disturbance_low_q16", 0))
     high = min(first.get("disturbance_high_q16", 0), second.get("disturbance_high_q16", 0))
     if first_class == second_class == 0:
-        return (0 if low <= high else 4), low, high, reproduced
+        return (0, low, high, reproduced) if low <= high else (4, 0, 0, reproduced)
     if first_class == second_class == 1:
         return 1, 0, 0, reproduced
     if first_class == second_class == 2:
