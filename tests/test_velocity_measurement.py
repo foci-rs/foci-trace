@@ -327,10 +327,89 @@ def test_diagnostic_audit_fails_closed_without_samples() -> None:
     assert audit["torque"]["below_usable_limit"] is False
 
 
-def test_sweep_confidence_uses_all_two_k_observations() -> None:
+def test_sweep_confidence_supports_the_full_four_k_family() -> None:
     from foci_trace.velocity_measurement import _confidence_multiplier
 
-    assert _confidence_multiplier(40) == pytest.approx(3.962993)
+    anchors = {64: 4.194683, 92: 4.374985, 128: 4.540345}
+    for family_size, expected in anchors.items():
+        assert _confidence_multiplier(family_size) == pytest.approx(expected)
+    values = [_confidence_multiplier(index) for index in range(1, 129)]
+    assert values == sorted(values)
+    with pytest.raises(ValueError, match="outside"):
+        _confidence_multiplier(0)
+    with pytest.raises(ValueError, match="outside"):
+        _confidence_multiplier(129)
+
+
+def test_depth_three_consensus_matches_closed_interval_fixtures() -> None:
+    from foci_trace.velocity_measurement import _depth_three_consensus
+
+    assert _depth_three_consensus([(0, 10), (2, 9), (3, 8), (4, 7)]).components == ((3, 8),)
+    assert _depth_three_consensus([(0, 10), (2, 9), (3, 8), (20, 30)]).included_mask == 0b0111
+    assert _depth_three_consensus([(0, 4), (0, 10), (0, 10), (6, 10)]).classification == 1
+    assert _depth_three_consensus([(0, 5), (5, 10), (0, 5), (5, 10)]).components == ((5, 5),)
+    assert (
+        _depth_three_consensus(
+            [(0, 10), (2, 9), (3, 8), None], collected_mask=0b0111
+        ).classification
+        == 3
+    )
+
+
+def test_consensus_rate_inversion_is_outward_and_sign_correct() -> None:
+    from foci_trace.velocity_measurement import (
+        _disturbance_point_cell,
+        _rate_bounds_from_disturbance_cell,
+    )
+
+    assert _rate_bounds_from_disturbance_cell(176, 4_000, 256, (0, 0)) == (
+        11_733_333,
+        11_733_334,
+    )
+    assert _rate_bounds_from_disturbance_cell(176, 4_000, 256, (65_536, 65_536)) == (
+        11_666_666,
+        11_666_667,
+    )
+    assert _rate_bounds_from_disturbance_cell(-176, 4_000, 256, (-65_536, -65_536)) == (
+        -11_666_667,
+        -11_666_666,
+    )
+    assert _disturbance_point_cell(8) == (8, 9)
+    assert _disturbance_point_cell(-8) == (-9, -8)
+    assert _disturbance_point_cell(0) == (-1, 1)
+
+
+def test_four_observation_direction_pools_only_unique_consensus_members() -> None:
+    from foci_trace.velocity_measurement import _analyze_four_observation_direction
+
+    observations = [
+        {
+            "classification": 0,
+            "target_velocity_rpm": 176,
+            "disturbance_q16": point,
+            "disturbance_low_q16": low,
+            "disturbance_high_q16": high,
+            "disturbance_variance_q2": 4,
+        }
+        for point, low, high in ((4, 0, 10), (5, 2, 9), (6, 3, 8), (25, 20, 30))
+    ]
+
+    result = _analyze_four_observation_direction(
+        observations,
+        direction=1,
+        p=256,
+        counts_per_rev=4_000,
+        initial_lead_in=True,
+    )
+
+    assert result["class"] == 0
+    assert result["components"] == [[3, 8]]
+    assert result["included_mask"] == 0b0111
+    assert result["operable_count"] == 4
+    assert result["directional_flags"] == 0b11
+    assert result["pooled_q16"] == 5
+    assert result["pooled_interval"] == [1, 9]
+    assert len(result["wire_rate_bounds_q"]) == 4
 
 
 def test_correlated_single_comparison_does_not_form_a_plateau() -> None:

@@ -78,6 +78,70 @@ CONFIDENCE_MULTIPLIERS_95_DF15 = (
     4.178972,
     4.186888,
     4.194683,
+    4.202358,
+    4.209919,
+    4.217368,
+    4.224709,
+    4.231945,
+    4.239079,
+    4.246114,
+    4.253052,
+    4.259896,
+    4.266650,
+    4.273314,
+    4.279892,
+    4.286386,
+    4.292798,
+    4.299129,
+    4.305383,
+    4.311561,
+    4.317665,
+    4.323696,
+    4.329656,
+    4.335548,
+    4.341372,
+    4.347130,
+    4.352824,
+    4.358455,
+    4.364025,
+    4.369534,
+    4.374985,
+    4.380377,
+    4.385714,
+    4.390995,
+    4.396222,
+    4.401397,
+    4.406519,
+    4.411591,
+    4.416613,
+    4.421586,
+    4.426511,
+    4.431389,
+    4.436222,
+    4.441009,
+    4.445752,
+    4.450451,
+    4.455108,
+    4.459722,
+    4.464296,
+    4.468829,
+    4.473323,
+    4.477778,
+    4.482194,
+    4.486573,
+    4.490914,
+    4.495220,
+    4.499489,
+    4.503724,
+    4.507924,
+    4.512090,
+    4.516222,
+    4.520322,
+    4.524389,
+    4.528424,
+    4.532429,
+    4.536402,
+    4.540345,
 )
 
 
@@ -115,6 +179,17 @@ class VelocityObservation:
     peak_torque_target_abs: int | None = None
     pid_velocity_actual: int | None = None
     actual_velocity_pptm: int | None = None
+
+
+@dataclass(frozen=True)
+class DirectionalConsensus:
+    """Exact depth-three consensus over four closed intervals."""
+
+    classification: int
+    components: tuple[tuple[int, int], ...]
+    collected_mask: int
+    eligible_mask: int
+    included_mask: int
 
 
 @dataclass(frozen=True)
@@ -1034,6 +1109,66 @@ def _reconstruct_observation(
     }
 
 
+def _depth_three_consensus(
+    intervals: list[tuple[int, int] | None],
+    *,
+    collected_mask: int = 0b1111,
+    eligible_mask: int | None = None,
+) -> DirectionalConsensus:
+    """Return the merged depth-three set for four closed intervals."""
+    if len(intervals) != 4:
+        raise ValueError("depth-three consensus requires four observations")
+    if any(mask & ~0x0F for mask in (collected_mask, eligible_mask or 0)):
+        raise ValueError("consensus mask exceeds four observations")
+    if eligible_mask is None:
+        eligible_mask = sum(
+            1 << index
+            for index, interval in enumerate(intervals)
+            if collected_mask & (1 << index) and interval is not None
+        )
+    if eligible_mask & ~collected_mask:
+        raise ValueError("eligible mask is not a subset of collected mask")
+    if collected_mask != 0b1111:
+        return DirectionalConsensus(3, (), collected_mask, eligible_mask, 0)
+
+    intersections = []
+    for triple in (0b0111, 0b1011, 0b1101, 0b1110):
+        if triple & eligible_mask != triple:
+            continue
+        selected = [intervals[index] for index in range(4) if triple & (1 << index)]
+        if any(interval is None for interval in selected):
+            continue
+        low = max(interval[0] for interval in selected if interval is not None)
+        high = min(interval[1] for interval in selected if interval is not None)
+        if low <= high:
+            intersections.append((low, high))
+
+    components: list[tuple[int, int]] = []
+    for low, high in sorted(intersections):
+        if components and low <= components[-1][1]:
+            components[-1] = (components[-1][0], max(components[-1][1], high))
+        else:
+            components.append((low, high))
+    if len(components) > 2:
+        raise AssertionError("four depth-three intervals yield at most two components")
+    if len(components) == 1:
+        low, high = components[0]
+        included_mask = sum(
+            1 << index
+            for index, interval in enumerate(intervals)
+            if eligible_mask & (1 << index)
+            and interval is not None
+            and interval[0] <= high
+            and low <= interval[1]
+        )
+        return DirectionalConsensus(
+            0, tuple(components), collected_mask, eligible_mask, included_mask
+        )
+    if len(components) == 2:
+        return DirectionalConsensus(1, tuple(components), collected_mask, eligible_mask, 0)
+    return DirectionalConsensus(2, (), collected_mask, eligible_mask, 0)
+
+
 def _rung_class(first: dict[str, int], second: dict[str, int]) -> tuple[int, int, int, bool]:
     first_class, second_class = first["classification"], second["classification"]
     moving_classes = {0, 2, 3}
@@ -1184,8 +1319,38 @@ def _pool_region_observations(observations: list[dict[str, int]]) -> dict[str, o
     }
 
 
-def _compact_signed_rate(value: int, *, upper: bool) -> int:
-    """Mirror firmware's conservative i16 rate compaction and decode."""
+def _disturbance_point_cell(point: int) -> tuple[int, int]:
+    """Return the Q16.16 cell represented by one truncated disturbance point."""
+    if point > 0:
+        return point, point + 1
+    if point < 0:
+        return point - 1, point
+    return -1, 1
+
+
+def _rate_bounds_from_disturbance_cell(
+    target_rpm: int,
+    counts_per_rev: int,
+    p_raw: int,
+    disturbance_cell_q16: tuple[int, int],
+) -> tuple[int, int]:
+    """Invert one disturbance cell into outward-rounded settled-rate bounds."""
+    if counts_per_rev <= 0 or p_raw <= 0 or disturbance_cell_q16[0] > disturbance_cell_q16[1]:
+        raise ValueError("invalid disturbance-cell rate inversion")
+    target_term = target_rpm * counts_per_rev * 1_000 * p_raw * 65_536
+    denominator = p_raw * 65_536 * 60
+
+    def numerator(disturbance: int) -> int:
+        return target_term - disturbance * 256 * counts_per_rev * 1_000
+
+    return (
+        _floor_div(numerator(disturbance_cell_q16[1]), denominator),
+        _ceil_div(numerator(disturbance_cell_q16[0]), denominator),
+    )
+
+
+def _compact_signed_rate_parts(value: int, *, upper: bool) -> tuple[int, int]:
+    """Encode one signed rate as the firmware's outward-rounded compact pair."""
     for shift in range(49):
         divisor = 1 << shift
         quotient = _trunc_div(value, divisor)
@@ -1195,8 +1360,112 @@ def _compact_signed_rate(value: int, *, upper: bool) -> int:
         elif not upper and value < 0 and remainder:
             quotient -= 1
         if -(1 << 15) <= quotient < (1 << 15):
-            return quotient << shift
+            return quotient, shift
     raise ValueError("signed rate does not fit the firmware compact domain")
+
+
+def _compact_signed_rate(value: int, *, upper: bool) -> int:
+    """Mirror firmware's conservative i16 rate compaction and decode."""
+    mantissa, shift = _compact_signed_rate_parts(value, upper=upper)
+    return mantissa << shift
+
+
+def _common_wire_rate_bounds(values: list[int]) -> list[int]:
+    """Normalize four compact directional rates to their shared wire shift."""
+    encoded = [
+        _compact_signed_rate_parts(value, upper=index in (1, 3))
+        for index, value in enumerate(values)
+    ]
+    shift = max(item[1] for item in encoded)
+    divisor = 1 << shift
+    result = []
+    for index, (mantissa, original_shift) in enumerate(encoded):
+        value = mantissa << original_shift
+        quotient = _trunc_div(value, divisor)
+        remainder = value - quotient * divisor
+        if index in (0, 2) and value < 0 and remainder:
+            quotient -= 1
+        elif index in (1, 3) and value > 0 and remainder:
+            quotient += 1
+        result.append(quotient << shift)
+    return result
+
+
+def _analyze_four_observation_direction(
+    observations: list[dict[str, int]],
+    *,
+    direction: int,
+    p: int,
+    counts_per_rev: int,
+    initial_lead_in: bool,
+) -> dict[str, object]:
+    """Derive one n=4 directional consensus without consuming firmware verdicts."""
+    intervals = [
+        (item["disturbance_low_q16"], item["disturbance_high_q16"])
+        if item["classification"] == 0
+        else None
+        for item in observations
+    ]
+    eligible_mask = sum(
+        1 << index for index, item in enumerate(observations) if item["classification"] == 0
+    )
+    consensus = _depth_three_consensus(intervals, eligible_mask=eligible_mask)
+    operable_count = sum(item["classification"] in (0, 2) for item in observations)
+    flags = int(operable_count >= 3) | (int(initial_lead_in) << 1)
+    included = [
+        item for index, item in enumerate(observations) if consensus.included_mask & (1 << index)
+    ]
+    pooled = _pool_region_observations(included)
+    rate_bounds = [0, 0, 0, 0]
+    if included:
+        signed_target = abs(int(included[0]["target_velocity_rpm"])) * direction
+        mean_bounds = [
+            _rate_bounds_from_disturbance_cell(
+                signed_target,
+                counts_per_rev,
+                p,
+                _disturbance_point_cell(item["disturbance_q16"]),
+            )
+            for item in included
+        ]
+        confidence_bounds = [
+            _rate_bounds_from_disturbance_cell(
+                signed_target,
+                counts_per_rev,
+                p,
+                (item["disturbance_low_q16"], item["disturbance_high_q16"]),
+            )
+            for item in included
+        ]
+        exact = [
+            min(bounds[0] for bounds in mean_bounds),
+            max(bounds[1] for bounds in mean_bounds),
+            min(bounds[0] for bounds in confidence_bounds),
+            max(bounds[1] for bounds in confidence_bounds),
+        ]
+        rate_bounds = [
+            _compact_signed_rate(value, upper=index in (1, 3)) for index, value in enumerate(exact)
+        ]
+    component = consensus.components[0] if consensus.classification == 0 else (0, 0)
+    return {
+        "class": consensus.classification,
+        "low": component[0],
+        "high": component[1],
+        "components": [list(item) for item in consensus.components],
+        "component_count": len(consensus.components),
+        "collected_mask": consensus.collected_mask,
+        "eligible_mask": consensus.eligible_mask,
+        "included_mask": consensus.included_mask,
+        "operable_count": operable_count,
+        "directional_flags": flags,
+        "observations": included,
+        "rate_means": rate_bounds[:2],
+        "rate_lows": rate_bounds[2:3],
+        "rate_highs": rate_bounds[3:4],
+        "rate_bounds_q": rate_bounds,
+        "wire_rate_bounds_q": _common_wire_rate_bounds(rate_bounds),
+        **pooled,
+    }
 
 
 def _close_directional_region(
