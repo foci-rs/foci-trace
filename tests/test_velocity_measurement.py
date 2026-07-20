@@ -783,7 +783,7 @@ def test_stage_b_segments_multiple_regions_and_joint_nomination_ties() -> None:
 
 def test_stage_b_handoff_prefers_full_then_nearest_and_compares_candidates() -> None:
     from foci_trace.velocity_measurement import (
-        _compare_stage_b_candidates,
+        _compare_stage_b_candidates_schema2,
         _select_directional_region,
     )
 
@@ -808,13 +808,238 @@ def test_stage_b_handoff_prefers_full_then_nearest_and_compares_candidates() -> 
         "memberships": [0b0011100, 0b0011100],
         "intervals": [[1, 4], [-4, -1]],
     }
-    assert _compare_stage_b_candidates(first, dict(first))["outcome"] == "complete"
+    assert _compare_stage_b_candidates_schema2(first, dict(first))["outcome"] == "complete"
     changed = {**first, "memberships": [0b0111000, 0b0011100]}
-    mismatch = _compare_stage_b_candidates(first, changed)
+    mismatch = _compare_stage_b_candidates_schema2(first, changed)
     assert mismatch["outcome"] == "reproduction_mismatch"
     assert mismatch["replacement"] == changed
     changed_plan = {**first, "plan_digest": 8}
-    assert _compare_stage_b_candidates(first, changed_plan)["outcome"] == "plan_mismatch"
+    assert _compare_stage_b_candidates_schema2(first, changed_plan)["outcome"] == "plan_mismatch"
+
+
+def test_stage_b_core_projection_accepts_shared_membership_and_renominates() -> None:
+    from foci_trace.velocity_measurement import project_stage_b_core_pair
+
+    previous = {
+        "memberships": [0x00380000, 0x00380000, 0x00380000],
+        "nominated_p": 1448,
+        "pooled_intervals": [[100, 120], [-130, -100]],
+        "common_intervals": [[104, 115], [-125, -109]],
+        "p_start": 1,
+        "p_top": 2457,
+        "rung_count": 23,
+    }
+    current = {
+        **previous,
+        "memberships": [0x003C0000, 0x00380000, 0x00380000],
+        "nominated_p": 1024,
+        "pooled_intervals": [[108, 128], [-140, -110]],
+        "common_intervals": [[112, 118], [-120, -105]],
+    }
+
+    projected = project_stage_b_core_pair(previous, current)
+
+    assert projected["outcome"] == "complete"
+    assert projected["reason_mask"] == 0
+    assert projected["core_masks"] == [0x00380000] * 3
+    assert projected["memberships"][0] == {
+        "previous": 0x00380000,
+        "current": 0x003C0000,
+        "core": 0x00380000,
+        "previous_only": 0,
+        "current_only": 0x00040000,
+        "low_delta": -1,
+        "high_delta": 0,
+    }
+    assert projected["final_p"] == 1448
+    assert projected["coverage"] == [
+        {"coverage": "full", "signed_rung_distance": 0, "gain_ratio": [1, 1]},
+        {"coverage": "full", "signed_rung_distance": 0, "gain_ratio": [1, 1]},
+    ]
+    assert projected["pooled"][0]["overlap"] == [108, 120]
+    assert projected["firmware_conservative_common"][0] == [112, 115]
+
+
+def test_stage_b_core_projection_reports_all_mismatch_reasons() -> None:
+    from foci_trace.velocity_measurement import project_stage_b_core_pair
+
+    previous = {
+        "memberships": [0b00111, 0b11100, 0b00001],
+        "nominated_p": 4,
+        "pooled_intervals": [[0, 1], [10, 11]],
+        "common_intervals": [[0, 2], [10, 12]],
+        "p_start": 2,
+        "p_top": 32,
+        "rung_count": 5,
+    }
+    current = {
+        **previous,
+        "memberships": [0b11100, 0b00111, 0b10000],
+        "pooled_intervals": [[2, 3], [12, 13]],
+        "common_intervals": [[3, 4], [13, 14]],
+    }
+
+    projected = project_stage_b_core_pair(previous, current)
+
+    assert projected["outcome"] == "reproduction_mismatch"
+    assert projected["reason_mask"] == 0b1_1111
+    assert projected["final_p"] == 0
+
+
+def test_stage_b_core_projection_preserves_reduced_and_transferred_coverage() -> None:
+    from foci_trace.velocity_measurement import project_stage_b_core_pair
+
+    previous = {
+        "memberships": [0b11100, 0b00111, 0b00010],
+        "nominated_p": 4,
+        "pooled_intervals": [[0, 4], [-4, 0]],
+        "common_intervals": [[1, 3], [-3, -1]],
+        "p_start": 2,
+        "p_top": 32,
+        "rung_count": 5,
+    }
+    current = dict(previous)
+
+    projected = project_stage_b_core_pair(previous, current)
+
+    assert projected["outcome"] == "complete"
+    assert projected["reduced_margin"] is True
+    assert projected["final_p"] == 3
+    assert projected["coverage"][0] == {
+        "coverage": "transferred",
+        "signed_rung_distance": 1,
+        "gain_ratio": [4, 3],
+    }
+    assert projected["coverage"][1]["coverage"] == "full"
+
+
+def test_stage_b_core_projection_derives_exact_core_common_offline() -> None:
+    from foci_trace.velocity_measurement import project_stage_b_core_pair
+
+    previous = {
+        "memberships": [0b1111, 0b1111, 0b1110],
+        "nominated_p": 4,
+        "pooled_intervals": [[100, 120], [-120, -100]],
+        "common_intervals": [[110, 114], [-116, -110]],
+        "per_rung_common_intervals": [
+            {0: [110, 114], 1: [108, 120], 2: [106, 119], 3: [107, 118]},
+            {0: [-116, -110], 1: [-120, -108], 2: [-119, -106], 3: [-118, -107]},
+        ],
+        "p_start": 2,
+        "p_top": 32,
+        "rung_count": 5,
+    }
+    current = {
+        **previous,
+        "memberships": [0b1110, 0b1110, 0b1110],
+        "common_intervals": [[112, 118], [-118, -112]],
+        "per_rung_common_intervals": [
+            {1: [109, 119], 2: [108, 120], 3: [107, 121]},
+            {1: [-119, -109], 2: [-120, -108], 3: [-121, -107]},
+        ],
+    }
+
+    projected = project_stage_b_core_pair(previous, current)
+
+    assert projected["firmware_conservative_common"][0] == [112, 114]
+    assert projected["offline_derived"]["core_restricted_common"][0] == [109, 118]
+    assert projected["offline_derived"]["provenance"] == "per_rung_cross_run"
+
+
+def test_stage_b_core_projection_does_not_gate_on_empty_conservative_common() -> None:
+    from foci_trace.velocity_measurement import project_stage_b_core_pair
+
+    previous = {
+        "memberships": [0b111, 0b111, 0b111],
+        "nominated_p": 3,
+        "pooled_intervals": [[0, 10], [-10, 0]],
+        "common_intervals": [[0, 2], [-10, -8]],
+        "per_rung_common_intervals": [
+            {0: [0, 10], 1: [1, 9], 2: [2, 8]},
+            {0: [-10, 0], 1: [-9, -1], 2: [-8, -2]},
+        ],
+        "p_start": 2,
+        "p_top": 32,
+        "rung_count": 5,
+    }
+    current = {
+        **previous,
+        "common_intervals": [[8, 10], [-2, 0]],
+        "per_rung_common_intervals": [
+            {0: [0, 10], 1: [1, 9], 2: [2, 8]},
+            {0: [-10, 0], 1: [-9, -1], 2: [-8, -2]},
+        ],
+    }
+
+    projected = project_stage_b_core_pair(previous, current)
+
+    assert projected["outcome"] == "complete"
+    assert projected["common"][0]["nonempty"] is False
+    assert projected["common"][1]["nonempty"] is False
+    assert projected["offline_derived"]["core_restricted_common"] == [[2, 8], [-8, -2]]
+
+
+def test_stage_b_reproduction_v3_group_requires_exact_fragment_order() -> None:
+    from foci_trace.velocity_measurement import _assemble_stage_b_reproduction_v3
+
+    header = {
+        "record_kind": "reproduction_v3_header",
+        "run_sequence": 7,
+        "evidence_sequence": 33,
+        "schema_revision": 3,
+        "outcome": 1,
+        "reason_mask": 0,
+        "previous_nominated_p": 1024,
+        "current_nominated_p": 1448,
+        "final_p": 1448,
+        "reduced_margin": 0,
+    }
+    records = [header]
+    for object_index in range(3):
+        records.append(
+            {
+                "record_kind": "reproduction_v3_membership",
+                "run_sequence": 7,
+                "evidence_sequence": 33,
+                "object": object_index,
+                "previous": 7,
+                "current": 7,
+                "core": 7,
+                "previous_only": 0,
+                "current_only": 0,
+                "low_delta": 0,
+                "high_delta": 0,
+            }
+        )
+    for kind in ("pooled", "common", "coverage"):
+        for direction in range(2):
+            records.append(
+                {
+                    "record_kind": f"reproduction_v3_{kind}",
+                    "run_sequence": 7,
+                    "evidence_sequence": 33,
+                    "direction": direction,
+                }
+            )
+    records.append(
+        {
+            "record_kind": "reproduction_v3_digest",
+            "run_sequence": 7,
+            "evidence_sequence": 33,
+            "previous_digest_low": 1,
+            "previous_digest_high": 2,
+            "current_digest_low": 3,
+            "current_digest_high": 4,
+        }
+    )
+
+    assembled = _assemble_stage_b_reproduction_v3(records)
+
+    assert assembled is not None
+    assert assembled["schema_revision"] == 3
+    assert len(assembled["memberships"]) == 3
+    with pytest.raises(ValueError, match="order"):
+        _assemble_stage_b_reproduction_v3([records[0], records[2], records[1], *records[3:]])
 
 
 def test_stage_b_causal_order_rejects_reordered_directional_closures() -> None:
@@ -996,6 +1221,57 @@ def test_stage_b_reproduction_pair_joins_previous_digest_and_candidate() -> None
     mismatch = audit_stage_b_reproduction_pair(previous, current)
     assert mismatch["matches_firmware"] is False
     assert any("previous memberships" in item for item in mismatch["mismatches"])
+
+
+def test_schema2_reproduction_captures_keep_historical_parity() -> None:
+    import json
+    from pathlib import Path
+
+    from foci_trace.velocity_measurement import audit_stage_b_reproduction_pair
+
+    capture_root = (
+        Path(__file__).resolve().parents[4]
+        / "docs/artifacts/trace-captures/2026-07-19-foc-185-multistroke"
+    )
+    pairs = (
+        (
+            "foc-185-stepper-x-candidate-final-20260720-082815.json",
+            "foc-185-stepper-x-reproduction-final-20260720-091324.json",
+        ),
+        (
+            "foc-185-stepper-y-candidate-final-20260720-092043.json",
+            "foc-185-stepper-y-reproduction-final-20260720-092918.json",
+        ),
+    )
+    for candidate_name, reproduction_name in pairs:
+        candidate = json.loads((capture_root / candidate_name).read_text())["sweeps"][0]
+        reproduction = json.loads((capture_root / reproduction_name).read_text())["sweeps"][0]
+        assert candidate["reproduction"] is None
+        assert reproduction["reproduction"]["record_kind"] == "reproduction"
+        assert reproduction["terminal"]["outcome"] == 2
+        assert reproduction["terminal"]["cause"] == 5
+        assert audit_stage_b_reproduction_pair(candidate, reproduction)["matches_firmware"] is True
+
+    for name in (
+        "foc-185-stepper-x-candidate-retained-20260720-002637.json",
+        "foc-185-stepper-x-reproduction-retained-20260720-003204.json",
+    ):
+        retained = json.loads((capture_root / name).read_text())["sweeps"][0]
+        assert retained["reproduction"] is None
+        assert retained["terminal"]["outcome"] == 0
+
+    n2_root = (
+        Path(__file__).resolve().parents[4]
+        / "docs/artifacts/trace-captures/2026-07-19-foc-194-operating-regions"
+    )
+    for name in (
+        "foc-194-stepper-x-gap5ms-candidate-20260719-175704.json",
+        "foc-194-stepper-y-gap5ms-candidate-20260719-182837.json",
+    ):
+        historical = json.loads((n2_root / name).read_text())["sweeps"][0]
+        assert historical["plan"]["observations_per_direction"] == 2
+        assert historical["matches_firmware"] is True
+        assert historical["terminal"]["outcome"] == 2
 
 
 def test_stage_b_audit_accepts_exact_zero_rung_fault_terminal() -> None:

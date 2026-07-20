@@ -2439,6 +2439,25 @@ def format_analysis(
                 matches=str(bool(sweep.get("matches_firmware"))).lower(),
             )
         )
+        pair_audit = sweep.get("reproduction_pair_audit")
+        if isinstance(pair_audit, dict) and isinstance(pair_audit.get("projection"), dict):
+            projection = pair_audit["projection"]
+            memberships = projection.get("memberships", [])
+            stage_b_lines.append(
+                "stage_b_core provenance=firmware_schema3 previous={previous} current={current} "
+                "core={core} final_p={final_p} reason_mask={reason} reduced_margin={margin} "
+                "coverage={coverage} conservative_common={common} offline_derived={derived}".format(
+                    previous=[value["previous"] for value in memberships],
+                    current=[value["current"] for value in memberships],
+                    core=projection.get("core_masks", []),
+                    final_p=projection.get("final_p", 0),
+                    reason=projection.get("reason_mask", 0),
+                    margin=str(bool(projection.get("reduced_margin"))).lower(),
+                    coverage=projection.get("coverage", []),
+                    common=projection.get("firmware_conservative_common", []),
+                    derived=projection.get("offline_derived", "unavailable"),
+                )
+            )
     if stage_b_lines:
         text = "\n".join(part for part in (text, *stage_b_lines) if part)
     if not include_contour:
