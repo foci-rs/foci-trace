@@ -662,6 +662,84 @@ def test_stage_b_causal_order_rejects_reordered_directional_closures() -> None:
     assert "causal order" in mismatch
 
 
+def test_stage_b_causal_order_omits_handoff_for_insufficient_run() -> None:
+    from foci_trace.velocity_measurement import _compare_stage_b_causal_order
+
+    replay = {
+        "gains": [256],
+        "structured_boundaries": {},
+        "directions": [
+            [{"member_mask": 1, "boundary_rung": None}],
+            [{"member_mask": 1, "boundary_rung": None}],
+        ],
+        "joint_regions": [{"member_mask": 1, "closure": "end_of_ladder", "last_rung": 0}],
+        "nomination": {"member_mask": 1},
+        "sufficient": False,
+    }
+    records = [
+        {"record_kind": "plan"},
+        *({"record_kind": "observation", "rung_index": 0, "slot": slot} for slot in range(4)),
+        {"record_kind": "rung", "rung_index": 0},
+        {"record_kind": "directional_region", "direction": 0, "member_mask": 1},
+        {"record_kind": "directional_region", "direction": 1, "member_mask": 1},
+        {"record_kind": "joint_region", "member_mask": 1},
+        {"record_kind": "stage_b_terminal"},
+    ]
+
+    assert _compare_stage_b_causal_order(records, replay) == ""
+
+
+def test_stage_b_partial_current_headroom_closes_active_regions() -> None:
+    from foci_trace.velocity_measurement import (
+        _joint_operable_regions,
+        _segment_directional_regions,
+    )
+
+    directional = [
+        {"rung_index": index, "velocity_p": 256 << index, "class": 0, "low": 1, "high": 2}
+        for index in range(3)
+    ]
+    joint = [
+        {"rung_index": index, "forward_operable": True, "reverse_operable": True}
+        for index in range(3)
+    ]
+
+    regions = _segment_directional_regions(
+        directional,
+        terminal_closure="current_headroom",
+        terminal_boundary_rung=3,
+    )
+    joint_regions = _joint_operable_regions(
+        joint,
+        terminal_closure="current_headroom",
+    )
+
+    assert regions[-1]["closure"] == "current_headroom"
+    assert regions[-1]["boundary_rung"] is None
+    assert regions[-1]["causal_boundary_rung"] == 3
+    assert joint_regions[-1]["closure"] == "current_headroom"
+
+
+def test_stage_b_handoff_requires_valid_models_in_both_directions() -> None:
+    from foci_trace.velocity_measurement import _stage_b_handoff_sufficient
+
+    nomination = {"member_mask": 1}
+    selected = [{}, {"member_mask": 1}]
+    one_sided = [
+        [{"kind": "fragment"}],
+        [{"kind": "valid"}],
+    ]
+
+    assert _stage_b_handoff_sufficient(one_sided, nomination, selected) is False
+
+    bidirectional = [
+        [{"kind": "valid"}],
+        [{"kind": "valid"}],
+    ]
+    selected[0] = {"member_mask": 1}
+    assert _stage_b_handoff_sufficient(bidirectional, nomination, selected) is True
+
+
 def test_stage_b_reproduction_pair_joins_previous_digest_and_candidate() -> None:
     from foci_trace.velocity_measurement import audit_stage_b_reproduction_pair
 

@@ -492,6 +492,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         )
         decoded["record_kind"] = "observation"
     elif kind == 3:
+        compact_stage_b_rung = len(payload) == 33
         fields = [
             ("run_sequence", "I"),
             ("evidence_sequence", "H"),
@@ -502,7 +503,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             ("reverse_low_q16", "i"),
             ("reverse_high_q16", "i"),
         ]
-        if len(payload) != 32:
+        if not compact_stage_b_rung:
             fields.extend(
                 (
                     ("forward_p_low", "H"),
@@ -517,7 +518,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ("reverse_class", "B"),
             )
         )
-        if len(payload) != 32:
+        if not compact_stage_b_rung:
             fields.extend(
                 (
                     ("forward_closure", "B"),
@@ -531,7 +532,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ("reverse_eligible_observations", "H"),
             )
         )
-        if len(payload) != 32:
+        if not compact_stage_b_rung:
             fields[-2:-2] = [
                 ("forward_eligible_rungs", "B"),
                 ("reverse_eligible_rungs", "B"),

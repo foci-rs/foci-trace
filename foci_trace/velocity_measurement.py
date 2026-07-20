@@ -90,6 +90,8 @@ FNV1A64_OFFSET = 0xCBF29CE484222325
 FNV1A64_PRIME = 0x100000001B3
 STAGE_B_OUTCOME_COMPLETE = 1
 STAGE_B_OUTCOME_INCONCLUSIVE = 2
+STAGE_B_CAUSE_NO_DIRECTIONAL_MODEL = 1
+STAGE_B_CAUSE_NO_JOINT_OPERABLE_REGION = 2
 STAGE_B_CAUSE_REPRODUCTION_MISMATCH = 5
 
 
@@ -1227,7 +1229,12 @@ def _close_directional_region(
     return result
 
 
-def _segment_directional_regions(rungs: list[dict[str, object]]) -> list[dict[str, object]]:
+def _segment_directional_regions(
+    rungs: list[dict[str, object]],
+    *,
+    terminal_closure: str = "end_of_ladder",
+    terminal_boundary_rung: int | None = None,
+) -> list[dict[str, object]]:
     """Apply the firmware's causal close-and-reseed directional fold."""
     regions: list[dict[str, object]] = []
     active: dict[str, object] | None = None
@@ -1292,11 +1299,15 @@ def _segment_directional_regions(rungs: list[dict[str, object]]) -> list[dict[st
             "rate_highs": list(rung.get("rate_highs", [])),
         }
     if active is not None:
-        regions.append(_close_directional_region(active, "end_of_ladder", None))
+        closed = _close_directional_region(active, terminal_closure, None)
+        closed["causal_boundary_rung"] = terminal_boundary_rung
+        regions.append(closed)
     return regions
 
 
-def _joint_operable_regions(rungs: list[dict[str, object]]) -> list[dict[str, object]]:
+def _joint_operable_regions(
+    rungs: list[dict[str, object]], *, terminal_closure: str = "end_of_ladder"
+) -> list[dict[str, object]]:
     """Find maximal contiguous rungs operable in both signed directions."""
     regions: list[dict[str, object]] = []
     active: list[int] = []
@@ -1332,7 +1343,7 @@ def _joint_operable_regions(rungs: list[dict[str, object]]) -> list[dict[str, ob
                 "first_rung": active[0],
                 "last_rung": active[-1],
                 "member_count": len(active),
-                "closure": "end_of_ladder",
+                "closure": terminal_closure,
             }
         )
     return regions
@@ -1424,6 +1435,18 @@ def _select_directional_region(
     return selected or {}
 
 
+def _stage_b_handoff_sufficient(
+    directional: list[list[dict[str, object]]],
+    nomination: dict[str, object],
+    selected: list[dict[str, object]],
+) -> bool:
+    """Return whether one run has the complete bidirectional Stage B handoff."""
+    has_directional_models = all(
+        any(region["kind"] == "valid" for region in regions) for regions in directional
+    )
+    return has_directional_models and bool(nomination) and all(bool(item) for item in selected)
+
+
 def _compare_stage_b_candidates(
     previous: dict[str, object], current: dict[str, object]
 ) -> dict[str, object]:
@@ -1471,7 +1494,7 @@ def _compare_stage_b_causal_order(
     for direction, regions in enumerate(replay["directions"]):
         for region in regions:
             token = ("directional_region", direction, int(region["member_mask"]))
-            boundary = region.get("boundary_rung")
+            boundary = region.get("causal_boundary_rung", region.get("boundary_rung"))
             if boundary is None:
                 directional_at_end.append(token)
             else:
@@ -1507,7 +1530,7 @@ def _compare_stage_b_causal_order(
             expected.append(("rung", rung_index))
     expected.extend(directional_at_end)
     expected.extend(joint_at_end)
-    if replay["nomination"]:
+    if replay.get("sufficient", bool(replay["nomination"])):
         expected.append(("handoff",))
     if any(value["record_kind"] == "reproduction" for value in records):
         expected.append(("reproduction",))
@@ -1676,8 +1699,25 @@ def replay_stage_b_regions(
                 "reverse_class": int(directional_inputs[1][-1]["class"]),
             }
         )
-    directional = [_segment_directional_regions(items) for items in directional_inputs]
-    joint = _joint_operable_regions(joint_inputs)
+    completed_rungs = len(joint_inputs)
+    partial_current_rungs = sorted(
+        {
+            rung_index
+            for (rung_index, _slot), observation in reconstructed.items()
+            if rung_index >= completed_rungs and int(observation["classification"]) == 3
+        }
+    )
+    terminal_closure = "current_headroom" if partial_current_rungs else "end_of_ladder"
+    terminal_boundary_rung = partial_current_rungs[0] if partial_current_rungs else None
+    directional = [
+        _segment_directional_regions(
+            items,
+            terminal_closure=terminal_closure,
+            terminal_boundary_rung=terminal_boundary_rung,
+        )
+        for items in directional_inputs
+    ]
+    joint = _joint_operable_regions(joint_inputs, terminal_closure=terminal_closure)
     nomination = _nominate_joint_region(
         joint,
         gains,
@@ -1693,6 +1733,7 @@ def replay_stage_b_regions(
         )
         for regions in directional
     ]
+    sufficient = _stage_b_handoff_sufficient(directional, nomination, selected)
     structured_boundaries = {}
     for key, observation in reconstructed.items():
         if not 4 <= int(observation["classification"]) <= 8:
@@ -1706,6 +1747,7 @@ def replay_stage_b_regions(
         "nomination": nomination,
         "nominated_p": int(nomination.get("p", 0)),
         "selected": selected,
+        "sufficient": sufficient,
         "coverage": [item.get("coverage") for item in selected],
         "gains": gains,
         "structured_boundaries": structured_boundaries,
@@ -1993,11 +2035,11 @@ def _audit_stage_b_velocity_sweep(
         mismatches.append(f"missing joint regions {sorted(expected_joint)}")
 
     handoffs = [value for _raw, value in evidence_records if value["record_kind"] == "handoff"]
-    if replay["nomination"] and len(handoffs) != 1:
+    if replay["sufficient"] and len(handoffs) != 1:
         mismatches.append(f"expected one Stage B handoff, found {len(handoffs)}")
-    elif not replay["nomination"] and handoffs:
-        mismatches.append("Stage B handoff exists without a joint nomination")
-    elif replay["nomination"]:
+    elif not replay["sufficient"] and handoffs:
+        mismatches.append("Stage B handoff exists without sufficient bidirectional evidence")
+    elif replay["sufficient"]:
         handoff = handoffs[0]
         nomination = replay["nomination"]
         expected = {
@@ -2032,23 +2074,32 @@ def _audit_stage_b_velocity_sweep(
                 tuple(expected_direction),
             )
 
-    expected_memberships = [
-        *(int(item.get("member_mask", 0)) for item in replay["selected"]),
-        int(replay["nomination"].get("member_mask", 0)),
-    ]
-    expected_intervals = [list(item.get("pooled_interval", [0, 0])) for item in replay["selected"]]
-    terminal_expected = {
-        "model_direction_mask": sum(
-            (1 << index)
-            for index, regions in enumerate(replay["directions"])
-            if any(region["kind"] == "valid" for region in regions)
-        ),
-        "nominated_p": replay["nominated_p"],
-        "coverage_mask": sum(
+    model_direction_mask = sum(
+        (1 << index)
+        for index, regions in enumerate(replay["directions"])
+        if any(region["kind"] == "valid" for region in regions)
+    )
+    if replay["sufficient"]:
+        expected_memberships = [
+            *(int(item["member_mask"]) for item in replay["selected"]),
+            int(replay["nomination"]["member_mask"]),
+        ]
+        expected_intervals = [list(item["pooled_interval"]) for item in replay["selected"]]
+        expected_nominated_p = int(replay["nominated_p"])
+        expected_coverage_mask = sum(
             (1 << index)
             for index, item in enumerate(replay["selected"])
             if item.get("coverage") == "full"
-        ),
+        )
+    else:
+        expected_memberships = [0, 0, 0]
+        expected_intervals = [[0, 0], [0, 0]]
+        expected_nominated_p = 0
+        expected_coverage_mask = 0
+    terminal_expected = {
+        "model_direction_mask": model_direction_mask,
+        "nominated_p": expected_nominated_p,
+        "coverage_mask": expected_coverage_mask,
         "expected_observations": int(plan["rung_count"])
         * int(plan["observations_per_direction"])
         * 2,
@@ -2063,6 +2114,16 @@ def _audit_stage_b_velocity_sweep(
         mismatches.append("Stage B terminal selected memberships differ from replay")
     if list(terminal["selected_intervals"]) != expected_intervals:
         mismatches.append("Stage B terminal selected intervals differ from replay")
+    if not replay["sufficient"] and int(terminal["outcome"]) == STAGE_B_OUTCOME_INCONCLUSIVE:
+        expected_cause = (
+            STAGE_B_CAUSE_NO_DIRECTIONAL_MODEL
+            if model_direction_mask != 3
+            else STAGE_B_CAUSE_NO_JOINT_OPERABLE_REGION
+        )
+        if int(terminal["cause"]) != expected_cause:
+            mismatches.append(
+                "Stage B terminal insufficiency cause differs from independent replay"
+            )
     region_counts = [
         sum(region["kind"] == "valid" for region in regions) for regions in replay["directions"]
     ]
@@ -2150,8 +2211,10 @@ def _audit_stage_b_velocity_sweep(
         "rung_count": len(rung_records),
         "stage_b_replay": replay,
         "directions": replay["directions"],
-        "nominated_p": replay["nominated_p"],
-        "coverage": replay["coverage"],
+        "nominated_p": int(terminal["nominated_p"]),
+        "coverage": [
+            "full" if int(terminal["coverage_mask"]) & (1 << index) else None for index in range(2)
+        ],
         "pid_velocity_actual_samples": pid_samples,
         "actual_velocity_pptm_samples": [],
         "complete": True,

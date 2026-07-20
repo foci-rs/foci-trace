@@ -466,6 +466,22 @@ def test_decodes_stage_b_canonical_records_and_plan_identity() -> None:
     assert decoded[6]["current_intervals"][1] == [-17, -13]
 
 
+def test_decodes_compact_stage_b_rung_from_hardware_capture() -> None:
+    payload = bytes.fromhex("030100000005000001000000000000000000000000000000000001010400000000")
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert len(payload) == 33
+    assert frame.payload["record_kind"] == "rung"
+    assert frame.payload["run_sequence"] == 1
+    assert frame.payload["evidence_sequence"] == 5
+    assert frame.payload["rung_index"] == 0
+    assert frame.payload["velocity_p"] == 1
+    assert frame.payload["forward_class"] == 1
+    assert frame.payload["reverse_class"] == 1
+    assert frame.payload["flags"] == 4
+
+
 def test_decodes_canonical_velocity_sweep_terminal_digest() -> None:
     direction = struct.pack("<BHHHiiiiiBHB", 0, 8, 8, 32, 10, 20, 15, 12, 18, 3, 6, 0x0D)
     reverse = struct.pack("<BHHHiiiiiBHB", 1, 12, 12, 48, -20, -10, -15, -18, -12, 3, 6, 0x0D)
