@@ -412,6 +412,33 @@ def test_four_observation_direction_pools_only_unique_consensus_members() -> Non
     assert len(result["wire_rate_bounds_q"]) == 4
 
 
+def test_four_observation_direction_preserves_partial_slot_mask() -> None:
+    from foci_trace.velocity_measurement import _analyze_four_observation_direction
+
+    observation = {
+        "classification": 3,
+        "target_velocity_rpm": 176,
+        "disturbance_q16": 0,
+        "disturbance_low_q16": 0,
+        "disturbance_high_q16": 0,
+        "disturbance_variance_q2": 0,
+    }
+
+    result = _analyze_four_observation_direction(
+        [observation, None, None, None],
+        direction=1,
+        p=2_457,
+        counts_per_rev=4_000,
+        initial_lead_in=False,
+    )
+
+    assert result["class"] == 3
+    assert result["collected_mask"] == 0b0001
+    assert result["eligible_mask"] == 0
+    assert result["included_mask"] == 0
+    assert result["operable_count"] == 0
+
+
 def test_correlated_single_comparison_does_not_form_a_plateau() -> None:
     observations = []
     for sample_index in range(256):
@@ -875,6 +902,34 @@ def test_stage_b_partial_current_headroom_closes_active_regions() -> None:
     assert regions[-1]["boundary_rung"] is None
     assert regions[-1]["causal_boundary_rung"] == 3
     assert joint_regions[-1]["closure"] == "current_headroom"
+
+
+def test_stage_b_current_headroom_regions_follow_partial_rung() -> None:
+    from foci_trace.velocity_measurement import _compare_stage_b_causal_order
+
+    replay = {
+        "slot_count": 8,
+        "structured_boundaries": {},
+        "directions": [
+            [{"member_mask": 1, "closure": "current_headroom", "causal_boundary_rung": 1}],
+            [{"member_mask": 1, "closure": "current_headroom", "causal_boundary_rung": 1}],
+        ],
+        "joint_regions": [{"member_mask": 1, "closure": "current_headroom", "last_rung": 0}],
+        "nomination": {"member_mask": 1},
+        "sufficient": True,
+    }
+    records = [
+        {"record_kind": "plan"},
+        {"record_kind": "observation", "rung_index": 1, "slot": 0},
+        {"record_kind": "rung", "rung_index": 1},
+        {"record_kind": "directional_region", "direction": 0, "member_mask": 1},
+        {"record_kind": "directional_region", "direction": 1, "member_mask": 1},
+        {"record_kind": "joint_region", "member_mask": 1},
+        {"record_kind": "handoff"},
+        {"record_kind": "stage_b_terminal"},
+    ]
+
+    assert _compare_stage_b_causal_order(records, replay) == ""
 
 
 def test_stage_b_handoff_requires_valid_models_in_both_directions() -> None:

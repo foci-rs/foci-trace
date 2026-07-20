@@ -1394,7 +1394,7 @@ def _common_wire_rate_bounds(values: list[int]) -> list[int]:
 
 
 def _analyze_four_observation_direction(
-    observations: list[dict[str, int]],
+    observations: list[dict[str, int] | None],
     *,
     direction: int,
     p: int,
@@ -1404,18 +1404,29 @@ def _analyze_four_observation_direction(
     """Derive one n=4 directional consensus without consuming firmware verdicts."""
     intervals = [
         (item["disturbance_low_q16"], item["disturbance_high_q16"])
-        if item["classification"] == 0
+        if item is not None and item["classification"] == 0
         else None
         for item in observations
     ]
+    collected_mask = sum(1 << index for index, item in enumerate(observations) if item is not None)
     eligible_mask = sum(
-        1 << index for index, item in enumerate(observations) if item["classification"] == 0
+        1 << index
+        for index, item in enumerate(observations)
+        if item is not None and item["classification"] == 0
     )
-    consensus = _depth_three_consensus(intervals, eligible_mask=eligible_mask)
-    operable_count = sum(item["classification"] in (0, 2) for item in observations)
+    consensus = _depth_three_consensus(
+        intervals,
+        collected_mask=collected_mask,
+        eligible_mask=eligible_mask,
+    )
+    operable_count = sum(
+        item is not None and item["classification"] in (0, 2) for item in observations
+    )
     flags = int(operable_count >= 3) | (int(initial_lead_in) << 1)
     included = [
-        item for index, item in enumerate(observations) if consensus.included_mask & (1 << index)
+        item
+        for index, item in enumerate(observations)
+        if item is not None and consensus.included_mask & (1 << index)
     ]
     pooled = _pool_region_observations(included)
     rate_bounds = [0, 0, 0, 0]
@@ -1761,6 +1772,7 @@ def _compare_stage_b_causal_order(
         for key in dict(replay["structured_boundaries"])
     }
     directional_at_boundary: dict[int, list[tuple[object, ...]]] = {}
+    directional_after_rung: dict[int, list[tuple[object, ...]]] = {}
     directional_at_end: list[tuple[object, ...]] = []
     for direction, regions in enumerate(replay["directions"]):
         for region in regions:
@@ -1768,14 +1780,19 @@ def _compare_stage_b_causal_order(
             boundary = region.get("causal_boundary_rung", region.get("boundary_rung"))
             if boundary is None:
                 directional_at_end.append(token)
+            elif region.get("closure") == "current_headroom":
+                directional_after_rung.setdefault(int(boundary), []).append(token)
             else:
                 directional_at_boundary.setdefault(int(boundary), []).append(token)
     joint_at_boundary: dict[int, list[tuple[object, ...]]] = {}
+    joint_after_rung: dict[int, list[tuple[object, ...]]] = {}
     joint_at_end: list[tuple[object, ...]] = []
     for region in replay["joint_regions"]:
         token = ("joint_region", int(region["member_mask"]))
         if region["closure"] == "end_of_ladder":
             joint_at_end.append(token)
+        elif region["closure"] == "current_headroom":
+            joint_after_rung.setdefault(int(region["last_rung"]) + 1, []).append(token)
         else:
             joint_at_boundary.setdefault(int(region["last_rung"]) + 1, []).append(token)
 
@@ -1800,6 +1817,8 @@ def _compare_stage_b_causal_order(
         expected.extend(joint_at_boundary.get(rung_index, ()))
         if rung_index in reported_rungs:
             expected.append(("rung", rung_index))
+        expected.extend(directional_after_rung.get(rung_index, ()))
+        expected.extend(joint_after_rung.get(rung_index, ()))
     expected.extend(directional_at_end)
     expected.extend(joint_at_end)
     if replay.get("sufficient", bool(replay["nomination"])):
@@ -2005,6 +2024,33 @@ def replay_stage_b_regions(
     )
     terminal_closure = "current_headroom" if partial_current_rungs else "end_of_ladder"
     terminal_boundary_rung = partial_current_rungs[0] if partial_current_rungs else None
+    partial_directional_rungs: dict[int, list[dict[str, object]]] = {}
+    for rung_index in partial_current_rungs if observations_per_direction == 4 else ():
+        first_record = next(
+            record for (record_rung, _slot), record in records.items() if record_rung == rung_index
+        )
+        p = int(first_record["velocity_p"])
+        analyses = []
+        for direction_index in range(2):
+            slots = tuple(
+                direction_index + 2 * index for index in range(observations_per_direction)
+            )
+            observations = [reconstructed.get((rung_index, slot)) for slot in slots]
+            initial_lead_in = any(
+                int(records[(rung_index, slot)].get("flags", 0)) & 1
+                for slot in slots
+                if (rung_index, slot) in records
+            )
+            analyses.append(
+                _analyze_four_observation_direction(
+                    observations,
+                    direction=1 if direction_index == 0 else -1,
+                    p=p,
+                    counts_per_rev=int(terminal["encoder_counts_per_rev"]),
+                    initial_lead_in=initial_lead_in,
+                )
+            )
+        partial_directional_rungs[rung_index] = analyses
     directional = [
         _segment_directional_regions(
             items,
@@ -2040,6 +2086,7 @@ def replay_stage_b_regions(
     return {
         "directions": directional,
         "directional_rungs": directional_inputs,
+        "partial_directional_rungs": partial_directional_rungs,
         "joint_regions": joint,
         "nomination": nomination,
         "nominated_p": int(nomination.get("p", 0)),
@@ -2210,10 +2257,13 @@ def _audit_stage_b_velocity_sweep(
     }
     for rung_index, rung in sorted(rung_records.items()):
         if observations_per_direction == 4:
-            if any(rung_index >= len(items) for items in replay["directional_rungs"]):
+            if all(rung_index < len(items) for items in replay["directional_rungs"]):
+                analyses = [items[rung_index] for items in replay["directional_rungs"]]
+            else:
+                analyses = replay["partial_directional_rungs"].get(rung_index)
+            if analyses is None:
                 mismatches.append(f"rung {rung_index} is missing reconstructed observations")
                 continue
-            analyses = [items[rung_index] for items in replay["directional_rungs"]]
             for prefix, analysis in zip(("forward", "reverse"), analyses, strict=True):
                 expected = {
                     f"{prefix}_class": analysis["class"],
