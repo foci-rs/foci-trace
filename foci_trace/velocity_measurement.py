@@ -1729,10 +1729,10 @@ def _stage_b_handoff_sufficient(
     return has_directional_models and bool(nomination) and all(bool(item) for item in selected)
 
 
-def _compare_stage_b_candidates(
+def _compare_stage_b_candidates_schema2(
     previous: dict[str, object], current: dict[str, object]
 ) -> dict[str, object]:
-    """Mirror RAM-only two-run reproduction semantics."""
+    """Mirror the historical schema-2 exact-membership reproduction semantics."""
     if int(previous["plan_digest"]) != int(current["plan_digest"]):
         return {"outcome": "plan_mismatch", "replacement": previous}
     intervals_overlap = all(
@@ -1748,6 +1748,275 @@ def _compare_stage_b_candidates(
     return {"outcome": "reproduction_mismatch", "replacement": current}
 
 
+def _stage_b_gain_at(p_start: int, p_top: int, rung_count: int, rung_index: int) -> int:
+    """Regenerate one anchored, post-dedupe half-octave ladder gain."""
+    if not 0 <= rung_index < rung_count or p_start <= 0 or p_start > p_top:
+        raise ValueError("invalid Stage B ladder geometry")
+    previous = 0
+    emitted = 0
+    for octave in range(16):
+        even = p_start << octave
+        odd = ((p_start * 181 << octave) + 127) >> 7
+        for candidate in (even, odd):
+            if candidate > p_top or candidate <= previous:
+                continue
+            if emitted == rung_index:
+                return candidate
+            previous = candidate
+            emitted += 1
+    if previous != p_top and emitted == rung_index:
+        return p_top
+    raise ValueError("rung is absent from the anchored Stage B ladder")
+
+
+def _contiguous_stage_b_mask(mask: int, rung_count: int) -> bool:
+    if mask <= 0 or rung_count not in range(1, 33) or mask >= 1 << rung_count:
+        return False
+    shifted = mask >> ((mask & -mask).bit_length() - 1)
+    return (shifted & (shifted + 1)) == 0
+
+
+def _stage_b_membership_comparison(previous: int, current: int) -> dict[str, int]:
+    previous_low = (previous & -previous).bit_length() - 1
+    current_low = (current & -current).bit_length() - 1
+    previous_high = previous.bit_length() - 1
+    current_high = current.bit_length() - 1
+    return {
+        "previous": previous,
+        "current": current,
+        "core": previous & current,
+        "previous_only": previous & ~current & 0xFFFF_FFFF,
+        "current_only": current & ~previous & 0xFFFF_FFFF,
+        "low_delta": current_low - previous_low,
+        "high_delta": current_high - previous_high,
+    }
+
+
+def _stage_b_closed_intersection(left: list[int], right: list[int]) -> list[int]:
+    return [max(int(left[0]), int(right[0])), min(int(left[1]), int(right[1]))]
+
+
+def _stage_b_core_coverage(
+    core: int, final_rung: int, p_start: int, p_top: int, rung_count: int
+) -> dict[str, object]:
+    if core == 0:
+        return {
+            "coverage": "transferred",
+            "signed_rung_distance": 0,
+            "gain_ratio": [0, 0],
+        }
+    first = (core & -core).bit_length() - 1
+    last = core.bit_length() - 1
+    if final_rung < first:
+        source_rung = first
+        distance = first - final_rung
+        coverage = "transferred"
+    elif final_rung > last:
+        source_rung = last
+        distance = last - final_rung
+        coverage = "transferred"
+    else:
+        source_rung = final_rung
+        distance = 0
+        coverage = "full"
+    if coverage == "full":
+        ratio = [1, 1]
+    else:
+        source_p = _stage_b_gain_at(p_start, p_top, rung_count, source_rung)
+        final_p = _stage_b_gain_at(p_start, p_top, rung_count, final_rung)
+        ratio = [max(source_p, final_p), max(1, min(source_p, final_p))]
+    return {
+        "coverage": coverage,
+        "signed_rung_distance": distance,
+        "gain_ratio": ratio,
+    }
+
+
+def _core_restricted_common(
+    previous: dict[str, object], current: dict[str, object], cores: list[int]
+) -> list[list[int]] | None:
+    previous_rungs = previous.get("per_rung_common_intervals")
+    current_rungs = current.get("per_rung_common_intervals")
+    if not isinstance(previous_rungs, list) or not isinstance(current_rungs, list):
+        return None
+    derived = []
+    for direction, core in enumerate(cores[:2]):
+        bounds: list[list[int]] = []
+        for source in (previous_rungs, current_rungs):
+            mapping = source[direction]
+            for rung in range(32):
+                if core & (1 << rung):
+                    interval = mapping.get(rung, mapping.get(str(rung)))
+                    if interval is None:
+                        return None
+                    bounds.append([int(interval[0]), int(interval[1])])
+        derived.append([max(value[0] for value in bounds), min(value[1] for value in bounds)])
+    return derived
+
+
+def project_stage_b_core_pair(
+    previous: dict[str, object], current: dict[str, object]
+) -> dict[str, object]:
+    """Project the schema-3 firmware comparator over two sufficient run summaries."""
+    geometry = ("p_start", "p_top", "rung_count")
+    if any(int(previous[name]) != int(current[name]) for name in geometry):
+        return {"outcome": "plan_mismatch", "reason_mask": 0}
+    p_start, p_top, rung_count = (int(previous[name]) for name in geometry)
+    previous_masks = [int(value) for value in previous["memberships"]]
+    current_masks = [int(value) for value in current["memberships"]]
+    if (
+        p_start <= 0
+        or p_start > p_top
+        or rung_count not in range(1, 33)
+        or any(
+            not _contiguous_stage_b_mask(mask, rung_count)
+            for mask in (*previous_masks, *current_masks)
+        )
+    ):
+        return {"outcome": "evidence_integrity_fault", "reason_mask": 0}
+    memberships = [
+        _stage_b_membership_comparison(left, right)
+        for left, right in zip(previous_masks, current_masks, strict=True)
+    ]
+    cores = [value["core"] for value in memberships]
+    if any(core and not _contiguous_stage_b_mask(core, rung_count) for core in cores):
+        return {"outcome": "evidence_integrity_fault", "reason_mask": 0}
+
+    pooled = []
+    common = []
+    for direction in range(2):
+        previous_pooled = [int(value) for value in previous["pooled_intervals"][direction]]
+        current_pooled = [int(value) for value in current["pooled_intervals"][direction]]
+        pooled_overlap = _stage_b_closed_intersection(previous_pooled, current_pooled)
+        previous_common = [int(value) for value in previous["common_intervals"][direction]]
+        current_common = [int(value) for value in current["common_intervals"][direction]]
+        conservative = _stage_b_closed_intersection(previous_common, current_common)
+        pooled.append(
+            {
+                "previous": previous_pooled,
+                "current": current_pooled,
+                "overlap": pooled_overlap,
+            }
+        )
+        common.append(
+            {
+                "previous": previous_common,
+                "current": current_common,
+                "conservative": conservative,
+                "nonempty": conservative[0] <= conservative[1],
+            }
+        )
+
+    reason_mask = 0
+    reason_mask |= int(cores[0].bit_count() < 3) << 0
+    reason_mask |= int(cores[1].bit_count() < 3) << 1
+    reason_mask |= int(cores[2] == 0) << 2
+    reason_mask |= int(pooled[0]["overlap"][0] > pooled[0]["overlap"][1]) << 3
+    reason_mask |= int(pooled[1]["overlap"][0] > pooled[1]["overlap"][1]) << 4
+
+    final_p = 0
+    reduced_margin = False
+    coverage = [
+        {"coverage": "transferred", "signed_rung_distance": 0, "gain_ratio": [0, 0]},
+        {"coverage": "transferred", "signed_rung_distance": 0, "gain_ratio": [0, 0]},
+    ]
+    if cores[2]:
+        joint_first = (cores[2] & -cores[2]).bit_length() - 1
+        final_rung = joint_first + (cores[2].bit_count() - 1) // 2
+        final_p = _stage_b_gain_at(p_start, p_top, rung_count, final_rung)
+        coverage = [
+            _stage_b_core_coverage(core, final_rung, p_start, p_top, rung_count)
+            for core in cores[:2]
+        ]
+        reduced_margin = cores[2].bit_count() <= 2
+
+    exact_common = _core_restricted_common(previous, current, cores)
+    projection: dict[str, object] = {
+        "outcome": "complete" if reason_mask == 0 else "reproduction_mismatch",
+        "reason_mask": reason_mask,
+        "memberships": memberships,
+        "core_masks": cores,
+        "previous_provisional_p": int(previous["nominated_p"]),
+        "current_provisional_p": int(current["nominated_p"]),
+        "final_p": final_p,
+        "reduced_margin": reduced_margin,
+        "coverage": coverage,
+        "pooled": pooled,
+        "common": common,
+        "firmware_conservative_common": [value["conservative"] for value in common],
+    }
+    if exact_common is not None:
+        projection["offline_derived"] = {
+            "core_restricted_common": exact_common,
+            "provenance": "per_rung_cross_run",
+        }
+    return projection
+
+
+_STAGE_B_REPRODUCTION_V3_KINDS = (
+    "reproduction_v3_header",
+    "reproduction_v3_membership",
+    "reproduction_v3_pooled",
+    "reproduction_v3_common",
+    "reproduction_v3_coverage",
+    "reproduction_v3_digest",
+)
+
+
+def _assemble_stage_b_reproduction_v3(
+    records: list[dict[str, object]],
+) -> dict[str, object] | None:
+    """Validate and assemble one ordered schema-3 reproduction record group."""
+    fragments = [
+        value for value in records if value["record_kind"] in _STAGE_B_REPRODUCTION_V3_KINDS
+    ]
+    if not fragments:
+        return None
+    expected = [
+        "reproduction_v3_header",
+        *("reproduction_v3_membership" for _ in range(3)),
+        *("reproduction_v3_pooled" for _ in range(2)),
+        *("reproduction_v3_common" for _ in range(2)),
+        *("reproduction_v3_coverage" for _ in range(2)),
+        "reproduction_v3_digest",
+    ]
+    if [value["record_kind"] for value in fragments] != expected:
+        raise ValueError("schema-3 reproduction fragments are missing, duplicated, or out of order")
+    identity = (int(fragments[0]["run_sequence"]), int(fragments[0]["evidence_sequence"]))
+    if any(
+        (int(value["run_sequence"]), int(value["evidence_sequence"])) != identity
+        for value in fragments
+    ):
+        raise ValueError("schema-3 reproduction fragment identity changed")
+    if [int(value["object"]) for value in fragments[1:4]] != [0, 1, 2]:
+        raise ValueError("schema-3 membership fragments changed object order")
+    for start in (4, 6, 8):
+        if [int(value["direction"]) for value in fragments[start : start + 2]] != [0, 1]:
+            raise ValueError("schema-3 directional fragments changed direction order")
+    header = fragments[0]
+    digest = fragments[-1]
+    return {
+        "record_kind": "reproduction_v3",
+        "run_sequence": identity[0],
+        "evidence_sequence": identity[1],
+        "schema_revision": int(header["schema_revision"]),
+        "outcome": int(header["outcome"]),
+        "reason_mask": int(header["reason_mask"]),
+        "previous_nominated_p": int(header["previous_nominated_p"]),
+        "current_nominated_p": int(header["current_nominated_p"]),
+        "final_p": int(header["final_p"]),
+        "reduced_margin": bool(header["reduced_margin"]),
+        "memberships": [dict(value) for value in fragments[1:4]],
+        "pooled": [dict(value) for value in fragments[4:6]],
+        "common": [dict(value) for value in fragments[6:8]],
+        "coverage": [dict(value) for value in fragments[8:10]],
+        "previous_digest_low": int(digest["previous_digest_low"]),
+        "previous_digest_high": int(digest["previous_digest_high"]),
+        "current_digest_low": int(digest["current_digest_low"]),
+        "current_digest_high": int(digest["current_digest_high"]),
+    }
+
+
 def _stage_b_record_identity(value: dict[str, object]) -> tuple[object, ...]:
     """Return the causal identity of one canonical Stage B record."""
     kind = str(value["record_kind"])
@@ -1759,6 +2028,8 @@ def _stage_b_record_identity(value: dict[str, object]) -> tuple[object, ...]:
         return kind, int(value["direction"]), int(value["member_mask"])
     if kind == "joint_region":
         return kind, int(value["member_mask"])
+    if kind == "reproduction_v3":
+        return ("reproduction",)
     return (kind,)
 
 
@@ -1823,7 +2094,7 @@ def _compare_stage_b_causal_order(
     expected.extend(joint_at_end)
     if replay.get("sufficient", bool(replay["nomination"])):
         expected.append(("handoff",))
-    if any(value["record_kind"] == "reproduction" for value in records):
+    if any(value["record_kind"] in ("reproduction", "reproduction_v3") for value in records):
         expected.append(("reproduction",))
     expected.append(("stage_b_terminal",))
 
@@ -1845,6 +2116,136 @@ def _stage_b_candidate_from_terminal(
     }
 
 
+def _stage_b_candidates_from_v3(
+    reproduction: dict[str, object], plan: dict[str, object]
+) -> tuple[dict[str, object], dict[str, object]]:
+    memberships = reproduction["memberships"]
+    pooled = reproduction["pooled"]
+    common = reproduction["common"]
+    base = {
+        "p_start": int(plan["p_start"]),
+        "p_top": int(plan["p_top"]),
+        "rung_count": int(plan["rung_count"]),
+    }
+    previous = {
+        **base,
+        "nominated_p": int(reproduction["previous_nominated_p"]),
+        "memberships": [int(value["previous"]) for value in memberships],
+        "pooled_intervals": [
+            [int(value["previous_low"]), int(value["previous_high"])] for value in pooled
+        ],
+        "common_intervals": [
+            [int(value["previous_low"]), int(value["previous_high"])] for value in common
+        ],
+    }
+    current = {
+        **base,
+        "nominated_p": int(reproduction["current_nominated_p"]),
+        "memberships": [int(value["current"]) for value in memberships],
+        "pooled_intervals": [
+            [int(value["current_low"]), int(value["current_high"])] for value in pooled
+        ],
+        "common_intervals": [
+            [int(value["current_low"]), int(value["current_high"])] for value in common
+        ],
+    }
+    return previous, current
+
+
+def _stage_b_per_rung_intervals(report: dict[str, object]) -> list[dict[int, list[int]]] | None:
+    replay = report.get("stage_b_replay")
+    if not isinstance(replay, dict):
+        return None
+    directional = replay.get("directional_rungs")
+    if not isinstance(directional, list) or len(directional) != 2:
+        return None
+    result: list[dict[int, list[int]]] = []
+    for rungs in directional:
+        result.append(
+            {
+                int(rung["rung_index"]): [int(rung["low"]), int(rung["high"])]
+                for rung in rungs
+                if int(rung.get("class", 1)) == 0
+            }
+        )
+    return result
+
+
+def _stage_b_candidate_from_replay(report: dict[str, object]) -> dict[str, object] | None:
+    replay = report.get("stage_b_replay")
+    plan = report.get("plan")
+    if not isinstance(replay, dict) or not isinstance(plan, dict):
+        return None
+    selected = replay.get("selected")
+    nomination = replay.get("nomination")
+    if (
+        not isinstance(selected, list)
+        or len(selected) != 2
+        or not all(isinstance(value, dict) for value in selected)
+        or not isinstance(nomination, dict)
+    ):
+        return None
+    return {
+        "memberships": [
+            int(selected[0]["member_mask"]),
+            int(selected[1]["member_mask"]),
+            int(nomination["member_mask"]),
+        ],
+        "nominated_p": int(replay["nominated_p"]),
+        "pooled_intervals": [list(value["pooled_interval"]) for value in selected],
+        "common_intervals": [list(value["common_interval"]) for value in selected],
+        "p_start": int(plan["p_start"]),
+        "p_top": int(plan["p_top"]),
+        "rung_count": int(plan["rung_count"]),
+    }
+
+
+def _compare_stage_b_v3_record(
+    reproduction: dict[str, object], projection: dict[str, object]
+) -> list[str]:
+    mismatches = []
+    expected_outcome = 1 if projection["outcome"] == "complete" else 2
+    if int(reproduction["outcome"]) != expected_outcome:
+        mismatches.append("schema-3 reproduction outcome differs from core projection")
+    for name in ("reason_mask", "final_p"):
+        if int(reproduction[name]) != int(projection[name]):
+            mismatches.append(f"schema-3 reproduction {name} differs from core projection")
+    if bool(reproduction["reduced_margin"]) != bool(projection["reduced_margin"]):
+        mismatches.append("schema-3 reproduction reduced margin differs from core projection")
+    for reported, expected in zip(
+        reproduction["memberships"], projection["memberships"], strict=True
+    ):
+        for name in (
+            "previous",
+            "current",
+            "core",
+            "previous_only",
+            "current_only",
+            "low_delta",
+            "high_delta",
+        ):
+            if int(reported[name]) != int(expected[name]):
+                mismatches.append(f"schema-3 membership {name} differs from core projection")
+    for reported, expected in zip(reproduction["pooled"], projection["pooled"], strict=True):
+        if [int(reported["overlap_low"]), int(reported["overlap_high"])] != expected["overlap"]:
+            mismatches.append("schema-3 pooled overlap differs from core projection")
+    for reported, expected in zip(reproduction["common"], projection["common"], strict=True):
+        if [int(reported["conservative_low"]), int(reported["conservative_high"])] != expected[
+            "conservative"
+        ] or bool(reported["nonempty"]) != bool(expected["nonempty"]):
+            mismatches.append("schema-3 conservative common differs from core projection")
+    for reported, expected in zip(reproduction["coverage"], projection["coverage"], strict=True):
+        expected_kind = 0 if expected["coverage"] == "full" else 1
+        if (
+            int(reported["coverage"]) != expected_kind
+            or int(reported["signed_rung_distance"]) != int(expected["signed_rung_distance"])
+            or [int(reported["gain_ratio_num"]), int(reported["gain_ratio_den"])]
+            != expected["gain_ratio"]
+        ):
+            mismatches.append("schema-3 coverage differs from core projection")
+    return mismatches
+
+
 def audit_stage_b_reproduction_pair(
     previous: dict[str, object], current: dict[str, object]
 ) -> dict[str, object]:
@@ -1853,6 +2254,42 @@ def audit_stage_b_reproduction_pair(
     reproduction = current.get("reproduction")
     if not isinstance(reproduction, dict):
         return {"matches_firmware": False, "mismatches": ["current capture lacks reproduction"]}
+    schema_revision = int(reproduction.get("schema_revision", 2))
+    if schema_revision == 3:
+        plan = current.get("plan")
+        if not isinstance(plan, dict):
+            return {"matches_firmware": False, "mismatches": ["current capture lacks plan"]}
+        prior, active = _stage_b_candidates_from_v3(reproduction, plan)
+        replay_previous = _stage_b_candidate_from_replay(previous)
+        replay_current = _stage_b_candidate_from_replay(current)
+        if replay_previous is not None and replay_previous != prior:
+            mismatches.append("schema-3 retained summary differs from prior capture replay")
+        if replay_current is not None and replay_current != active:
+            mismatches.append("schema-3 current summary differs from current capture replay")
+        previous_rungs = _stage_b_per_rung_intervals(previous)
+        current_rungs = _stage_b_per_rung_intervals(current)
+        if previous_rungs is not None and current_rungs is not None:
+            prior["per_rung_common_intervals"] = previous_rungs
+            active["per_rung_common_intervals"] = current_rungs
+        projection = project_stage_b_core_pair(prior, active)
+        mismatches.extend(_compare_stage_b_v3_record(reproduction, projection))
+        previous_digest = int(reproduction["previous_digest_low"]) | (
+            int(reproduction["previous_digest_high"]) << 32
+        )
+        current_digest = int(reproduction["current_digest_low"]) | (
+            int(reproduction["current_digest_high"]) << 32
+        )
+        if previous_digest != int(previous["reported_digest"]):
+            mismatches.append("reproduction previous digest differs from prior terminal")
+        if current_digest != int(current["pre_reproduction_digest"]):
+            mismatches.append("reproduction current digest differs from current prefix")
+        return {
+            "matches_firmware": not mismatches,
+            "mismatches": mismatches,
+            "projection": projection,
+        }
+    if schema_revision != 2:
+        return {"matches_firmware": False, "mismatches": ["unsupported schema"]}
     previous_plan = int(previous["plan_identity"])
     current_plan = int(current["plan_identity"])
     previous_candidate = _stage_b_candidate_from_terminal(previous, plan_digest=previous_plan)
@@ -1901,7 +2338,7 @@ def audit_stage_b_reproduction_pair(
     ):
         if reported != expected:
             mismatches.append(f"reproduction {name} differs from capture")
-    comparison = _compare_stage_b_candidates(previous_candidate, current_candidate)
+    comparison = _compare_stage_b_candidates_schema2(previous_candidate, current_candidate)
     expected_outcome = 1 if comparison["outcome"] == "complete" else 2
     if int(reproduction["outcome"]) != expected_outcome:
         mismatches.append("reproduction outcome differs from independent comparison")
@@ -2126,22 +2563,42 @@ def _audit_stage_b_velocity_sweep(
         for raw, value in evidence_records
         if value["record_kind"] != "stage_b_terminal"
     ]
+    try:
+        reproduction_v3 = _assemble_stage_b_reproduction_v3([value for _raw, value in nonterminal])
+    except ValueError as error:
+        reproduction_v3 = None
+        v3_group_error = str(error)
+    else:
+        v3_group_error = ""
+    logical_nonterminal: list[tuple[bytes, dict[str, object]]] = []
+    inserted_v3 = False
+    for raw, value in nonterminal:
+        if value["record_kind"] in _STAGE_B_REPRODUCTION_V3_KINDS:
+            if reproduction_v3 is not None and not inserted_v3:
+                logical_nonterminal.append((b"", reproduction_v3))
+                inserted_v3 = True
+            continue
+        logical_nonterminal.append((raw, value))
     digest = FNV1A64_OFFSET
     pre_reproduction_digest: int | None = None
     for raw, _value in nonterminal:
-        if _value["record_kind"] == "reproduction":
+        if _value["record_kind"] in ("reproduction", "reproduction_v3_header"):
             pre_reproduction_digest = digest
         for byte in raw:
             digest ^= byte
             digest = (digest * FNV1A64_PRIME) & 0xFFFF_FFFF_FFFF_FFFF
     reported_digest = int(terminal["digest_low"]) | (int(terminal["digest_high"]) << 32)
     mismatches: list[str] = []
+    if v3_group_error:
+        mismatches.append(v3_group_error)
     if digest != reported_digest:
         mismatches.append(
             f"terminal digest: firmware=0x{reported_digest:016x} offline=0x{digest:016x}"
         )
     main_records = [
-        value for _raw, value in nonterminal if value["record_kind"] != "structured_boundary"
+        value
+        for _raw, value in logical_nonterminal
+        if value["record_kind"] != "structured_boundary"
     ]
     sequences = [int(value["evidence_sequence"]) for value in main_records]
     if sequences != list(range(len(sequences))):
@@ -2160,7 +2617,7 @@ def _audit_stage_b_velocity_sweep(
 
     replay = replay_stage_b_regions(raw_observations, evidence_records)
     causal_mismatch = _compare_stage_b_causal_order(
-        [value for _raw, value in evidence_records], replay
+        [value for _raw, value in logical_nonterminal] + [terminal], replay
     )
     if causal_mismatch:
         mismatches.append(causal_mismatch)
@@ -2497,6 +2954,19 @@ def _audit_stage_b_velocity_sweep(
         expected_intervals = [[0, 0], [0, 0]]
         expected_nominated_p = 0
         expected_coverage_mask = 0
+    v3_projection: dict[str, object] | None = None
+    if reproduction_v3 is not None:
+        prior_v3, current_v3 = _stage_b_candidates_from_v3(reproduction_v3, plan)
+        v3_projection = project_stage_b_core_pair(prior_v3, current_v3)
+        if int(reproduction_v3["outcome"]) == 1:
+            expected_memberships = list(v3_projection["core_masks"])
+            expected_intervals = [list(value["overlap"]) for value in v3_projection["pooled"]]
+            expected_nominated_p = int(v3_projection["final_p"])
+            expected_coverage_mask = sum(
+                (1 << index)
+                for index, value in enumerate(v3_projection["coverage"])
+                if value["coverage"] == "full"
+            )
     terminal_expected = {
         "model_direction_mask": model_direction_mask,
         "nominated_p": expected_nominated_p,
@@ -2537,13 +3007,15 @@ def _audit_stage_b_velocity_sweep(
         mismatches.append("Stage B terminal directional fragment counts differ from replay")
 
     reproduction = [
-        value for _raw, value in evidence_records if value["record_kind"] == "reproduction"
+        value
+        for _raw, value in logical_nonterminal
+        if value["record_kind"] in ("reproduction", "reproduction_v3")
     ]
     if int(terminal["outcome"]) == 1 and len(reproduction) != 1:
         mismatches.append("complete Stage B terminal lacks one reproduction record")
     if len(reproduction) > 1:
         mismatches.append(f"expected at most one reproduction record, found {len(reproduction)}")
-    if reproduction:
+    if reproduction and reproduction[-1]["record_kind"] == "reproduction":
         current = reproduction[-1]
         if int(current["current_nominated_p"]) != int(terminal["nominated_p"]):
             mismatches.append("reproduction nomination differs from terminal")
@@ -2568,7 +3040,7 @@ def _audit_stage_b_velocity_sweep(
             "memberships": list(current["current_memberships"]),
             "intervals": [list(value) for value in current["current_intervals"]],
         }
-        comparison = _compare_stage_b_candidates(previous_candidate, current_candidate)
+        comparison = _compare_stage_b_candidates_schema2(previous_candidate, current_candidate)
         expected_reproduction_outcome = 1 if comparison["outcome"] == "complete" else 2
         if int(current["outcome"]) != expected_reproduction_outcome:
             mismatches.append("reproduction outcome differs from independent comparison")
@@ -2584,6 +3056,40 @@ def _audit_stage_b_velocity_sweep(
         )
         if int(terminal["cause"]) != expected_cause:
             mismatches.append("terminal cause differs from reproduction comparison")
+    elif reproduction:
+        current = reproduction[-1]
+        prior, active = _stage_b_candidates_from_v3(current, plan)
+        replay_candidate = {
+            "memberships": [
+                *(int(item["member_mask"]) for item in replay["selected"]),
+                int(replay["nomination"]["member_mask"]),
+            ],
+            "nominated_p": int(replay["nominated_p"]),
+            "pooled_intervals": [list(value["pooled_interval"]) for value in replay["selected"]],
+            "common_intervals": [list(value["common_interval"]) for value in replay["selected"]],
+            "p_start": int(plan["p_start"]),
+            "p_top": int(plan["p_top"]),
+            "rung_count": int(plan["rung_count"]),
+        }
+        if active != replay_candidate:
+            mismatches.append("schema-3 current summary differs from independent replay")
+        projection = v3_projection or project_stage_b_core_pair(prior, active)
+        mismatches.extend(_compare_stage_b_v3_record(current, projection))
+        reported_current_digest = int(current["current_digest_low"]) | (
+            int(current["current_digest_high"]) << 32
+        )
+        if pre_reproduction_digest != reported_current_digest:
+            mismatches.append("reproduction current digest differs from canonical prefix")
+        expected_terminal = (
+            STAGE_B_OUTCOME_COMPLETE
+            if projection["outcome"] == "complete"
+            else STAGE_B_OUTCOME_INCONCLUSIVE
+        )
+        if int(terminal["outcome"]) != expected_terminal:
+            mismatches.append("terminal outcome differs from schema-3 core projection")
+        expected_cause = 0 if projection["outcome"] == "complete" else 5
+        if int(terminal["cause"]) != expected_cause:
+            mismatches.append("terminal cause differs from schema-3 core projection")
 
     pid_samples = [
         {
