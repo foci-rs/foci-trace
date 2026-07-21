@@ -48,6 +48,12 @@ EVENT_COMMISSION_POSITION_TUNE_RESULT = 130
 EVENT_COMMISSION_POSITION_TUNE_TARGET = 131
 EVENT_COMMISSION_POSITION_TUNE_METRICS = 132
 EVENT_COMMISSION_POSITION_TUNE_LIMITS = 133
+EVENT_COMMISSION_VELOCITY_INTEGRAL_PLAN = 134
+EVENT_COMMISSION_VELOCITY_INTEGRAL_OBSERVATION = 135
+EVENT_COMMISSION_VELOCITY_INTEGRAL_RUNG = 136
+EVENT_COMMISSION_VELOCITY_INTEGRAL_DERIVED = 137
+EVENT_COMMISSION_VELOCITY_INTEGRAL_TERMINAL = 138
+EVENT_COMMISSION_VELOCITY_INTEGRAL_COMPLETE = 139
 EVENT_COMMISSION_RESTORE_RESULT = 140
 EVENT_COMMISSION_RESTORE_ERROR_DRIFT = 141
 EVENT_COMMISSION_RESTORE_DISPOSITION = 142
@@ -86,6 +92,12 @@ _COMMISSIONING_EVENT_NAMES = {
     EVENT_COMMISSION_POSITION_TUNE_TARGET: "commission_position_tune_target",
     EVENT_COMMISSION_POSITION_TUNE_METRICS: "commission_position_tune_metrics",
     EVENT_COMMISSION_POSITION_TUNE_LIMITS: "commission_position_tune_limits",
+    EVENT_COMMISSION_VELOCITY_INTEGRAL_PLAN: "commission_velocity_integral_plan",
+    EVENT_COMMISSION_VELOCITY_INTEGRAL_OBSERVATION: "commission_velocity_integral_observation",
+    EVENT_COMMISSION_VELOCITY_INTEGRAL_RUNG: "commission_velocity_integral_rung",
+    EVENT_COMMISSION_VELOCITY_INTEGRAL_DERIVED: "commission_velocity_integral_derived",
+    EVENT_COMMISSION_VELOCITY_INTEGRAL_TERMINAL: "commission_velocity_integral_terminal",
+    EVENT_COMMISSION_VELOCITY_INTEGRAL_COMPLETE: "commission_velocity_integral_complete",
     EVENT_COMMISSION_RESTORE_RESULT: "commission_restore_result",
     EVENT_COMMISSION_RESTORE_ERROR_DRIFT: "commission_restore_error_drift",
     EVENT_COMMISSION_RESTORE_DISPOSITION: "commission_restore_disposition",
@@ -407,7 +419,88 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
     _require(payload, 1, "velocity-sweep evidence")
     cursor = _EvidenceCursor(payload)
     kind = cursor.take("B")
-    if kind == 1:
+    if kind == 0:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest_low", "I"),
+                ("plan_digest_high", "I"),
+                ("build_revision", "I"),
+                ("schema_revision", "H"),
+                ("channel", "B"),
+                ("stage_b_plan_digest_low", "I"),
+                ("stage_b_plan_digest_high", "I"),
+                ("final_p", "H"),
+            ),
+        )
+        decoded["directional_memberships"] = [cursor.take("I") for _ in range(2)]
+        decoded["joint_membership"] = cursor.take("I")
+        decoded["directional_pooled_intervals"] = [
+            [cursor.take("i"), cursor.take("i")] for _ in range(2)
+        ]
+        decoded.update(
+            _take_fields(
+                cursor,
+                (
+                    ("planned_velocity_mrev_s", "I"),
+                    ("target_velocity_rpm", "i"),
+                    ("pwm_hz", "I"),
+                    ("encoder_counts_per_rev", "I"),
+                    ("positive_rung_count", "B"),
+                ),
+            )
+        )
+        if decoded["positive_rung_count"] > 30:
+            raise DecodeError("velocity-integral plan exceeds 30 positive rungs")
+        decoded["positive_i"] = [cursor.take("H") for _ in range(decoded["positive_rung_count"])]
+        decoded.update(
+            _take_fields(
+                cursor,
+                (
+                    ("family_size", "H"),
+                    ("total_rung_count", "B"),
+                    ("expected_observations", "H"),
+                    ("moving_stroke_us", "I"),
+                    ("zero_settle_us", "I"),
+                    ("analysis_budget_us", "I"),
+                    ("nominal_workflow_ms", "I"),
+                    ("maximum_workflow_ms", "I"),
+                    ("hard_torque_limit", "H"),
+                    ("usable_torque_limit", "H"),
+                    ("requested_velocity_mrev_s", "I"),
+                    ("machine_velocity_ceiling_mrev_s", "I"),
+                    ("requested_velocity_source", "B"),
+                    ("max_stroke_travel_mrev", "I"),
+                    ("settle_travel_reserve_mrev", "I"),
+                    ("negative_position_headroom_mrev", "I"),
+                    ("positive_position_headroom_mrev", "I"),
+                    ("max_duration_ms", "H"),
+                ),
+            )
+        )
+        decoded["plan_digest"] = decoded["plan_digest_low"] | (decoded["plan_digest_high"] << 32)
+        decoded["stage_b_plan_digest"] = decoded["stage_b_plan_digest_low"] | (
+            decoded["stage_b_plan_digest_high"] << 32
+        )
+        decoded["record_kind"] = "integral_plan"
+    elif kind == 1 and len(payload) == 22:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest_low", "I"),
+                ("plan_digest_high", "I"),
+                ("final_p", "H"),
+                ("positive_rung_count", "B"),
+                ("maximum_workflow_ms", "I"),
+            ),
+        )
+        decoded["plan_digest"] = decoded["plan_digest_low"] | (decoded["plan_digest_high"] << 32)
+        decoded["record_kind"] = "integral_plan_marker"
+    elif kind == 1:
         stage_b = len(payload) == 78
         plan_fields = [
             ("run_sequence", "I"),
@@ -445,6 +538,62 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             tuple(plan_fields),
         )
         decoded["record_kind"] = "plan"
+    elif kind == 2 and len(payload) in (46, 77):
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest_low", "I"),
+                ("plan_digest_high", "I"),
+                ("rung_index", "B"),
+                ("slot", "B"),
+                ("i_raw", "H"),
+                ("direction", "B"),
+                ("classification", "B"),
+                ("initial_lead_in", "B"),
+                ("rate_low", "i"),
+                ("rate_mean", "i"),
+                ("rate_high", "i"),
+                ("deficit_low", "i"),
+                ("deficit_high", "i"),
+                ("rate_shift", "B"),
+                ("predicted_torque_target_abs", "H"),
+                ("stationarity_code", "B"),
+            ),
+        )
+        shift = decoded["rate_shift"]
+        decoded["settled_rate_interval_q"] = [
+            decoded["rate_low"] << shift,
+            decoded["rate_high"] << shift,
+        ]
+        decoded["settled_rate_mean_q"] = decoded["rate_mean"] << shift
+        decoded["deficit_interval_q"] = [
+            decoded["deficit_low"] << shift,
+            decoded["deficit_high"] << shift,
+        ]
+        if decoded["stationarity_code"] == 0:
+            decoded.update(
+                _take_fields(
+                    cursor,
+                    (
+                        ("suffix_len", "H"),
+                        ("selected_level", "B"),
+                        ("selected_blocks", "I"),
+                        ("slope_mantissa", "i"),
+                        ("slope_shift", "B"),
+                        ("slope_half_width_mantissa", "I"),
+                        ("slope_half_width_shift", "B"),
+                        ("lag_one_q", "i"),
+                        ("lag_one_half_width_q", "I"),
+                        ("residual_mantissa", "I"),
+                        ("residual_shift", "B"),
+                        ("tested_suffixes", "B"),
+                    ),
+                )
+            )
+        decoded["plan_digest"] = decoded["plan_digest_low"] | (decoded["plan_digest_high"] << 32)
+        decoded["record_kind"] = "integral_observation"
     elif kind == 2:
         decoded = _take_fields(
             cursor,
@@ -491,6 +640,40 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             ),
         )
         decoded["record_kind"] = "observation"
+    elif kind == 3 and len(payload) == 70:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest_low", "I"),
+                ("plan_digest_high", "I"),
+                ("rung_index", "B"),
+                ("i_raw", "H"),
+            ),
+        )
+        directions = []
+        for _ in range(2):
+            direction = _take_fields(
+                cursor,
+                (
+                    ("direction", "B"),
+                    ("kind", "B"),
+                    ("classification", "B"),
+                    ("component_count", "B"),
+                    ("usable_mask", "B"),
+                    ("included_mask", "B"),
+                ),
+            )
+            direction["observation_classes"] = [cursor.take("B") for _ in range(4)]
+            components = [[cursor.take("i"), cursor.take("i")] for _ in range(2)]
+            if direction["component_count"] > 2:
+                raise DecodeError("velocity-integral rung has too many components")
+            direction["components"] = components[: direction["component_count"]]
+            directions.append(direction)
+        decoded["directions"] = directions
+        decoded["plan_digest"] = decoded["plan_digest_low"] | (decoded["plan_digest_high"] << 32)
+        decoded["record_kind"] = "integral_rung"
     elif kind == 3:
         if len(payload) == 122:
             decoded = _take_fields(
@@ -599,6 +782,34 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             ]
         decoded = _take_fields(cursor, tuple(fields))
         decoded["record_kind"] = "rung"
+    elif kind == 4 and len(payload) == 58:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest_low", "I"),
+                ("plan_digest_high", "I"),
+                ("digest_low", "I"),
+                ("digest_high", "I"),
+                ("outcome", "B"),
+                ("cause", "B"),
+                ("expected_observations", "H"),
+                ("emitted_observations", "H"),
+                ("expected_rungs", "H"),
+                ("emitted_rungs", "H"),
+            ),
+        )
+        decoded["eligible_masks"] = [cursor.take("I") for _ in range(2)]
+        current_terminus_plus_one = cursor.take("B")
+        decoded["current_terminus"] = (
+            None if current_terminus_plus_one == 0 else current_terminus_plus_one - 1
+        )
+        decoded["run_started_us"] = cursor.take("I") | (cursor.take("I") << 32)
+        decoded["run_completed_us"] = cursor.take("I") | (cursor.take("I") << 32)
+        decoded["plan_digest"] = decoded["plan_digest_low"] | (decoded["plan_digest_high"] << 32)
+        decoded["digest"] = decoded["digest_low"] | (decoded["digest_high"] << 32)
+        decoded["record_kind"] = "integral_terminal"
     elif kind == 4 and len(payload) != 71:
         decoded = {
             "record_kind": "terminal",

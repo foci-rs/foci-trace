@@ -270,6 +270,145 @@ def test_decodes_canonical_velocity_sweep_plan() -> None:
     assert frame.payload["usable_torque_limit"] == 900
 
 
+def test_decodes_full_velocity_integral_response_plan() -> None:
+    payload = bytearray([0])
+    payload.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
+    payload.extend(struct.pack("<IHBIIH", 3, 1, 0, 0x99AA_BBCC, 0xDDEE_FF00, 1_448))
+    payload.extend(
+        struct.pack(
+            "<IIIiiii",
+            0x0038_0000,
+            0x003C_0000,
+            0x0038_0000,
+            17_000_000,
+            18_000_000,
+            -19_000_000,
+            -18_000_000,
+        )
+    )
+    payload.extend(struct.pack("<IiIIB", 4_394, 264, 25_000, 4_000, 5))
+    payload.extend(struct.pack("<HHHHH", 5, 10, 20, 40, 80))
+    payload.extend(
+        struct.pack(
+            "<HBHIIIIIHHIIBIIIIH",
+            28,
+            7,
+            56,
+            512_000,
+            500_000,
+            236_000,
+            69_888,
+            69_888,
+            2_816,
+            2_534,
+            4_394,
+            10_000,
+            1,
+            10_000,
+            100,
+            20_000,
+            20_000,
+            60_000,
+        )
+    )
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert len(payload) == 143
+    assert frame.payload["record_kind"] == "integral_plan"
+    assert frame.payload["run_sequence"] == 7
+    assert frame.payload["plan_digest"] == 0x5566_7788_1122_3344
+    assert frame.payload["stage_b_plan_digest"] == 0xDDEE_FF00_99AA_BBCC
+    assert frame.payload["directional_memberships"] == [0x0038_0000, 0x003C_0000]
+    assert frame.payload["directional_pooled_intervals"] == [
+        [17_000_000, 18_000_000],
+        [-19_000_000, -18_000_000],
+    ]
+    assert frame.payload["positive_i"] == [5, 10, 20, 40, 80]
+    assert frame.payload["maximum_workflow_ms"] == 69_888
+    assert frame.payload["requested_velocity_source"] == 1
+
+
+def test_decodes_velocity_integral_response_plan_marker() -> None:
+    payload = bytearray([1])
+    payload.extend(struct.pack("<IHIIHBI", 7, 1, 0x89AB_CDEF, 0x0123_4567, 1_448, 5, 69_888))
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert frame.payload == {
+        "run_sequence": 7,
+        "evidence_sequence": 1,
+        "plan_digest_low": 0x89AB_CDEF,
+        "plan_digest_high": 0x0123_4567,
+        "final_p": 1_448,
+        "positive_rung_count": 5,
+        "maximum_workflow_ms": 69_888,
+        "plan_digest": 0x0123_4567_89AB_CDEF,
+        "record_kind": "integral_plan_marker",
+    }
+
+
+def test_decodes_velocity_integral_response_observation() -> None:
+    payload = bytearray([2])
+    payload.extend(struct.pack("<IHII", 7, 1, 0x1122_3344, 0x5566_7788))
+    payload.extend(struct.pack("<BBHBBB", 2, 3, 20, 0, 0, 1))
+    payload.extend(struct.pack("<iiiiiBH", 100, 110, 120, 10, 20, 2, 100))
+    payload.extend(bytes([0]))
+    payload.extend(struct.pack("<HBI", 64, 3, 16))
+    payload.extend(struct.pack("<iBIBiIIBB", -5, 0, 10, 0, -60, 20, 30, 0, 3))
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert len(payload) == 77
+    assert frame.payload["record_kind"] == "integral_observation"
+    assert frame.payload["plan_digest"] == 0x5566_7788_1122_3344
+    assert frame.payload["i_raw"] == 20
+    assert frame.payload["direction"] == 0
+    assert frame.payload["deficit_interval_q"] == [40, 80]
+    assert frame.payload["suffix_len"] == 64
+    assert frame.payload["lag_one_q"] == -60
+
+
+def test_decodes_velocity_integral_response_rung() -> None:
+    payload = bytearray([3])
+    payload.extend(struct.pack("<IHII", 7, 9, 0x1122_3344, 0x5566_7788))
+    payload.extend(struct.pack("<BH", 2, 20))
+    payload.extend(
+        struct.pack("<BBBBBBBBBBiiii", 0, 1, 0, 1, 0b1111, 0b0111, 0, 0, 0, 4, 10, 20, 0, 0)
+    )
+    payload.extend(
+        struct.pack("<BBBBBBBBBBiiii", 1, 1, 1, 2, 0b1111, 0, 0, 0, 0, 0, -30, -20, -10, -5)
+    )
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert len(payload) == 70
+    assert frame.payload["record_kind"] == "integral_rung"
+    assert frame.payload["i_raw"] == 20
+    assert frame.payload["directions"][0]["components"] == [[10, 20]]
+    assert frame.payload["directions"][0]["included_mask"] == 0b0111
+    assert frame.payload["directions"][1]["classification"] == 1
+    assert frame.payload["directions"][1]["components"] == [[-30, -20], [-10, -5]]
+
+
+def test_decodes_velocity_integral_response_terminal() -> None:
+    payload = bytearray([4])
+    payload.extend(struct.pack("<IHII", 7, 15, 0x1122_3344, 0x5566_7788))
+    payload.extend(struct.pack("<II", 0x99AA_BBCC, 0xDDEE_FF00))
+    payload.extend(struct.pack("<BBHHHHIIB", 1, 0, 56, 56, 7, 7, 0b11111, 0b01111, 6))
+    payload.extend(struct.pack("<IIII", 100, 0, 200, 0))
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert len(payload) == 58
+    assert frame.payload["record_kind"] == "integral_terminal"
+    assert frame.payload["plan_digest"] == 0x5566_7788_1122_3344
+    assert frame.payload["digest"] == 0xDDEE_FF00_99AA_BBCC
+    assert frame.payload["eligible_masks"] == [0b11111, 0b01111]
+    assert frame.payload["current_terminus"] == 5
+    assert frame.payload["run_completed_us"] == 200
+
+
 def test_decodes_stage_b_canonical_records_and_plan_identity() -> None:
     plan_values = (
         7,
@@ -686,6 +825,25 @@ def test_decode_commissioning_event_names() -> None:
     assert frame.payload["level_name"] == "info"
     assert frame.payload["engine_kind_name"] == "commission"
     assert frame.payload["args"] == [0, 1, 17, 3]
+
+
+@pytest.mark.parametrize(
+    ("event_id", "event_name"),
+    (
+        (134, "commission_velocity_integral_plan"),
+        (135, "commission_velocity_integral_observation"),
+        (136, "commission_velocity_integral_rung"),
+        (137, "commission_velocity_integral_derived"),
+        (138, "commission_velocity_integral_terminal"),
+        (139, "commission_velocity_integral_complete"),
+    ),
+)
+def test_decode_velocity_integral_response_event_names(event_id: int, event_name: str) -> None:
+    payload = struct.pack("<BBHBxxxiiii", 1, 7, event_id, 2, 15, 4, 0, 0)
+
+    frame = decode_frame(_header(FRAME_TYPE_EVENT, payload) + payload)
+
+    assert frame.payload["event_name"] == event_name
 
 
 def test_rejects_bad_magic() -> None:
