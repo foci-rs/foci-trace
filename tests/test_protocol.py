@@ -270,11 +270,12 @@ def test_decodes_canonical_velocity_sweep_plan() -> None:
     assert frame.payload["usable_torque_limit"] == 900
 
 
-def test_decodes_full_velocity_integral_response_plan() -> None:
-    payload = bytearray([0])
-    payload.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
-    payload.extend(struct.pack("<IHBIIH", 3, 1, 0, 0x99AA_BBCC, 0xDDEE_FF00, 1_448))
-    payload.extend(
+def test_decodes_fragmented_velocity_integral_response_plan() -> None:
+    core = bytearray([0])
+    core.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
+    core.append(0)
+    core.extend(struct.pack("<IHBIIH", 3, 1, 0, 0x99AA_BBCC, 0xDDEE_FF00, 1_448))
+    core.extend(
         struct.pack(
             "<IIIiiii",
             0x0038_0000,
@@ -286,21 +287,20 @@ def test_decodes_full_velocity_integral_response_plan() -> None:
             -18_000_000,
         )
     )
-    payload.extend(struct.pack("<IiIIB", 4_394, 264, 25_000, 4_000, 5))
-    payload.extend(struct.pack("<HHHHH", 5, 10, 20, 40, 80))
-    payload.extend(
+    core.extend(struct.pack("<IiIIBHBHH", 4_394, 264, 25_000, 4_000, 5, 28, 7, 56, 2_816))
+    core.extend(struct.pack("<H", 2_534))
+
+    schedule = bytearray([0])
+    schedule.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
+    schedule.extend(struct.pack("<BBHHHHH", 1, 5, 5, 10, 20, 40, 80))
+    schedule.extend(
         struct.pack(
-            "<HBHIIIIIHHIIBIIIIH",
-            28,
-            7,
-            56,
+            "<IIIIIIIBIIIIH",
             512_000,
             500_000,
             236_000,
             69_888,
             69_888,
-            2_816,
-            2_534,
             4_394,
             10_000,
             1,
@@ -312,21 +312,25 @@ def test_decodes_full_velocity_integral_response_plan() -> None:
         )
     )
 
-    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+    core_frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, core) + core)
+    schedule_frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, schedule) + schedule)
 
-    assert len(payload) == 143
-    assert frame.payload["record_kind"] == "integral_plan"
-    assert frame.payload["run_sequence"] == 7
-    assert frame.payload["plan_digest"] == 0x5566_7788_1122_3344
-    assert frame.payload["stage_b_plan_digest"] == 0xDDEE_FF00_99AA_BBCC
-    assert frame.payload["directional_memberships"] == [0x0038_0000, 0x003C_0000]
-    assert frame.payload["directional_pooled_intervals"] == [
+    assert len(core) == 87
+    assert len(schedule) == 74
+    assert core_frame.payload["record_kind"] == "integral_plan_core"
+    assert core_frame.payload["run_sequence"] == 7
+    assert core_frame.payload["plan_digest"] == 0x5566_7788_1122_3344
+    assert core_frame.payload["stage_b_plan_digest"] == 0xDDEE_FF00_99AA_BBCC
+    assert core_frame.payload["directional_memberships"] == [0x0038_0000, 0x003C_0000]
+    assert core_frame.payload["directional_pooled_intervals"] == [
         [17_000_000, 18_000_000],
         [-19_000_000, -18_000_000],
     ]
-    assert frame.payload["positive_i"] == [5, 10, 20, 40, 80]
-    assert frame.payload["maximum_workflow_ms"] == 69_888
-    assert frame.payload["requested_velocity_source"] == 1
+    assert schedule_frame.payload["record_kind"] == "integral_plan_schedule"
+    assert schedule_frame.payload["plan_digest"] == 0x5566_7788_1122_3344
+    assert schedule_frame.payload["positive_i"] == [5, 10, 20, 40, 80]
+    assert schedule_frame.payload["maximum_workflow_ms"] == 69_888
+    assert schedule_frame.payload["requested_velocity_source"] == 1
 
 
 def test_decodes_velocity_integral_response_plan_marker() -> None:

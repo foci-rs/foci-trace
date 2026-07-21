@@ -104,6 +104,70 @@ def _plan_marker(plan: dict[str, object], sequence: int) -> tuple[bytes, dict[st
     }
 
 
+def _plan_records(plan: dict[str, object]) -> list[tuple[bytes, dict[str, object]]]:
+    common = {
+        "run_sequence": 7,
+        "evidence_sequence": 0,
+        "plan_digest": plan["plan_digest"],
+        "positive_rung_count": plan["positive_rung_count"],
+    }
+    core_names = (
+        "build_revision",
+        "schema_revision",
+        "channel",
+        "stage_b_plan_digest",
+        "final_p",
+        "directional_memberships",
+        "joint_membership",
+        "directional_pooled_intervals",
+        "planned_velocity_mrev_s",
+        "target_velocity_rpm",
+        "pwm_hz",
+        "encoder_counts_per_rev",
+        "family_size",
+        "total_rung_count",
+        "expected_observations",
+        "hard_torque_limit",
+        "usable_torque_limit",
+    )
+    schedule_names = (
+        "positive_i",
+        "moving_stroke_us",
+        "zero_settle_us",
+        "analysis_budget_us",
+        "nominal_workflow_ms",
+        "maximum_workflow_ms",
+        "requested_velocity_mrev_s",
+        "machine_velocity_ceiling_mrev_s",
+        "requested_velocity_source",
+        "max_stroke_travel_mrev",
+        "settle_travel_reserve_mrev",
+        "negative_position_headroom_mrev",
+        "positive_position_headroom_mrev",
+        "max_duration_ms",
+    )
+    return [
+        (
+            b"",
+            {
+                **common,
+                **{name: plan[name] for name in core_names},
+                "record_kind": "integral_plan_core",
+                "plan_fragment": 0,
+            },
+        ),
+        (
+            b"",
+            {
+                **common,
+                **{name: plan[name] for name in schedule_names},
+                "record_kind": "integral_plan_schedule",
+                "plan_fragment": 1,
+            },
+        ),
+    ]
+
+
 def _observation_record(
     result: dict[str, object], sequence: int, plan_digest: int
 ) -> tuple[bytes, dict[str, object]]:
@@ -195,9 +259,7 @@ def _synthetic_complete_capture() -> tuple[
 ]:
     plan = _plan()
     plan["plan_digest"] = integral_plan_digest(plan)
-    records: list[tuple[bytes, dict[str, object]]] = [
-        (b"", {**plan, "record_kind": "integral_plan", "run_sequence": 7})
-    ]
+    records = _plan_records(plan)
     sequence = 1
     records.append(_plan_marker(plan, sequence))
     sequence += 1
@@ -269,7 +331,7 @@ def _synthetic_complete_capture() -> tuple[
     for byte in compact_marker:
         digest = ((digest ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
     for raw, value in records:
-        if value["record_kind"] == "integral_plan":
+        if value["record_kind"] in ("integral_plan_core", "integral_plan_schedule"):
             continue
         for byte in raw:
             digest = ((digest ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
@@ -310,7 +372,10 @@ def test_complete_capture_reconstructs_curve_counts_and_digest() -> None:
 
 def test_capture_audit_reports_digest_and_observation_mismatch_paths() -> None:
     raw, records = _synthetic_complete_capture()
-    records[2][1]["classification"] = 4
+    first_observation = next(
+        value for _raw, value in records if value["record_kind"] == "integral_observation"
+    )
+    first_observation["classification"] = 4
     records[-1][1]["digest"] ^= 1
 
     audit = audit_velocity_integral(raw, records)

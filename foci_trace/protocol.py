@@ -427,64 +427,81 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ("evidence_sequence", "H"),
                 ("plan_digest_low", "I"),
                 ("plan_digest_high", "I"),
-                ("build_revision", "I"),
-                ("schema_revision", "H"),
-                ("channel", "B"),
-                ("stage_b_plan_digest_low", "I"),
-                ("stage_b_plan_digest_high", "I"),
-                ("final_p", "H"),
             ),
         )
-        decoded["directional_memberships"] = [cursor.take("I") for _ in range(2)]
-        decoded["joint_membership"] = cursor.take("I")
-        decoded["directional_pooled_intervals"] = [
-            [cursor.take("i"), cursor.take("i")] for _ in range(2)
-        ]
-        decoded.update(
-            _take_fields(
-                cursor,
-                (
-                    ("planned_velocity_mrev_s", "I"),
-                    ("target_velocity_rpm", "i"),
-                    ("pwm_hz", "I"),
-                    ("encoder_counts_per_rev", "I"),
-                    ("positive_rung_count", "B"),
-                ),
+        fragment = cursor.take("B")
+        if fragment == 0:
+            decoded.update(
+                _take_fields(
+                    cursor,
+                    (
+                        ("build_revision", "I"),
+                        ("schema_revision", "H"),
+                        ("channel", "B"),
+                        ("stage_b_plan_digest_low", "I"),
+                        ("stage_b_plan_digest_high", "I"),
+                        ("final_p", "H"),
+                    ),
+                )
             )
-        )
-        if decoded["positive_rung_count"] > 30:
-            raise DecodeError("velocity-integral plan exceeds 30 positive rungs")
-        decoded["positive_i"] = [cursor.take("H") for _ in range(decoded["positive_rung_count"])]
-        decoded.update(
-            _take_fields(
-                cursor,
-                (
-                    ("family_size", "H"),
-                    ("total_rung_count", "B"),
-                    ("expected_observations", "H"),
-                    ("moving_stroke_us", "I"),
-                    ("zero_settle_us", "I"),
-                    ("analysis_budget_us", "I"),
-                    ("nominal_workflow_ms", "I"),
-                    ("maximum_workflow_ms", "I"),
-                    ("hard_torque_limit", "H"),
-                    ("usable_torque_limit", "H"),
-                    ("requested_velocity_mrev_s", "I"),
-                    ("machine_velocity_ceiling_mrev_s", "I"),
-                    ("requested_velocity_source", "B"),
-                    ("max_stroke_travel_mrev", "I"),
-                    ("settle_travel_reserve_mrev", "I"),
-                    ("negative_position_headroom_mrev", "I"),
-                    ("positive_position_headroom_mrev", "I"),
-                    ("max_duration_ms", "H"),
-                ),
+            decoded["directional_memberships"] = [cursor.take("I") for _ in range(2)]
+            decoded["joint_membership"] = cursor.take("I")
+            decoded["directional_pooled_intervals"] = [
+                [cursor.take("i"), cursor.take("i")] for _ in range(2)
+            ]
+            decoded.update(
+                _take_fields(
+                    cursor,
+                    (
+                        ("planned_velocity_mrev_s", "I"),
+                        ("target_velocity_rpm", "i"),
+                        ("pwm_hz", "I"),
+                        ("encoder_counts_per_rev", "I"),
+                        ("positive_rung_count", "B"),
+                        ("family_size", "H"),
+                        ("total_rung_count", "B"),
+                        ("expected_observations", "H"),
+                        ("hard_torque_limit", "H"),
+                        ("usable_torque_limit", "H"),
+                    ),
+                )
             )
-        )
+            decoded["stage_b_plan_digest"] = decoded["stage_b_plan_digest_low"] | (
+                decoded["stage_b_plan_digest_high"] << 32
+            )
+            decoded["record_kind"] = "integral_plan_core"
+        elif fragment == 1:
+            decoded["positive_rung_count"] = cursor.take("B")
+            if decoded["positive_rung_count"] > 30:
+                raise DecodeError("velocity-integral plan exceeds 30 positive rungs")
+            decoded["positive_i"] = [
+                cursor.take("H") for _ in range(decoded["positive_rung_count"])
+            ]
+            decoded.update(
+                _take_fields(
+                    cursor,
+                    (
+                        ("moving_stroke_us", "I"),
+                        ("zero_settle_us", "I"),
+                        ("analysis_budget_us", "I"),
+                        ("nominal_workflow_ms", "I"),
+                        ("maximum_workflow_ms", "I"),
+                        ("requested_velocity_mrev_s", "I"),
+                        ("machine_velocity_ceiling_mrev_s", "I"),
+                        ("requested_velocity_source", "B"),
+                        ("max_stroke_travel_mrev", "I"),
+                        ("settle_travel_reserve_mrev", "I"),
+                        ("negative_position_headroom_mrev", "I"),
+                        ("positive_position_headroom_mrev", "I"),
+                        ("max_duration_ms", "H"),
+                    ),
+                )
+            )
+            decoded["record_kind"] = "integral_plan_schedule"
+        else:
+            raise DecodeError(f"unknown velocity-integral plan fragment {fragment}")
+        decoded["plan_fragment"] = fragment
         decoded["plan_digest"] = decoded["plan_digest_low"] | (decoded["plan_digest_high"] << 32)
-        decoded["stage_b_plan_digest"] = decoded["stage_b_plan_digest_low"] | (
-            decoded["stage_b_plan_digest_high"] << 32
-        )
-        decoded["record_kind"] = "integral_plan"
     elif kind == 1 and len(payload) == 22:
         decoded = _take_fields(
             cursor,

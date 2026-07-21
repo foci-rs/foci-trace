@@ -576,26 +576,51 @@ def audit_velocity_integral(
     raw_observations: list[Any], evidence_records: list[tuple[bytes, dict[str, object]]]
 ) -> dict[str, object]:
     """Audit one integral-response run from raw samples and canonical records."""
-    plans = [value for _raw, value in evidence_records if value["record_kind"] == "integral_plan"]
+    plan_cores = [
+        value for _raw, value in evidence_records if value["record_kind"] == "integral_plan_core"
+    ]
+    plan_schedules = [
+        value
+        for _raw, value in evidence_records
+        if value["record_kind"] == "integral_plan_schedule"
+    ]
     terminals = [
         value for _raw, value in evidence_records if value["record_kind"] == "integral_terminal"
     ]
-    identities = plans or terminals or [value for _raw, value in evidence_records]
-    if len(plans) != 1 or len(terminals) != 1:
+    identities = (
+        plan_cores or plan_schedules or terminals or [value for _raw, value in evidence_records]
+    )
+    if len(plan_cores) != 1 or len(plan_schedules) != 1 or len(terminals) != 1:
         return {
             "run_sequence": int(identities[0].get("run_sequence", 0)) if identities else 0,
-            "plan": dict(plans[0]) if len(plans) == 1 else None,
+            "plan": None,
             "terminal": dict(terminals[0]) if len(terminals) == 1 else None,
             "complete": False,
             "matches_firmware": False,
             "mismatches": [
-                "partial integral-response capture: one full plan and terminal required"
+                "partial integral-response capture: one core plan fragment, one schedule "
+                "fragment, and one terminal required"
             ],
             "caveats": ["partial velocity-integral response capture"],
         }
-    plan, terminal = plans[0], terminals[0]
+    core, schedule, terminal = plan_cores[0], plan_schedules[0], terminals[0]
+    plan_identity_fields = (
+        "run_sequence",
+        "evidence_sequence",
+        "plan_digest",
+        "positive_rung_count",
+    )
+    fragment_mismatches: list[str] = []
+    _compare_fields(
+        core,
+        schedule,
+        plan_identity_fields,
+        fragment_mismatches,
+        "plan fragments",
+    )
+    plan = {**core, **schedule, "record_kind": "integral_plan"}
     run_sequence = int(plan["run_sequence"])
-    mismatches: list[str] = []
+    mismatches = fragment_mismatches
     _validate_plan(plan, mismatches)
     if int(terminal["run_sequence"]) != run_sequence:
         mismatches.append("terminal run sequence differs from plan")
