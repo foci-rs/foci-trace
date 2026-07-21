@@ -54,6 +54,10 @@ from .velocity_measurement import (
     audit_velocity_sweep,
     velocity_report_to_json,
 )
+from .velocity_integral import (
+    audit_integral_reproduction_pair,
+    audit_velocity_integral,
+)
 
 DEFAULT_CLOCK_HZ = 84_000_000
 VELOCITY_REFERENCE_MAX_LEVELS = 8
@@ -252,6 +256,7 @@ class CaptureAnalysis:
     contour_segments: list[ContourSegmentReport] = field(default_factory=list)
     velocity_reports: list[VelocityCaptureGroup] = field(default_factory=list)
     velocity_sweep_audits: list[dict[str, object]] = field(default_factory=list)
+    velocity_integral_audits: list[dict[str, object]] = field(default_factory=list)
     corexy_plus: str | None = None
     corexy_minus: str | None = None
 
@@ -1855,6 +1860,7 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                 item
                 for item in state.velocity_sweep_evidence
                 if int(item.payload.get("run_sequence", -1)) == run_sequence
+                and not str(item.payload.get("record_kind", "")).startswith("integral_")
             ]
             if not evidence:
                 continue
@@ -1895,6 +1901,65 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                 if outcome == 0 or (outcome == 2 and cause == 5):
                     retained_candidates[candidate_key] = report
                 else:
+                    retained_candidates.pop(candidate_key, None)
+            audits.append(report)
+    return audits
+
+
+def _velocity_integral_audits(states: dict[int, _DeviceState]) -> list[dict[str, object]]:
+    audits: list[dict[str, object]] = []
+    retained_candidates: dict[tuple[int, int], dict[str, object]] = {}
+    for device_index, state in sorted(states.items()):
+        run_sequences = sorted(
+            {
+                int(item.payload["run_sequence"])
+                for item in state.velocity_sweep_evidence
+                if str(item.payload.get("record_kind", "")).startswith("integral_")
+                and "run_sequence" in item.payload
+            }
+        )
+        for run_sequence in run_sequences:
+            evidence = [
+                item
+                for item in state.velocity_sweep_evidence
+                if int(item.payload.get("run_sequence", -1)) == run_sequence
+                and str(item.payload.get("record_kind", "")).startswith("integral_")
+            ]
+            if not evidence:
+                continue
+            source_indexes = {item.source_index for item in evidence}
+            if len(source_indexes) != 1:
+                raise ValueError("velocity-integral evidence changed source index")
+            source_index = next(iter(source_indexes))
+            start = min(item.timestamp_ticks for item in evidence)
+            end = max(item.timestamp_ticks for item in evidence)
+            raw = [
+                item.observation
+                for item in state.velocity_observations
+                if item.source_index == source_index and start <= item.timestamp_ticks <= end
+            ]
+            report = audit_velocity_integral(
+                raw,
+                [(item.raw_payload, item.payload) for item in evidence],
+            )
+            report["device_index"] = device_index
+            report["source_index"] = source_index
+            report["serial"] = state.report.serial or state.report.metadata_serial
+            candidate_key = (device_index, source_index)
+            terminal = report.get("terminal")
+            if isinstance(terminal, dict):
+                outcome = int(terminal.get("outcome", -1))
+                cause = int(terminal.get("cause", -1))
+                previous = retained_candidates.get(candidate_key)
+                if previous is not None and outcome in (1, 2) and (outcome == 1 or cause == 2):
+                    pair_audit = audit_integral_reproduction_pair(previous, report)
+                    report["reproduction_pair_audit"] = pair_audit
+                    if not pair_audit["matches_firmware"]:
+                        report["matches_firmware"] = False
+                        report["mismatches"].extend(pair_audit["mismatches"])
+                if outcome == 0 or (outcome == 2 and cause == 2):
+                    retained_candidates[candidate_key] = report
+                elif outcome != 4:
                     retained_candidates.pop(candidate_key, None)
             audits.append(report)
     return audits
@@ -2057,6 +2122,7 @@ def analyze_capture(
         contour_segments=contour_segments,
         velocity_reports=_velocity_capture_groups(states, commissioning_report),
         velocity_sweep_audits=_velocity_sweep_audits(states),
+        velocity_integral_audits=_velocity_integral_audits(states),
         corexy_plus=corexy_plus,
         corexy_minus=corexy_minus,
     )
@@ -2458,6 +2524,19 @@ def format_analysis(
                     derived=projection.get("offline_derived", "unavailable"),
                 )
             )
+    for integral in analysis.velocity_integral_audits:
+        evidence = integral.get("run_evidence", {})
+        masks = evidence.get("eligible_masks", []) if isinstance(evidence, dict) else []
+        stage_b_lines.append(
+            "velocity_integral dev={device} source={source} run={run} eligible={eligible} "
+            "matches_firmware={matches}".format(
+                device=integral.get("device_index", "?"),
+                source=integral.get("source_index", "?"),
+                run=integral.get("run_sequence", "?"),
+                eligible=masks,
+                matches=str(bool(integral.get("matches_firmware"))).lower(),
+            )
+        )
     if stage_b_lines:
         text = "\n".join(part for part in (text, *stage_b_lines) if part)
     if not include_contour:
@@ -2557,7 +2636,7 @@ def analysis_to_json(analysis: CaptureAnalysis) -> dict[str, object]:
 
 def velocity_analysis_to_json(analysis: CaptureAnalysis) -> dict[str, object]:
     """Convert velocity measurement groups to deterministic JSON-compatible values."""
-    return {
+    result = {
         "sweeps": analysis.velocity_sweep_audits,
         "groups": [
             {
@@ -2583,6 +2662,9 @@ def velocity_analysis_to_json(analysis: CaptureAnalysis) -> dict[str, object]:
             for group in analysis.velocity_reports
         ],
     }
+    if analysis.velocity_integral_audits:
+        result["integral_responses"] = analysis.velocity_integral_audits
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:

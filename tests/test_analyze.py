@@ -6,6 +6,7 @@ import struct
 import pytest
 
 from foci_trace.analyze import (
+    CaptureAnalysis,
     analyze_capture,
     format_analysis,
     format_summary,
@@ -2425,3 +2426,21 @@ def test_velocity_group_rejects_mixed_signed_targets() -> None:
 
     with pytest.raises(ValueError, match="mixed targets"):
         analyze_capture(io.BytesIO(output.getvalue()))
+
+
+def test_velocity_integral_audit_is_added_only_when_present() -> None:
+    empty = velocity_analysis_to_json(CaptureAnalysis(devices=[]))
+    audit = {
+        "device_index": 0,
+        "source_index": 1,
+        "run_sequence": 7,
+        "matches_firmware": True,
+        "run_evidence": {"eligible_masks": [0b11111, 0b11111]},
+    }
+    analysis = CaptureAnalysis(devices=[], velocity_integral_audits=[audit])
+
+    encoded = velocity_analysis_to_json(analysis)
+
+    assert "integral_responses" not in empty
+    assert encoded["integral_responses"] == [audit]
+    assert "velocity_integral dev=0 source=1 run=7" in format_analysis(analysis)

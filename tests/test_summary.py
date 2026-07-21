@@ -70,3 +70,40 @@ def test_summary_tracks_stage_b_regions_nomination_and_terminal() -> None:
     assert "stage_b_fragments=1" in text
     assert "stage_b_p=1448" in text
     assert "stage_b_outcome=0" in text
+
+
+def test_summary_tracks_velocity_integral_rungs_and_terminal() -> None:
+    summary = LiveSummary()
+    for sequence, payload in enumerate(
+        (
+            {"record_kind": "integral_rung"},
+            {"record_kind": "integral_rung"},
+            {"record_kind": "integral_terminal", "outcome": 1},
+        ),
+        1,
+    ):
+        summary.observe(
+            0,
+            sequence,
+            Frame(
+                header=FrameHeader(
+                    9,
+                    32,
+                    FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
+                    0,
+                    0,
+                    1,
+                    0,
+                    sequence,
+                    sequence,
+                    1,
+                ),
+                payload=payload,
+                raw_payload=b"",
+            ),
+        )
+
+    text = summary.render()
+
+    assert "velocity_integral_rungs=2" in text
+    assert "velocity_integral_outcome=1" in text

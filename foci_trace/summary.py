@@ -35,6 +35,8 @@ class DeviceSummary:
     stage_b_fragments: int = 0
     stage_b_nominated_p: int = 0
     stage_b_outcome: int | None = None
+    velocity_integral_rungs: int = 0
+    velocity_integral_outcome: int | None = None
 
 
 class LiveSummary:
@@ -85,6 +87,10 @@ class LiveSummary:
                 device.stage_b_nominated_p = int(frame.payload["nominated_p"])
             elif kind == "stage_b_terminal":
                 device.stage_b_outcome = int(frame.payload["outcome"])
+            elif kind == "integral_rung":
+                device.velocity_integral_rungs += 1
+            elif kind == "integral_terminal":
+                device.velocity_integral_outcome = int(frame.payload["outcome"])
 
     def render(self) -> str:
         """Render one compact summary line."""
@@ -97,7 +103,9 @@ class LiveSummary:
                 "qhi={qhi} endpoint_pressure={endpoint_pressure} "
                 "first_spi_cycles={first_spi} max_spi_cycles={max_spi} "
                 "stage_b_regions={regions} stage_b_fragments={fragments} "
-                "stage_b_p={stage_b_p} stage_b_outcome={stage_b_outcome}".format(
+                "stage_b_p={stage_b_p} stage_b_outcome={stage_b_outcome} "
+                "velocity_integral_rungs={integral_rungs} "
+                "velocity_integral_outcome={integral_outcome}".format(
                     idx=device_index,
                     frames=item.frames,
                     gaps=item.gaps,
@@ -115,6 +123,12 @@ class LiveSummary:
                     stage_b_p=item.stage_b_nominated_p,
                     stage_b_outcome=(
                         "none" if item.stage_b_outcome is None else item.stage_b_outcome
+                    ),
+                    integral_rungs=item.velocity_integral_rungs,
+                    integral_outcome=(
+                        "none"
+                        if item.velocity_integral_outcome is None
+                        else item.velocity_integral_outcome
                     ),
                 )
             )
