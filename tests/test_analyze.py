@@ -18,6 +18,7 @@ from foci_trace.capture_file import CaptureWriter
 from foci_trace.protocol import (
     EVENT_COMMISSION_ENGINE_START,
     EVENT_COMMISSION_ENGINE_TERMINAL,
+    EVENT_COMMISSION_OUTER_SAFETY_TIMING,
     EVENT_COMMISSION_PHASE_END,
     EVENT_COMMISSION_PHASE_START,
     EVENT_COMMISSION_VELOCITY_VALIDATE_GAIN,
@@ -67,6 +68,55 @@ def test_outer_safety_timing_audit_keeps_historical_absence_distinct_from_mismat
     missing_record = audit_outer_safety_timing(None, [], [11, 14_329])
     assert missing_record["matches_firmware"] is False
     assert "marker has no canonical timing record" in missing_record["mismatches"]
+
+
+def test_outer_safety_timing_event_uses_commissioning_routing_prefix() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+    timing = bytes([30]) + struct.pack(
+        "<IIIIIIIIBBBBBBBB",
+        11,
+        17,
+        9,
+        2,
+        2,
+        2,
+        3,
+        15_000,
+        1,
+        0,
+        2,
+        15,
+        4,
+        1,
+        0,
+        0,
+    )
+    writer.write_firmware_frame(
+        0,
+        1_000,
+        _header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, timing, 1, 1_000, 1, 0) + timing,
+    )
+    marker = _commission_event_payload(
+        EVENT_COMMISSION_OUTER_SAFETY_TIMING,
+        source_index=0,
+        engine_kind=4,
+        arg2=11,
+        arg3=15_000,
+    )
+    writer.write_firmware_frame(
+        0,
+        2_000,
+        _header(FRAME_TYPE_EVENT, marker, 2, 2_000, 255, 255) + marker,
+    )
+
+    analysis = analyze_capture(io.BytesIO(output.getvalue()), steady_after_s=0)
+
+    assert len(analysis.outer_safety_timing_audits) == 1
+    assert analysis.outer_safety_timing_audits[0]["source_index"] == 0
+    assert analysis.outer_safety_timing_audits[0]["engine_sequence"] == 11
+    assert analysis.outer_safety_timing_audits[0]["matches_firmware"] is True
 
 
 def _header(

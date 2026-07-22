@@ -300,6 +300,15 @@ STAGE_B_OUTCOME_INCONCLUSIVE = 2
 STAGE_B_CAUSE_NO_DIRECTIONAL_MODEL = 1
 STAGE_B_CAUSE_NO_JOINT_OPERABLE_REGION = 2
 STAGE_B_CAUSE_REPRODUCTION_MISMATCH = 5
+STAGE_B_CAUSE_RECOVERY_UNAVAILABLE = 7
+
+
+def _stage_b_inconclusive_cause(model_direction_mask: int, *, recovery_unavailable: bool) -> int:
+    if recovery_unavailable:
+        return STAGE_B_CAUSE_RECOVERY_UNAVAILABLE
+    if model_direction_mask != 3:
+        return STAGE_B_CAUSE_NO_DIRECTIONAL_MODEL
+    return STAGE_B_CAUSE_NO_JOINT_OPERABLE_REGION
 
 
 class AccuracyDecision(str, Enum):
@@ -3179,10 +3188,9 @@ def _audit_stage_b_velocity_sweep(
     if list(terminal["selected_intervals"]) != expected_intervals:
         mismatches.append("Stage B terminal selected intervals differ from replay")
     if not replay["sufficient"] and int(terminal["outcome"]) == STAGE_B_OUTCOME_INCONCLUSIVE:
-        expected_cause = (
-            STAGE_B_CAUSE_NO_DIRECTIONAL_MODEL
-            if model_direction_mask != 3
-            else STAGE_B_CAUSE_NO_JOINT_OPERABLE_REGION
+        expected_cause = _stage_b_inconclusive_cause(
+            model_direction_mask,
+            recovery_unavailable=bool(terminal.get("recovery_unavailable", 0)),
         )
         if int(terminal["cause"]) != expected_cause:
             mismatches.append(

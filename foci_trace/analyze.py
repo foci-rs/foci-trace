@@ -2244,15 +2244,15 @@ def analyze_capture(
         elif header.frame_type == FRAME_TYPE_EVENT:
             if (
                 int(frame.payload["event_id"]) == EVENT_COMMISSION_OUTER_SAFETY_TIMING
-                and int(frame.payload["arg_count"]) >= 2
+                and int(frame.payload["arg_count"]) >= 4
             ):
                 args = frame.payload["args"]
                 state.outer_safety_timing_markers.append(
                     (
                         header.timestamp_ticks,
-                        header.source_index,
                         int(args[0]),  # type: ignore[index]
-                        int(args[1]),  # type: ignore[index]
+                        int(args[2]),  # type: ignore[index]
+                        int(args[3]),  # type: ignore[index]
                     )
                 )
             commissioning.observe_event(record.device_index, header, frame.payload)
