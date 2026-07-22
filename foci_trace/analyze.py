@@ -32,6 +32,7 @@ from .contour import (
     pair_motor_samples,
 )
 from .protocol import (
+    EVENT_COMMISSION_OUTER_SAFETY_TIMING,
     FRAME_TYPE_CONTROL_DETAIL,
     FRAME_TYPE_CRITICAL,
     FRAME_TYPE_CURRENT_PATH,
@@ -76,6 +77,81 @@ PHASE_ADVANCE_FLAG_NONZERO = 1 << 1
 PHASE_ADVANCE_FLAG_CLAMPED = 1 << 2
 PHASE_ADVANCE_FLAG_GATED = 1 << 4
 PHASE_ADVANCE_FLAG_WRITE_FAILED = 1 << 5
+OUTER_SAFETY_GAP_BOUND_US = 20_000
+OUTER_SAFETY_GAP_REVIEW_US = 15_000
+
+
+def _outer_safety_gap_bin(gap_us: int) -> int | None:
+    if gap_us <= 0 or gap_us > OUTER_SAFETY_GAP_BOUND_US:
+        return None
+    return min((gap_us - 1) // 5_000, 3)
+
+
+def audit_outer_safety_timing(
+    summary: dict[str, object] | None,
+    raw_elapsed_us: list[int],
+    marker_args: list[int] | None,
+) -> dict[str, object]:
+    """Audit firmware timing evidence against the raw-covered observation subset."""
+    if summary is None:
+        mismatches = [] if marker_args is None else ["marker has no canonical timing record"]
+        return {
+            "summary_present": False,
+            "historical_absence_allowed": marker_args is None,
+            "matches_firmware": not mismatches,
+            "mismatches": mismatches,
+        }
+
+    bins = [int(value) for value in summary["bin_counts"]]  # type: ignore[index]
+    sample_count = int(summary["sample_count"])
+    zero_count = int(summary["zero_count"])
+    over_bound_count = int(summary["over_bound_count"])
+    max_gap_us = int(summary["max_realized_gap_us"])
+    identity_count = sum(bins) + zero_count + over_bound_count
+    mismatches: list[str] = []
+    if sample_count != identity_count:
+        mismatches.append("sample count differs from firmware bins and fault counts")
+
+    raw_bins = [0, 0, 0, 0]
+    raw_zero = 0
+    raw_over = 0
+    for gap_us in raw_elapsed_us:
+        bin_index = _outer_safety_gap_bin(gap_us)
+        if gap_us == 0:
+            raw_zero += 1
+        elif bin_index is None:
+            raw_over += 1
+        else:
+            raw_bins[bin_index] += 1
+    if any(raw > firmware for raw, firmware in zip(raw_bins, bins, strict=True)):
+        mismatches.append("raw-covered bin count exceeds firmware summary")
+    if raw_zero > zero_count or raw_over > over_bound_count:
+        mismatches.append("raw-covered fault count exceeds firmware summary")
+    if raw_elapsed_us and max(raw_elapsed_us) > max_gap_us:
+        mismatches.append("raw-covered maximum exceeds firmware maximum")
+    if len(raw_elapsed_us) > sample_count:
+        mismatches.append("raw-covered sample count exceeds firmware summary")
+
+    if marker_args is None:
+        mismatches.append("canonical timing record has no event marker")
+    elif marker_args != [int(summary["engine_sequence"]), max_gap_us]:
+        mismatches.append("timing marker differs from canonical record")
+
+    return {
+        "summary_present": True,
+        "historical_absence_allowed": False,
+        "firmware": dict(summary),
+        "gap_headroom_us": OUTER_SAFETY_GAP_BOUND_US - max_gap_us,
+        "reopen_bound": max_gap_us > OUTER_SAFETY_GAP_REVIEW_US,
+        "raw_covered_sample_count": len(raw_elapsed_us),
+        "raw_covered_bin_counts": raw_bins,
+        "raw_covered_zero_count": raw_zero,
+        "raw_covered_over_bound_count": raw_over,
+        "raw_covered_max_gap_us": max(raw_elapsed_us, default=0),
+        "firmware_reported_safety_only": max(0, sample_count - len(raw_elapsed_us)),
+        "matches_firmware": not mismatches,
+        "mismatches": mismatches,
+    }
 
 
 @dataclass
@@ -257,6 +333,7 @@ class CaptureAnalysis:
     velocity_reports: list[VelocityCaptureGroup] = field(default_factory=list)
     velocity_sweep_audits: list[dict[str, object]] = field(default_factory=list)
     velocity_integral_audits: list[dict[str, object]] = field(default_factory=list)
+    outer_safety_timing_audits: list[dict[str, object]] = field(default_factory=list)
     corexy_plus: str | None = None
     corexy_minus: str | None = None
 
@@ -381,6 +458,7 @@ class _DeviceState:
     control_detail_observations: list[_ControlDetailObservation] = field(default_factory=list)
     velocity_observations: list[_VelocityFrameObservation] = field(default_factory=list)
     velocity_sweep_evidence: list[_VelocitySweepEvidenceFrame] = field(default_factory=list)
+    outer_safety_timing_markers: list[tuple[int, int, int, int]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -1853,6 +1931,7 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                 int(item.payload["run_sequence"])
                 for item in state.velocity_sweep_evidence
                 if "run_sequence" in item.payload
+                and item.payload.get("record_kind") != "outer_safety_timing"
                 and (
                     item.payload.get("record_kind") != "rung_origin_recovery"
                     or int(item.payload.get("stage", -1)) == 0
@@ -1864,6 +1943,7 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                 item
                 for item in state.velocity_sweep_evidence
                 if int(item.payload.get("run_sequence", -1)) == run_sequence
+                and item.payload.get("record_kind") != "outer_safety_timing"
                 and (
                     not str(item.payload.get("record_kind", "")).startswith("integral_")
                     and (
@@ -1987,6 +2067,78 @@ def _velocity_integral_audits(states: dict[int, _DeviceState]) -> list[dict[str,
     return audits
 
 
+def _outer_safety_timing_audits(states: dict[int, _DeviceState]) -> list[dict[str, object]]:
+    audits: list[dict[str, object]] = []
+    for device_index, state in sorted(states.items()):
+        records = [
+            item
+            for item in state.velocity_sweep_evidence
+            if item.payload.get("record_kind") == "outer_safety_timing"
+        ]
+        used_markers: set[int] = set()
+        for record in records:
+            engine_sequence = int(record.payload["engine_sequence"])
+            marker_index = next(
+                (
+                    index
+                    for index, marker in enumerate(state.outer_safety_timing_markers)
+                    if index not in used_markers and marker[2] == engine_sequence
+                ),
+                None,
+            )
+            marker_args = None
+            if marker_index is not None:
+                used_markers.add(marker_index)
+                marker = state.outer_safety_timing_markers[marker_index]
+                marker_args = [marker[2], marker[3]]
+
+            run_sequence = int(record.payload["run_sequence"])
+            related = [
+                item
+                for item in state.velocity_sweep_evidence
+                if item.source_index == record.source_index
+                and int(item.payload.get("run_sequence", -1)) == run_sequence
+                and item.timestamp_ticks <= record.timestamp_ticks
+                and item is not record
+            ]
+            start_ticks = min(
+                (item.timestamp_ticks for item in related),
+                default=record.timestamp_ticks,
+            )
+            raw_elapsed_us = [
+                item.observation.elapsed_us
+                for item in state.velocity_observations
+                if item.source_index == record.source_index
+                and start_ticks <= item.timestamp_ticks <= record.timestamp_ticks
+            ]
+            report = audit_outer_safety_timing(record.payload, raw_elapsed_us, marker_args)
+            report.update(
+                {
+                    "device_index": device_index,
+                    "source_index": record.source_index,
+                    "serial": state.report.serial or state.report.metadata_serial,
+                    "run_sequence": run_sequence,
+                    "engine_sequence": engine_sequence,
+                }
+            )
+            audits.append(report)
+
+        for index, marker in enumerate(state.outer_safety_timing_markers):
+            if index in used_markers:
+                continue
+            report = audit_outer_safety_timing(None, [], [marker[2], marker[3]])
+            report.update(
+                {
+                    "device_index": device_index,
+                    "source_index": marker[1],
+                    "serial": state.report.serial or state.report.metadata_serial,
+                    "engine_sequence": marker[2],
+                }
+            )
+            audits.append(report)
+    return audits
+
+
 def analyze_capture(
     source: BinaryIO | io.BytesIO,
     steady_after_s: float = 10.0,
@@ -2090,6 +2242,19 @@ def analyze_capture(
                 frame.payload,
             )
         elif header.frame_type == FRAME_TYPE_EVENT:
+            if (
+                int(frame.payload["event_id"]) == EVENT_COMMISSION_OUTER_SAFETY_TIMING
+                and int(frame.payload["arg_count"]) >= 2
+            ):
+                args = frame.payload["args"]
+                state.outer_safety_timing_markers.append(
+                    (
+                        header.timestamp_ticks,
+                        header.source_index,
+                        int(args[0]),  # type: ignore[index]
+                        int(args[1]),  # type: ignore[index]
+                    )
+                )
             commissioning.observe_event(record.device_index, header, frame.payload)
 
     decoupling_config = (
@@ -2145,6 +2310,7 @@ def analyze_capture(
         velocity_reports=_velocity_capture_groups(states, commissioning_report),
         velocity_sweep_audits=_velocity_sweep_audits(states),
         velocity_integral_audits=_velocity_integral_audits(states),
+        outer_safety_timing_audits=_outer_safety_timing_audits(states),
         corexy_plus=corexy_plus,
         corexy_minus=corexy_minus,
     )
@@ -2559,6 +2725,24 @@ def format_analysis(
                 matches=str(bool(integral.get("matches_firmware"))).lower(),
             )
         )
+    for timing in analysis.outer_safety_timing_audits:
+        stage_b_lines.append(
+            "outer_safety_timing dev={device} source={source} engine={engine} "
+            "max_us={maximum} headroom_us={headroom} reopen_bound={reopen} "
+            "raw_covered={raw} safety_only={safety_only} matches_firmware={matches}".format(
+                device=timing.get("device_index", "?"),
+                source=timing.get("source_index", "?"),
+                engine=timing.get("engine_sequence", "?"),
+                maximum=timing.get("firmware", {}).get("max_realized_gap_us", "?")
+                if isinstance(timing.get("firmware"), dict)
+                else "?",
+                headroom=timing.get("gap_headroom_us", "?"),
+                reopen=str(bool(timing.get("reopen_bound"))).lower(),
+                raw=timing.get("raw_covered_sample_count", 0),
+                safety_only=timing.get("firmware_reported_safety_only", "?"),
+                matches=str(bool(timing.get("matches_firmware"))).lower(),
+            )
+        )
     if stage_b_lines:
         text = "\n".join(part for part in (text, *stage_b_lines) if part)
     if not include_contour:
@@ -2660,6 +2844,7 @@ def velocity_analysis_to_json(analysis: CaptureAnalysis) -> dict[str, object]:
     """Convert velocity measurement groups to deterministic JSON-compatible values."""
     result = {
         "sweeps": analysis.velocity_sweep_audits,
+        "outer_safety_timing": analysis.outer_safety_timing_audits,
         "groups": [
             {
                 "device_index": group.device_index,

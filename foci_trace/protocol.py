@@ -58,6 +58,7 @@ EVENT_COMMISSION_RESTORE_RESULT = 140
 EVENT_COMMISSION_RESTORE_ERROR_DRIFT = 141
 EVENT_COMMISSION_RESTORE_DISPOSITION = 142
 EVENT_COMMISSION_RUNG_ORIGIN_RECOVERY = 143
+EVENT_COMMISSION_OUTER_SAFETY_TIMING = 144
 EVENT_COMMISSION_DIAGNOSTIC_WARNING = 200
 
 _LEVEL_NAMES = {
@@ -103,6 +104,7 @@ _COMMISSIONING_EVENT_NAMES = {
     EVENT_COMMISSION_RESTORE_ERROR_DRIFT: "commission_restore_error_drift",
     EVENT_COMMISSION_RESTORE_DISPOSITION: "commission_restore_disposition",
     EVENT_COMMISSION_RUNG_ORIGIN_RECOVERY: "commission_rung_origin_recovery",
+    EVENT_COMMISSION_OUTER_SAFETY_TIMING: "commission_outer_safety_timing",
     EVENT_COMMISSION_DIAGNOSTIC_WARNING: "commission_diagnostic_warning",
 }
 
@@ -1226,6 +1228,40 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             ),
         )
         decoded["record_kind"] = "reproduction_v3_digest"
+    elif kind == 30:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("engine_sequence", "I"),
+                ("run_sequence", "I"),
+                ("sample_count", "I"),
+            ),
+        )
+        decoded["bin_counts"] = [cursor.take("I") for _ in range(4)]
+        decoded["max_realized_gap_us"] = cursor.take("I")
+        decoded.update(
+            _take_fields(
+                cursor,
+                (
+                    ("max_context_present", "B"),
+                    ("max_stage", "B"),
+                    ("max_phase", "B"),
+                    ("max_rung", "B"),
+                    ("max_slot", "B"),
+                    ("max_target_zero", "B"),
+                    ("zero_count", "B"),
+                    ("over_bound_count", "B"),
+                ),
+            )
+        )
+        expected_samples = (
+            sum(decoded["bin_counts"]) + decoded["zero_count"] + decoded["over_bound_count"]
+        )
+        if decoded["sample_count"] != expected_samples:
+            raise DecodeError("outer-safety timing sample count does not match its bins")
+        decoded["max_context_present"] = bool(decoded["max_context_present"])
+        decoded["max_target_zero"] = bool(decoded["max_target_zero"])
+        decoded["record_kind"] = "outer_safety_timing"
     else:
         raise DecodeError(f"unknown velocity-sweep evidence kind {kind}")
     cursor.finish()

@@ -137,3 +137,36 @@ def test_summary_tracks_successful_and_contained_recoveries() -> None:
 
     assert "recoveries=4" in text
     assert "contained_recoveries=2" in text
+
+
+def test_summary_surfaces_outer_safety_timing_margin() -> None:
+    summary = LiveSummary()
+    summary.observe(
+        0,
+        1,
+        Frame(
+            header=FrameHeader(
+                9,
+                32,
+                FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
+                0,
+                0,
+                1,
+                0,
+                1,
+                1,
+                1,
+            ),
+            payload={
+                "record_kind": "outer_safety_timing",
+                "max_realized_gap_us": 15_001,
+            },
+            raw_payload=b"",
+        ),
+    )
+
+    text = summary.render()
+
+    assert "outer_gap_max_us=15001" in text
+    assert "outer_gap_headroom_us=4999" in text
+    assert "outer_gap_reopen=true" in text

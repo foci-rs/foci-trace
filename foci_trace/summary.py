@@ -39,6 +39,7 @@ class DeviceSummary:
     velocity_integral_outcome: int | None = None
     rung_origin_recoveries: int = 0
     contained_recoveries: int = 0
+    outer_gap_max_us: int | None = None
 
 
 class LiveSummary:
@@ -97,6 +98,8 @@ class LiveSummary:
                 device.rung_origin_recoveries += 1
                 if int(frame.payload["outcome"]) >= 2:
                     device.contained_recoveries += 1
+            elif kind == "outer_safety_timing":
+                device.outer_gap_max_us = int(frame.payload["max_realized_gap_us"])
 
     def render(self) -> str:
         """Render one compact summary line."""
@@ -141,4 +144,11 @@ class LiveSummary:
                     contained_recoveries=item.contained_recoveries,
                 )
             )
+            if item.outer_gap_max_us is not None:
+                maximum = item.outer_gap_max_us
+                parts[-1] += (
+                    f" outer_gap_max_us={maximum}"
+                    f" outer_gap_headroom_us={20_000 - maximum}"
+                    f" outer_gap_reopen={'true' if maximum > 15_000 else 'false'}"
+                )
         return " | ".join(parts)

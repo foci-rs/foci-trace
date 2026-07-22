@@ -885,6 +885,52 @@ def test_decodes_canonical_velocity_sweep_terminal_digest() -> None:
     assert frame.payload["digest_high"] == 0x53E2_5AF6
 
 
+def test_decodes_outer_safety_timing_and_rejects_count_drift() -> None:
+    payload = bytes([30]) + struct.pack(
+        "<IIIIIIIIBBBBBBBB",
+        11,
+        17,
+        89,
+        80,
+        7,
+        2,
+        0,
+        14_329,
+        1,
+        0,
+        4,
+        21,
+        7,
+        1,
+        0,
+        0,
+    )
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert frame.payload == {
+        "record_kind": "outer_safety_timing",
+        "engine_sequence": 11,
+        "run_sequence": 17,
+        "sample_count": 89,
+        "bin_counts": [80, 7, 2, 0],
+        "max_realized_gap_us": 14_329,
+        "max_context_present": True,
+        "max_stage": 0,
+        "max_phase": 4,
+        "max_rung": 21,
+        "max_slot": 7,
+        "max_target_zero": True,
+        "zero_count": 0,
+        "over_bound_count": 0,
+    }
+
+    corrupt = bytearray(payload)
+    corrupt[9:13] = struct.pack("<I", 90)
+    with pytest.raises(DecodeError, match="sample count"):
+        decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, corrupt) + corrupt)
+
+
 def test_decode_v2_critical_keeps_legacy_torque_fields() -> None:
     payload = bytearray(84)
     payload[60:64] = struct.pack("<I", 0x1122_3344)
@@ -973,6 +1019,7 @@ def test_decode_commissioning_event_names() -> None:
         (138, "commission_velocity_integral_terminal"),
         (139, "commission_velocity_integral_complete"),
         (143, "commission_rung_origin_recovery"),
+        (144, "commission_outer_safety_timing"),
     ),
 )
 def test_decode_velocity_integral_response_event_names(event_id: int, event_name: str) -> None:

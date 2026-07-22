@@ -8,6 +8,7 @@ import pytest
 from foci_trace.analyze import (
     CaptureAnalysis,
     analyze_capture,
+    audit_outer_safety_timing,
     format_analysis,
     format_summary,
     summarize_capture,
@@ -32,6 +33,40 @@ from foci_trace.protocol import (
     PROTOCOL_VERSION,
     SUBSYSTEM_COMMISSIONING,
 )
+
+
+def test_outer_safety_timing_audit_reviews_margin_and_raw_coverage() -> None:
+    summary = {
+        "engine_sequence": 11,
+        "run_sequence": 17,
+        "sample_count": 9,
+        "bin_counts": [2, 2, 2, 3],
+        "max_realized_gap_us": 15_000,
+        "zero_count": 0,
+        "over_bound_count": 0,
+    }
+
+    report = audit_outer_safety_timing(summary, [5_000, 5_001, 10_001], [11, 15_000])
+
+    assert report["gap_headroom_us"] == 5_000
+    assert report["reopen_bound"] is False
+    assert report["raw_covered_bin_counts"] == [1, 1, 1, 0]
+    assert report["firmware_reported_safety_only"] == 6
+    assert report["matches_firmware"] is True
+
+    summary["max_realized_gap_us"] = 15_001
+    assert audit_outer_safety_timing(summary, [], [11, 15_001])["reopen_bound"] is True
+
+
+def test_outer_safety_timing_audit_keeps_historical_absence_distinct_from_mismatch() -> None:
+    historical = audit_outer_safety_timing(None, [], None)
+    assert historical["summary_present"] is False
+    assert historical["historical_absence_allowed"] is True
+    assert historical["matches_firmware"] is True
+
+    missing_record = audit_outer_safety_timing(None, [], [11, 14_329])
+    assert missing_record["matches_firmware"] is False
+    assert "marker has no canonical timing record" in missing_record["mismatches"]
 
 
 def _header(
@@ -2026,7 +2061,11 @@ def test_main_writes_deterministic_velocity_report_file(tmp_path, capsys) -> Non
     captured = capsys.readouterr()
     assert rc == 0
     assert captured.out == ""
-    assert json.loads(report_path.read_text()) == {"groups": [], "sweeps": []}
+    assert json.loads(report_path.read_text()) == {
+        "groups": [],
+        "outer_safety_timing": [],
+        "sweeps": [],
+    }
     assert report_path.read_text().endswith("\n")
 
 
