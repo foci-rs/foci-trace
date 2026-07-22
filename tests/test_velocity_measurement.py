@@ -8,7 +8,13 @@ from foci_trace.velocity_measurement import (
     VelocityObservation,
     analyze_velocity_observations,
     analyze_stationary_tail,
+    audit_rung_origin_recovery,
     classify_absolute_rate,
+    plan_rung_origin_recovery,
+    recovery_return_distance_counts,
+    recovery_runtime_us,
+    recovery_target_rpm,
+    recovery_wrong_way,
     velocity_report_to_json,
 )
 
@@ -37,6 +43,120 @@ def _observation(
         pid_velocity_actual=pid_velocity_actual,
         actual_velocity_pptm=actual_velocity_pptm,
     )
+
+
+def test_recovery_geometry_and_deadlines_match_firmware_integer_arithmetic() -> None:
+    plan = plan_rung_origin_recovery(
+        max_stroke_travel_mrev=2_500,
+        settle_travel_reserve_mrev=250,
+        encoder_counts_per_rev=4_000,
+        planned_velocity_mrev_s=4_394,
+        primitive_cap_us=3_000_000,
+    )
+
+    assert plan == {
+        "origin_band_counts": 1_000,
+        "nominal_slot_us": 1_816_958,
+        "maximum_slot_us": 3_000_000,
+    }
+    assert recovery_return_distance_counts(8_458, 1_000) == 7_458
+    with pytest.raises(ValueError, match="primitive cap"):
+        recovery_runtime_us(7_458, 3_150_000, 3_000_000)
+    assert recovery_runtime_us(7_458, 6_300_000, 3_000_000) == 2_431_810
+
+
+def test_recovery_target_and_wrong_way_are_sign_symmetric() -> None:
+    assert recovery_target_rpm(8_458, 264) == -264
+    assert recovery_target_rpm(-8_458, 264) == 264
+    assert recovery_wrong_way(8_458, 8_459) is False
+    assert recovery_wrong_way(8_458, 8_460) is True
+    assert recovery_wrong_way(-8_458, -8_460) is True
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected_mismatch"),
+    (
+        ({}, None),
+        (
+            {
+                "start_offset_counts": 900,
+                "closest_offset_counts": 900,
+                "final_offset_counts": 900,
+                "lower_rate_q": 0,
+                "moving_duration_us": 0,
+                "settle_duration_us": 0,
+                "total_duration_us": 0,
+                "binding_source": 0,
+                "outcome": 0,
+            },
+            None,
+        ),
+        (
+            {
+                "closest_offset_counts": 8_458,
+                "final_offset_counts": 8_458,
+                "lower_rate_q": 0,
+                "moving_duration_us": 0,
+                "settle_duration_us": 0,
+                "total_duration_us": 0,
+                "binding_source": 2,
+                "outcome": 2,
+            },
+            None,
+        ),
+        (
+            {
+                "closest_offset_counts": 8_458,
+                "final_offset_counts": 8_458,
+                "lower_rate_q": 3_150_000,
+                "moving_duration_us": 0,
+                "settle_duration_us": 0,
+                "total_duration_us": 0,
+                "binding_source": 3,
+                "outcome": 3,
+            },
+            None,
+        ),
+        ({"final_offset_counts": 1_001, "outcome": 1}, "outside origin band"),
+        ({"closest_offset_counts": 8_460}, "wrong-way growth"),
+        ({"planned_velocity_mrev_s": 4_393}, "planned velocity"),
+    ),
+)
+def test_recovery_audit_classifies_success_containment_and_fault_paths(
+    changes: dict[str, int], expected_mismatch: str | None
+) -> None:
+    record = {
+        "stage": 0,
+        "rung_index": 4,
+        "velocity_p": 1_448,
+        "planned_velocity_mrev_s": 4_394,
+        "start_offset_counts": 8_458,
+        "closest_offset_counts": 900,
+        "final_offset_counts": 734,
+        "origin_band_counts": 1_000,
+        "lower_rate_q": 6_300_000,
+        "moving_duration_us": 1_200_000,
+        "settle_duration_us": 736_000,
+        "total_duration_us": 1_936_000,
+        "peak_torque_target_abs": 2_533,
+        "binding_source": 1,
+        "outcome": 1,
+    }
+    record.update(changes)
+    plan = {
+        "planned_velocity_mrev_s": 4_394,
+        "recovery_origin_band_counts": 1_000,
+        "recovery_maximum_slot_us": 3_000_000,
+        "usable_torque_limit": 2_534,
+    }
+
+    audit = audit_rung_origin_recovery(record, plan)
+
+    if expected_mismatch is None:
+        assert audit["matches_firmware"] is True
+    else:
+        assert audit["matches_firmware"] is False
+        assert any(expected_mismatch in item for item in audit["mismatches"])
 
 
 def test_golden_vector_records_every_level_moment() -> None:
@@ -680,6 +800,131 @@ def test_stage_b_replay_uses_eight_slots_and_four_k_confidence() -> None:
     assert replay["directional_rungs"][1][0]["operable_count"] == 4
 
 
+def test_stage_b_recovery_is_statistically_excluded_at_partial_terminus() -> None:
+    from foci_trace.velocity_measurement import _reconstruct_observation, replay_stage_b_regions
+
+    plan = {
+        "record_kind": "plan",
+        "run_sequence": 11,
+        "evidence_sequence": 0,
+        "rung_count": 23,
+        "observations_per_direction": 4,
+        "planned_velocity_mrev_s": 4_394,
+        "target_velocity_rpm": 264,
+        "p_start": 256,
+        "p_top": 32_767,
+        "hard_torque_limit": 1_000,
+        "usable_torque_limit": 900,
+        "max_stroke_travel_mrev": 2_500,
+        "settle_travel_reserve_mrev": 250,
+        "recovery_origin_band_counts": 1_000,
+        "recovery_nominal_slot_us": 1_816_958,
+        "recovery_maximum_slot_us": 3_000_000,
+        "recovery_slot_count": 23,
+    }
+    terminal = {
+        "record_kind": "stage_b_terminal",
+        "run_sequence": 11,
+        "encoder_counts_per_rev": 4_000,
+        "f_pwm_hz": 25_000,
+        "emitted_observations": 177,
+        "recovery_unavailable": 1,
+        "cause": 4,
+    }
+    raw_observations = []
+    evidence: list[tuple[bytes, dict[str, object]]] = [(b"plan", plan)]
+    sequence = 1
+    drift = (4_632, 6_405, 8_458, 7_971)
+    for rung_index in range(22):
+        for slot in range(8):
+            direction = 1 if slot % 2 == 0 else -1
+            stroke = [
+                _observation(
+                    direction * 17,
+                    direction=direction,
+                    stroke_index=rung_index * 8 + slot,
+                    target_cpms=direction * 18,
+                    peak_torque_target_abs=100,
+                )
+                for _ in range(256)
+            ]
+            raw_observations.extend(stroke)
+            record = {
+                "record_kind": "observation",
+                "run_sequence": 11,
+                "evidence_sequence": sequence,
+                "rung_index": rung_index,
+                "slot": slot,
+                "velocity_p": 256 + rung_index,
+                "target_velocity_rpm": direction * 264,
+                "flags": 0,
+            }
+            record.update(_reconstruct_observation(stroke, record, plan, terminal))
+            evidence.append((bytes((2, rung_index, slot)), record))
+            sequence += 1
+        start_offset = drift[rung_index % len(drift)]
+        recovery = {
+            "record_kind": "rung_origin_recovery",
+            "run_sequence": 11,
+            "evidence_sequence": sequence,
+            "stage": 0,
+            "rung_index": rung_index,
+            "velocity_p": 256 + rung_index,
+            "planned_velocity_mrev_s": 4_394,
+            "start_offset_counts": start_offset,
+            "closest_offset_counts": 900,
+            "final_offset_counts": 900,
+            "origin_band_counts": 1_000,
+            "lower_rate_q": 20_000_000,
+            "moving_duration_us": 200_000,
+            "settle_duration_us": 736_000,
+            "total_duration_us": 936_000,
+            "peak_torque_target_abs": 100,
+            "binding_source": 1,
+            "outcome": 1,
+        }
+        assert audit_rung_origin_recovery(recovery, plan)["matches_firmware"] is True
+        evidence.append((bytes((9, rung_index)), recovery))
+        sequence += 1
+    partial = [
+        _observation(
+            17,
+            direction=1,
+            stroke_index=176,
+            target_cpms=18,
+            peak_torque_target_abs=900,
+        )
+        for _ in range(256)
+    ]
+    raw_observations.extend(partial)
+    partial_record = {
+        "record_kind": "observation",
+        "run_sequence": 11,
+        "evidence_sequence": sequence,
+        "rung_index": 22,
+        "slot": 0,
+        "velocity_p": 278,
+        "target_velocity_rpm": 264,
+        "flags": 0,
+    }
+    partial_record.update(_reconstruct_observation(partial, partial_record, plan, terminal))
+    evidence.append((b"partial", partial_record))
+    evidence.append((b"terminal", terminal))
+
+    with_recovery = replay_stage_b_regions(raw_observations, evidence)
+    without_recovery = replay_stage_b_regions(
+        raw_observations,
+        [item for item in evidence if item[1]["record_kind"] != "rung_origin_recovery"],
+    )
+
+    recoveries = [item for _raw, item in evidence if item["record_kind"] == "rung_origin_recovery"]
+    assert len(recoveries) == 22
+    assert max(abs(int(item["start_offset_counts"])) for item in recoveries) == 8_458
+    assert all(abs(int(item["final_offset_counts"])) <= 1_000 for item in recoveries)
+    assert terminal["recovery_unavailable"] == 1
+    assert with_recovery == without_recovery
+
+
 def test_rung_disjoint_pair_has_no_reportable_disturbance_interval() -> None:
     from foci_trace.velocity_measurement import _rung_class
 
@@ -1069,6 +1314,30 @@ def test_stage_b_causal_order_rejects_reordered_directional_closures() -> None:
     mismatch = _compare_stage_b_causal_order(records, replay)
 
     assert "causal order" in mismatch
+
+
+def test_stage_b_causal_order_places_recovery_after_each_complete_rung() -> None:
+    from foci_trace.velocity_measurement import _compare_stage_b_causal_order
+
+    replay = {
+        "slot_count": 8,
+        "structured_boundaries": {},
+        "directions": [[], []],
+        "joint_regions": [],
+        "nomination": {},
+        "sufficient": False,
+    }
+    records = [
+        {"record_kind": "plan"},
+        *({"record_kind": "observation", "rung_index": 0, "slot": slot} for slot in range(8)),
+        {"record_kind": "rung", "rung_index": 0},
+        {"record_kind": "rung_origin_recovery", "rung_index": 0},
+        {"record_kind": "stage_b_terminal"},
+    ]
+
+    assert _compare_stage_b_causal_order(records, replay) == ""
+    records[-2], records[-3] = records[-3], records[-2]
+    assert "causal order" in _compare_stage_b_causal_order(records, replay)
 
 
 def test_stage_b_causal_order_omits_handoff_for_insufficient_run() -> None:

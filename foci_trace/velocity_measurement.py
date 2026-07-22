@@ -11,6 +11,9 @@ import struct
 
 
 RATE_Q_SCALE = 1_000
+RECOVERY_MOVING_ALLOWANCE_US = 512_000
+RECOVERY_ZERO_SETTLE_US = 500_000
+RECOVERY_ANALYSIS_BUDGET_US = 236_000
 MIN_SELECTED_BLOCKS = 16
 CONFIDENCE_MULTIPLIER_95 = 2.131
 CONFIDENCE_MULTIPLIERS_95_DF15 = (
@@ -143,6 +146,146 @@ CONFIDENCE_MULTIPLIERS_95_DF15 = (
     4.536402,
     4.540345,
 )
+
+
+def _div_ceil(numerator: int, denominator: int) -> int:
+    if numerator < 0 or denominator <= 0:
+        raise ValueError("ceiling division requires a nonnegative numerator and positive divisor")
+    return (numerator + denominator - 1) // denominator
+
+
+def _recovery_allowance_us(moving_us: int) -> int:
+    return (
+        moving_us
+        + RECOVERY_MOVING_ALLOWANCE_US
+        + RECOVERY_ZERO_SETTLE_US
+        + RECOVERY_ANALYSIS_BUDGET_US
+    )
+
+
+def plan_rung_origin_recovery(
+    *,
+    max_stroke_travel_mrev: int,
+    settle_travel_reserve_mrev: int,
+    encoder_counts_per_rev: int,
+    planned_velocity_mrev_s: int,
+    primitive_cap_us: int,
+) -> dict[str, int]:
+    """Reconstruct the reserve-derived origin band and fixed recovery slots."""
+    if (
+        min(
+            max_stroke_travel_mrev,
+            settle_travel_reserve_mrev,
+            encoder_counts_per_rev,
+            planned_velocity_mrev_s,
+            primitive_cap_us,
+        )
+        <= 0
+        or settle_travel_reserve_mrev >= max_stroke_travel_mrev
+    ):
+        raise ValueError("recovery geometry is invalid")
+    origin_band_counts = _div_ceil(settle_travel_reserve_mrev * encoder_counts_per_rev, 1_000)
+    travel_us = _div_ceil(max_stroke_travel_mrev * 1_000_000, planned_velocity_mrev_s)
+    nominal_slot_us = _recovery_allowance_us(travel_us)
+    if nominal_slot_us > primitive_cap_us:
+        raise ValueError("nominal recovery exceeds primitive cap")
+    return {
+        "origin_band_counts": origin_band_counts,
+        "nominal_slot_us": nominal_slot_us,
+        "maximum_slot_us": primitive_cap_us,
+    }
+
+
+def recovery_return_distance_counts(start_offset_counts: int, origin_band_counts: int) -> int:
+    """Return the absolute distance before the inclusive origin band begins."""
+    if start_offset_counts == -(1 << 31) or origin_band_counts <= 0:
+        raise ValueError("recovery return distance is not representable")
+    return max(0, abs(start_offset_counts) - origin_band_counts)
+
+
+def recovery_runtime_us(
+    return_distance_counts: int, lower_rate_q: int, primitive_cap_us: int
+) -> int:
+    """Derive the measured-rate recovery deadline in firmware integer order."""
+    if return_distance_counts < 0 or lower_rate_q <= 0 or primitive_cap_us <= 0:
+        raise ValueError("recovery deadline inputs are invalid")
+    measured_return_us = _div_ceil(return_distance_counts * 1_000_000 * RATE_Q_SCALE, lower_rate_q)
+    runtime_us = _recovery_allowance_us(measured_return_us)
+    if runtime_us > primitive_cap_us:
+        raise ValueError("recovery deadline exceeds primitive cap")
+    return runtime_us
+
+
+def recovery_target_rpm(start_offset_counts: int, target_velocity_rpm: int) -> int:
+    """Return the constant-amplitude target directed toward the immutable origin."""
+    if start_offset_counts == 0 or target_velocity_rpm <= 0:
+        raise ValueError("recovery target requires an offset and positive amplitude")
+    return -target_velocity_rpm if start_offset_counts > 0 else target_velocity_rpm
+
+
+def recovery_wrong_way(start_offset_counts: int, current_offset_counts: int) -> bool:
+    """Match the one-count-inclusive growth guard used by the safety worker."""
+    if start_offset_counts == -(1 << 31) or current_offset_counts == -(1 << 31):
+        return True
+    return abs(current_offset_counts) > abs(start_offset_counts) + 1
+
+
+def audit_rung_origin_recovery(
+    record: dict[str, object], plan: dict[str, object]
+) -> dict[str, object]:
+    """Audit one emitted recovery summary against its authoritative plan geometry."""
+    mismatches: list[str] = []
+    planned_velocity = int(plan["planned_velocity_mrev_s"])
+    origin_band = int(plan["recovery_origin_band_counts"])
+    maximum_slot_us = int(plan["recovery_maximum_slot_us"])
+    if int(record["planned_velocity_mrev_s"]) != planned_velocity:
+        mismatches.append("recovery planned velocity differs from plan")
+    if int(record["origin_band_counts"]) != origin_band:
+        mismatches.append("recovery origin band differs from plan")
+    start = int(record["start_offset_counts"])
+    closest = int(record["closest_offset_counts"])
+    final = int(record["final_offset_counts"])
+    lower_rate_q = int(record["lower_rate_q"])
+    outcome = int(record["outcome"])
+    binding = int(record["binding_source"])
+    moving_us = int(record["moving_duration_us"])
+    settle_us = int(record["settle_duration_us"])
+    total_us = int(record["total_duration_us"])
+    if int(record["stage"]) not in (0, 1):
+        mismatches.append("recovery stage is invalid")
+    if recovery_wrong_way(start, closest):
+        mismatches.append("recovery record contains wrong-way growth")
+    if int(record["peak_torque_target_abs"]) >= int(plan["usable_torque_limit"]):
+        mismatches.append("recovery peak torque reached the usable limit")
+    return_distance = recovery_return_distance_counts(start, origin_band)
+    expected: tuple[int, int]
+    runtime_us: int | None = None
+    if return_distance == 0:
+        expected = (0, 0)
+    elif lower_rate_q == 0:
+        expected = (2, 2)
+    else:
+        try:
+            runtime_us = recovery_runtime_us(return_distance, lower_rate_q, maximum_slot_us)
+        except ValueError:
+            expected = (3, 3)
+        else:
+            expected = (1, 1)
+    if (outcome, binding) != expected:
+        mismatches.append(
+            "recovery outcome/binding differs from reconstructed authority "
+            f"(firmware={(outcome, binding)} offline={expected})"
+        )
+    if outcome in (0, 1) and abs(final) > origin_band:
+        mismatches.append("successful recovery final offset is outside origin band")
+    if outcome in (0, 2, 3) and (moving_us != 0 or settle_us != 0 or total_us != 0):
+        mismatches.append("nonmoving recovery reports nonzero timing")
+    if outcome == 1:
+        if total_us != moving_us + settle_us:
+            mismatches.append("recovery total duration differs from moving plus settle duration")
+        if runtime_us is not None and total_us > runtime_us:
+            mismatches.append("recovery total duration exceeds reconstructed deadline")
+    return {"matches_firmware": not mismatches, "mismatches": mismatches}
 
 
 def _f32(value: float | int) -> float:
@@ -2024,6 +2167,8 @@ def _stage_b_record_identity(value: dict[str, object]) -> tuple[object, ...]:
         return kind, int(value["rung_index"]), int(value["slot"])
     if kind == "rung":
         return kind, int(value["rung_index"])
+    if kind == "rung_origin_recovery":
+        return kind, int(value["rung_index"])
     if kind == "directional_region":
         return kind, int(value["direction"]), int(value["member_mask"])
     if kind == "joint_region":
@@ -2070,6 +2215,11 @@ def _compare_stage_b_causal_order(
     reported_rungs = {
         int(value["rung_index"]) for value in records if value["record_kind"] == "rung"
     }
+    recovery_rungs = {
+        int(value["rung_index"])
+        for value in records
+        if value["record_kind"] == "rung_origin_recovery"
+    }
     observation_slots = {
         (int(value["rung_index"]), int(value["slot"]))
         for value in records
@@ -2088,6 +2238,8 @@ def _compare_stage_b_causal_order(
         expected.extend(joint_at_boundary.get(rung_index, ()))
         if rung_index in reported_rungs:
             expected.append(("rung", rung_index))
+        if rung_index in recovery_rungs:
+            expected.append(("rung_origin_recovery", rung_index))
         expected.extend(directional_after_rung.get(rung_index, ()))
         expected.extend(joint_after_rung.get(rung_index, ()))
     expected.extend(directional_at_end)
@@ -2589,6 +2741,47 @@ def _audit_stage_b_velocity_sweep(
             digest = (digest * FNV1A64_PRIME) & 0xFFFF_FFFF_FFFF_FFFF
     reported_digest = int(terminal["digest_low"]) | (int(terminal["digest_high"]) << 32)
     mismatches: list[str] = []
+    recovery_records = [
+        value for _raw, value in nonterminal if value["record_kind"] == "rung_origin_recovery"
+    ]
+    recovery_schema = "recovery_origin_band_counts" in plan
+    if recovery_schema:
+        try:
+            recovery_plan = plan_rung_origin_recovery(
+                max_stroke_travel_mrev=int(plan["max_stroke_travel_mrev"]),
+                settle_travel_reserve_mrev=int(plan["settle_travel_reserve_mrev"]),
+                encoder_counts_per_rev=int(terminal["encoder_counts_per_rev"]),
+                planned_velocity_mrev_s=int(plan["planned_velocity_mrev_s"]),
+                primitive_cap_us=int(plan["recovery_maximum_slot_us"]),
+            )
+        except ValueError as error:
+            mismatches.append(f"Stage B recovery plan reconstruction failed: {error}")
+        else:
+            for name, expected in (
+                ("recovery_origin_band_counts", recovery_plan["origin_band_counts"]),
+                ("recovery_nominal_slot_us", recovery_plan["nominal_slot_us"]),
+                ("recovery_maximum_slot_us", recovery_plan["maximum_slot_us"]),
+                ("recovery_slot_count", int(plan["rung_count"])),
+            ):
+                if int(plan[name]) != expected:
+                    mismatches.append(f"Stage B {name}: firmware={plan[name]} offline={expected}")
+        fully_acquired_rungs = int(terminal["emitted_observations"]) // slot_count
+        recovery_rungs = [int(record["rung_index"]) for record in recovery_records]
+        if recovery_rungs != list(range(fully_acquired_rungs)):
+            mismatches.append(
+                "Stage B recovery rungs differ from fully acquired rung sequence: "
+                f"firmware={recovery_rungs} offline={list(range(fully_acquired_rungs))}"
+            )
+        for record in recovery_records:
+            if int(record["stage"]) != 0:
+                mismatches.append("Stage B recovery record carries the wrong stage")
+            recovery_audit = audit_rung_origin_recovery(record, plan)
+            mismatches.extend(
+                f"recovery rung {record['rung_index']}: {item}"
+                for item in recovery_audit["mismatches"]
+            )
+    elif recovery_records:
+        mismatches.append("historical Stage B plan carries unexpected recovery records")
     if v3_group_error:
         mismatches.append(v3_group_error)
     if digest != reported_digest:
@@ -3128,6 +3321,7 @@ def _audit_stage_b_velocity_sweep(
         "matches_firmware": not mismatches,
         "mismatches": mismatches,
         "caveats": caveats,
+        "recoveries": [dict(record) for record in recovery_records],
     }
 
 
