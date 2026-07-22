@@ -37,6 +37,8 @@ class DeviceSummary:
     stage_b_outcome: int | None = None
     velocity_integral_rungs: int = 0
     velocity_integral_outcome: int | None = None
+    rung_origin_recoveries: int = 0
+    contained_recoveries: int = 0
 
 
 class LiveSummary:
@@ -91,6 +93,10 @@ class LiveSummary:
                 device.velocity_integral_rungs += 1
             elif kind == "integral_terminal":
                 device.velocity_integral_outcome = int(frame.payload["outcome"])
+            elif kind == "rung_origin_recovery":
+                device.rung_origin_recoveries += 1
+                if int(frame.payload["outcome"]) >= 2:
+                    device.contained_recoveries += 1
 
     def render(self) -> str:
         """Render one compact summary line."""
@@ -105,7 +111,8 @@ class LiveSummary:
                 "stage_b_regions={regions} stage_b_fragments={fragments} "
                 "stage_b_p={stage_b_p} stage_b_outcome={stage_b_outcome} "
                 "velocity_integral_rungs={integral_rungs} "
-                "velocity_integral_outcome={integral_outcome}".format(
+                "velocity_integral_outcome={integral_outcome} "
+                "recoveries={recoveries} contained_recoveries={contained_recoveries}".format(
                     idx=device_index,
                     frames=item.frames,
                     gaps=item.gaps,
@@ -130,6 +137,8 @@ class LiveSummary:
                         if item.velocity_integral_outcome is None
                         else item.velocity_integral_outcome
                     ),
+                    recoveries=item.rung_origin_recoveries,
+                    contained_recoveries=item.contained_recoveries,
                 )
             )
         return " | ".join(parts)

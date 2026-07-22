@@ -1853,6 +1853,10 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                 int(item.payload["run_sequence"])
                 for item in state.velocity_sweep_evidence
                 if "run_sequence" in item.payload
+                and (
+                    item.payload.get("record_kind") != "rung_origin_recovery"
+                    or int(item.payload.get("stage", -1)) == 0
+                )
             }
         )
         for run_sequence in run_sequences:
@@ -1860,7 +1864,13 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                 item
                 for item in state.velocity_sweep_evidence
                 if int(item.payload.get("run_sequence", -1)) == run_sequence
-                and not str(item.payload.get("record_kind", "")).startswith("integral_")
+                and (
+                    not str(item.payload.get("record_kind", "")).startswith("integral_")
+                    and (
+                        item.payload.get("record_kind") != "rung_origin_recovery"
+                        or int(item.payload.get("stage", -1)) == 0
+                    )
+                )
             ]
             if not evidence:
                 continue
@@ -1914,7 +1924,13 @@ def _velocity_integral_audits(states: dict[int, _DeviceState]) -> list[dict[str,
             {
                 int(item.payload["run_sequence"])
                 for item in state.velocity_sweep_evidence
-                if str(item.payload.get("record_kind", "")).startswith("integral_")
+                if (
+                    str(item.payload.get("record_kind", "")).startswith("integral_")
+                    or (
+                        item.payload.get("record_kind") == "rung_origin_recovery"
+                        and int(item.payload.get("stage", -1)) == 1
+                    )
+                )
                 and "run_sequence" in item.payload
             }
         )
@@ -1923,7 +1939,13 @@ def _velocity_integral_audits(states: dict[int, _DeviceState]) -> list[dict[str,
                 item
                 for item in state.velocity_sweep_evidence
                 if int(item.payload.get("run_sequence", -1)) == run_sequence
-                and str(item.payload.get("record_kind", "")).startswith("integral_")
+                and (
+                    str(item.payload.get("record_kind", "")).startswith("integral_")
+                    or (
+                        item.payload.get("record_kind") == "rung_origin_recovery"
+                        and int(item.payload.get("stage", -1)) == 1
+                    )
+                )
             ]
             if not evidence:
                 continue

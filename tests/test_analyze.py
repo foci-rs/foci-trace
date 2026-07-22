@@ -2444,3 +2444,43 @@ def test_velocity_integral_audit_is_added_only_when_present() -> None:
     assert "integral_responses" not in empty
     assert encoded["integral_responses"] == [audit]
     assert "velocity_integral dev=0 source=1 run=7" in format_analysis(analysis)
+
+
+def test_recovery_records_route_to_their_owning_stage(monkeypatch) -> None:
+    import foci_trace.analyze as analyze
+
+    state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
+    payloads = (
+        {"record_kind": "plan", "run_sequence": 7},
+        {"record_kind": "rung_origin_recovery", "run_sequence": 7, "stage": 0},
+        {"record_kind": "stage_b_terminal", "run_sequence": 7},
+        {"record_kind": "integral_plan_core", "run_sequence": 8},
+        {"record_kind": "rung_origin_recovery", "run_sequence": 8, "stage": 1},
+        {"record_kind": "integral_terminal", "run_sequence": 8},
+    )
+    state.velocity_sweep_evidence = [
+        analyze._VelocitySweepEvidenceFrame(index, 0, bytes((index,)), payload)
+        for index, payload in enumerate(payloads, 1)
+    ]
+    routed: dict[str, list[str]] = {}
+
+    def stage_b(_raw, records):
+        routed["stage_b"] = [str(value["record_kind"]) for _bytes, value in records]
+        return {"terminal": {"outcome": 3, "cause": 0}}
+
+    def stage_c(_raw, records):
+        routed["stage_c"] = [str(value["record_kind"]) for _bytes, value in records]
+        return {"terminal": {"outcome": 3, "cause": 0}}
+
+    monkeypatch.setattr(analyze, "audit_velocity_sweep", stage_b)
+    monkeypatch.setattr(analyze, "audit_velocity_integral", stage_c)
+
+    analyze._velocity_sweep_audits({0: state})
+    analyze._velocity_integral_audits({0: state})
+
+    assert routed["stage_b"] == ["plan", "rung_origin_recovery", "stage_b_terminal"]
+    assert routed["stage_c"] == [
+        "integral_plan_core",
+        "rung_origin_recovery",
+        "integral_terminal",
+    ]

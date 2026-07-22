@@ -12,6 +12,8 @@ from .velocity_measurement import (
     _stationary_suffix,
     _upper_bound_signed,
     _upper_bound_unsigned,
+    audit_rung_origin_recovery,
+    plan_rung_origin_recovery,
 )
 
 
@@ -70,6 +72,14 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
         "maximum_workflow_ms",
     ):
         _append_integer(encoded, int(plan[name]), 4)
+    if int(plan["schema_revision"]) >= 2:
+        for name in (
+            "recovery_origin_band_counts",
+            "recovery_nominal_slot_us",
+            "recovery_maximum_slot_us",
+        ):
+            _append_integer(encoded, int(plan[name]), 4)
+        _append_integer(encoded, int(plan["recovery_slot_count"]), 1)
     _append_integer(encoded, int(plan["hard_torque_limit"]), 2)
     _append_integer(encoded, int(plan["usable_torque_limit"]), 2)
     _append_integer(encoded, int(plan["requested_velocity_mrev_s"]), 4)
@@ -476,6 +486,14 @@ def _compact_plan_marker(plan: dict[str, object], run_sequence: int) -> bytes:
         "maximum_workflow_ms",
     ):
         _append_integer(record, int(plan[name]), 4)
+    if int(plan["schema_revision"]) >= 2:
+        for name in (
+            "recovery_origin_band_counts",
+            "recovery_nominal_slot_us",
+            "recovery_maximum_slot_us",
+        ):
+            _append_integer(record, int(plan[name]), 4)
+        _append_integer(record, int(plan["recovery_slot_count"]), 1)
     _append_integer(record, int(plan["hard_torque_limit"]), 2)
     _append_integer(record, int(plan["usable_torque_limit"]), 2)
     return bytes(record)
@@ -551,22 +569,50 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
     expected_rungs = len(positive_i) + 2
     expected_observations = expected_rungs * 8
     expected_family = expected_rungs * 4
-    expected_duration = (
-        expected_observations
-        * (
-            int(plan["moving_stroke_us"])
-            + int(plan["zero_settle_us"])
-            + int(plan["analysis_budget_us"])
-        )
-        // 1_000
+    base_duration_us = expected_observations * (
+        int(plan["moving_stroke_us"])
+        + int(plan["zero_settle_us"])
+        + int(plan["analysis_budget_us"])
     )
+    schema_revision = int(plan["schema_revision"])
+    if schema_revision >= 2:
+        try:
+            recovery = plan_rung_origin_recovery(
+                max_stroke_travel_mrev=int(plan["max_stroke_travel_mrev"]),
+                settle_travel_reserve_mrev=int(plan["settle_travel_reserve_mrev"]),
+                encoder_counts_per_rev=int(plan["encoder_counts_per_rev"]),
+                planned_velocity_mrev_s=int(plan["planned_velocity_mrev_s"]),
+                primitive_cap_us=int(plan["max_duration_ms"]) * 1_000,
+            )
+        except ValueError as error:
+            mismatches.append(f"plan recovery reconstruction failed: {error}")
+            return
+        for name, expected in (
+            ("recovery_origin_band_counts", recovery["origin_band_counts"]),
+            ("recovery_nominal_slot_us", recovery["nominal_slot_us"]),
+            ("recovery_maximum_slot_us", recovery["maximum_slot_us"]),
+            ("recovery_slot_count", expected_rungs),
+        ):
+            if int(plan[name]) != expected:
+                mismatches.append(f"plan {name}: firmware={plan[name]} offline={expected}")
+        nominal_duration_us = base_duration_us + expected_rungs * int(
+            plan["recovery_nominal_slot_us"]
+        )
+        maximum_duration_us = base_duration_us + expected_rungs * int(
+            plan["recovery_maximum_slot_us"]
+        )
+        expected_nominal_ms = (nominal_duration_us + 999) // 1_000
+        expected_maximum_ms = (maximum_duration_us + 999) // 1_000
+    else:
+        expected_nominal_ms = base_duration_us // 1_000
+        expected_maximum_ms = expected_nominal_ms
     for name, expected in (
         ("positive_rung_count", len(positive_i)),
         ("total_rung_count", expected_rungs),
         ("expected_observations", expected_observations),
         ("family_size", expected_family),
-        ("nominal_workflow_ms", expected_duration),
-        ("maximum_workflow_ms", expected_duration),
+        ("nominal_workflow_ms", expected_nominal_ms),
+        ("maximum_workflow_ms", expected_maximum_ms),
     ):
         if int(plan[name]) != expected:
             mismatches.append(f"plan {name}: firmware={plan[name]} offline={expected}")
@@ -584,13 +630,25 @@ def audit_velocity_integral(
         for _raw, value in evidence_records
         if value["record_kind"] == "integral_plan_schedule"
     ]
+    plan_recoveries = [
+        value
+        for _raw, value in evidence_records
+        if value["record_kind"] == "integral_plan_recovery"
+    ]
     terminals = [
         value for _raw, value in evidence_records if value["record_kind"] == "integral_terminal"
     ]
     identities = (
         plan_cores or plan_schedules or terminals or [value for _raw, value in evidence_records]
     )
-    if len(plan_cores) != 1 or len(plan_schedules) != 1 or len(terminals) != 1:
+    schema_revision = int(plan_cores[0].get("schema_revision", 1)) if len(plan_cores) == 1 else 1
+    recovery_fragment_count = 1 if schema_revision >= 2 else 0
+    if (
+        len(plan_cores) != 1
+        or len(plan_schedules) != 1
+        or len(plan_recoveries) != recovery_fragment_count
+        or len(terminals) != 1
+    ):
         return {
             "run_sequence": int(identities[0].get("run_sequence", 0)) if identities else 0,
             "plan": None,
@@ -598,8 +656,8 @@ def audit_velocity_integral(
             "complete": False,
             "matches_firmware": False,
             "mismatches": [
-                "partial integral-response capture: one core plan fragment, one schedule "
-                "fragment, and one terminal required"
+                "partial integral-response capture: required plan fragments and one terminal "
+                "must be present exactly once"
             ],
             "caveats": ["partial velocity-integral response capture"],
         }
@@ -618,7 +676,20 @@ def audit_velocity_integral(
         fragment_mismatches,
         "plan fragments",
     )
-    plan = {**core, **schedule, "record_kind": "integral_plan"}
+    if plan_recoveries:
+        _compare_fields(
+            core,
+            plan_recoveries[0],
+            ("run_sequence", "evidence_sequence", "plan_digest"),
+            fragment_mismatches,
+            "recovery plan fragment",
+        )
+    plan = {
+        **core,
+        **schedule,
+        **(plan_recoveries[0] if plan_recoveries else {}),
+        "record_kind": "integral_plan",
+    }
     run_sequence = int(plan["run_sequence"])
     mismatches = fragment_mismatches
     _validate_plan(plan, mismatches)
@@ -630,7 +701,13 @@ def audit_velocity_integral(
     nonterminal = [
         (raw, value)
         for raw, value in evidence_records
-        if value["record_kind"] in ("integral_plan_marker", "integral_observation", "integral_rung")
+        if value["record_kind"]
+        in (
+            "integral_plan_marker",
+            "integral_observation",
+            "integral_rung",
+            "rung_origin_recovery",
+        )
     ]
     sequences = [int(value["evidence_sequence"]) for _raw, value in nonterminal]
     if sequences != list(range(1, len(sequences) + 1)):
@@ -662,6 +739,22 @@ def audit_velocity_integral(
             mismatches,
             "plan marker",
         )
+        if schema_revision >= 2:
+            _compare_fields(
+                plan,
+                marker_records[0],
+                (
+                    "planned_velocity_mrev_s",
+                    "target_velocity_rpm",
+                    "pwm_hz",
+                    "recovery_origin_band_counts",
+                    "recovery_nominal_slot_us",
+                    "recovery_maximum_slot_us",
+                    "recovery_slot_count",
+                ),
+                mismatches,
+                "plan marker",
+            )
     digest = _fnv1a64(_compact_plan_marker(plan, run_sequence))
     for raw, _value in nonterminal:
         digest = _fnv1a64(raw, digest)
@@ -751,6 +844,36 @@ def audit_velocity_integral(
         reconstructed[key] = expected
 
     rung_records = [value for _raw, value in nonterminal if value["record_kind"] == "integral_rung"]
+    recovery_records = [
+        value for _raw, value in nonterminal if value["record_kind"] == "rung_origin_recovery"
+    ]
+    if schema_revision >= 2:
+        fully_acquired_rungs = int(terminal["emitted_observations"]) // 8
+        recovery_rungs = [int(record["rung_index"]) for record in recovery_records]
+        if recovery_rungs != list(range(fully_acquired_rungs)):
+            mismatches.append(
+                "integral recovery rungs differ from fully acquired rung sequence: "
+                f"firmware={recovery_rungs} offline={list(range(fully_acquired_rungs))}"
+            )
+        for record in recovery_records:
+            if int(record["stage"]) != 1:
+                mismatches.append("integral recovery record carries the wrong stage")
+            recovery_audit = audit_rung_origin_recovery(record, plan)
+            mismatches.extend(
+                f"recovery rung {record['rung_index']}: {item}"
+                for item in recovery_audit["mismatches"]
+            )
+        expected_order: list[tuple[str, int | None]] = [("integral_plan_marker", None)]
+        for rung_index in range(fully_acquired_rungs):
+            expected_order.extend(("integral_observation", rung_index) for _ in range(8))
+            expected_order.append(("integral_rung", rung_index))
+            expected_order.append(("rung_origin_recovery", rung_index))
+        observed_order = [
+            (str(value["record_kind"]), int(value["rung_index"]) if "rung_index" in value else None)
+            for _raw, value in nonterminal
+        ]
+        if observed_order[: len(expected_order)] != expected_order:
+            mismatches.append("integral recovery causal order differs from the fixed schedule")
     rung_results: dict[int, list[dict[str, object]]] = {}
     for record in rung_records:
         rung_index = int(record["rung_index"])
@@ -842,6 +965,7 @@ def audit_velocity_integral(
         "matches_firmware": not mismatches,
         "mismatches": mismatches,
         "caveats": [],
+        "recoveries": [dict(record) for record in recovery_records],
         "run_evidence": {
             "opening": opening,
             "positive": positive,

@@ -38,10 +38,10 @@ def _evidence(
     }
 
 
-def _plan() -> dict[str, object]:
-    return {
+def _plan(schema_revision: int = 1) -> dict[str, object]:
+    plan: dict[str, object] = {
         "build_revision": 3,
-        "schema_revision": 1,
+        "schema_revision": schema_revision,
         "channel": 0,
         "stage_b_plan_digest": 0xDDEEFF0099AABBCC,
         "final_p": 1_448,
@@ -76,6 +76,21 @@ def _plan() -> dict[str, object]:
         "positive_position_headroom_mrev": 20_000,
         "max_duration_ms": 60_000,
     }
+    if schema_revision >= 2:
+        plan.update(
+            {
+                "nominal_workflow_ms": 82_607,
+                "maximum_workflow_ms": 90_888,
+                "max_stroke_travel_mrev": 2_500,
+                "settle_travel_reserve_mrev": 250,
+                "max_duration_ms": 3_000,
+                "recovery_origin_band_counts": 1_000,
+                "recovery_nominal_slot_us": 1_816_958,
+                "recovery_maximum_slot_us": 3_000_000,
+                "recovery_slot_count": 7,
+            }
+        )
+    return plan
 
 
 def test_integral_plan_digest_hashes_every_immutable_input_in_firmware_order() -> None:
@@ -83,6 +98,37 @@ def test_integral_plan_digest_hashes_every_immutable_input_in_firmware_order() -
 
 
 def _plan_marker(plan: dict[str, object], sequence: int) -> tuple[bytes, dict[str, object]]:
+    if int(plan["schema_revision"]) >= 2:
+        raw = struct.pack(
+            "<BIQHIiIHBHIIIIIIIBHH",
+            0,
+            7,
+            int(plan["plan_digest"]),
+            int(plan["final_p"]),
+            int(plan["planned_velocity_mrev_s"]),
+            int(plan["target_velocity_rpm"]),
+            int(plan["pwm_hz"]),
+            int(plan["positive_i"][0]),
+            int(plan["positive_rung_count"]),
+            int(plan["family_size"]),
+            int(plan["moving_stroke_us"]),
+            int(plan["zero_settle_us"]),
+            int(plan["analysis_budget_us"]),
+            int(plan["maximum_workflow_ms"]),
+            int(plan["recovery_origin_band_counts"]),
+            int(plan["recovery_nominal_slot_us"]),
+            int(plan["recovery_maximum_slot_us"]),
+            int(plan["recovery_slot_count"]),
+            int(plan["hard_torque_limit"]),
+            int(plan["usable_torque_limit"]),
+        )
+        return raw, {
+            **plan,
+            "record_kind": "integral_plan_marker",
+            "run_sequence": 7,
+            "evidence_sequence": sequence,
+            "plan_digest": plan["plan_digest"],
+        }
     raw = struct.pack(
         "<BIHQHBI",
         1,
@@ -146,7 +192,7 @@ def _plan_records(plan: dict[str, object]) -> list[tuple[bytes, dict[str, object
         "positive_position_headroom_mrev",
         "max_duration_ms",
     )
-    return [
+    records = [
         (
             b"",
             {
@@ -166,6 +212,50 @@ def _plan_records(plan: dict[str, object]) -> list[tuple[bytes, dict[str, object
             },
         ),
     ]
+    if int(plan["schema_revision"]) >= 2:
+        records.append(
+            (
+                b"",
+                {
+                    **common,
+                    "recovery_origin_band_counts": plan["recovery_origin_band_counts"],
+                    "recovery_nominal_slot_us": plan["recovery_nominal_slot_us"],
+                    "recovery_maximum_slot_us": plan["recovery_maximum_slot_us"],
+                    "recovery_slot_count": plan["recovery_slot_count"],
+                    "record_kind": "integral_plan_recovery",
+                    "plan_fragment": 2,
+                },
+            )
+        )
+    return records
+
+
+def _recovery_record(rung_index: int, sequence: int) -> tuple[bytes, dict[str, object]]:
+    values = {
+        "run_sequence": 7,
+        "evidence_sequence": sequence,
+        "stage": 1,
+        "rung_index": rung_index,
+        "velocity_p": 1_448,
+        "planned_velocity_mrev_s": 4_394,
+        "start_offset_counts": 900,
+        "closest_offset_counts": 900,
+        "final_offset_counts": 900,
+        "origin_band_counts": 1_000,
+        "lower_rate_q": 0,
+        "moving_duration_us": 0,
+        "settle_duration_us": 0,
+        "total_duration_us": 0,
+        "peak_torque_target_abs": 0,
+        "binding_source": 0,
+        "outcome": 0,
+    }
+    raw = struct.pack(
+        "<BIHBBHIiiiIQIIIHBB",
+        9,
+        *values.values(),
+    )
+    return raw, {"record_kind": "rung_origin_recovery", **values}
 
 
 def _observation_record(
@@ -254,10 +344,10 @@ def _rung_record(
     }
 
 
-def _synthetic_complete_capture() -> tuple[
-    list[VelocityObservation], list[tuple[bytes, dict[str, object]]]
-]:
-    plan = _plan()
+def _synthetic_complete_capture(
+    schema_revision: int = 1,
+) -> tuple[list[VelocityObservation], list[tuple[bytes, dict[str, object]]]]:
+    plan = _plan(schema_revision)
     plan["plan_digest"] = integral_plan_digest(plan)
     records = _plan_records(plan)
     sequence = 1
@@ -308,25 +398,31 @@ def _synthetic_complete_capture() -> tuple[
             _rung_record(rung_index, gain, sequence, int(plan["plan_digest"]), directions)
         )
         sequence += 1
-    compact_marker = bytearray((0,))
-    compact_marker += struct.pack(
-        "<IQHIiIHBHIIIIHH",
-        7,
-        int(plan["plan_digest"]),
-        int(plan["final_p"]),
-        int(plan["planned_velocity_mrev_s"]),
-        int(plan["target_velocity_rpm"]),
-        int(plan["pwm_hz"]),
-        int(plan["positive_i"][0]),
-        int(plan["positive_rung_count"]),
-        int(plan["family_size"]),
-        int(plan["moving_stroke_us"]),
-        int(plan["zero_settle_us"]),
-        int(plan["analysis_budget_us"]),
-        int(plan["maximum_workflow_ms"]),
-        int(plan["hard_torque_limit"]),
-        int(plan["usable_torque_limit"]),
-    )
+        if schema_revision >= 2:
+            records.append(_recovery_record(rung_index, sequence))
+            sequence += 1
+    if schema_revision >= 2:
+        compact_marker = bytearray(_plan_marker(plan, 1)[0])
+    else:
+        compact_marker = bytearray((0,))
+        compact_marker += struct.pack(
+            "<IQHIiIHBHIIIIHH",
+            7,
+            int(plan["plan_digest"]),
+            int(plan["final_p"]),
+            int(plan["planned_velocity_mrev_s"]),
+            int(plan["target_velocity_rpm"]),
+            int(plan["pwm_hz"]),
+            int(plan["positive_i"][0]),
+            int(plan["positive_rung_count"]),
+            int(plan["family_size"]),
+            int(plan["moving_stroke_us"]),
+            int(plan["zero_settle_us"]),
+            int(plan["analysis_budget_us"]),
+            int(plan["maximum_workflow_ms"]),
+            int(plan["hard_torque_limit"]),
+            int(plan["usable_torque_limit"]),
+        )
     digest = 0xCBF29CE484222325
     for byte in compact_marker:
         digest = ((digest ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
@@ -352,6 +448,7 @@ def _synthetic_complete_capture() -> tuple[
                 "emitted_rungs": 7,
                 "eligible_masks": [0b11111, 0b11111],
                 "current_terminus": None,
+                "recovery_unavailable": 0,
                 "run_started_us": 1,
                 "run_completed_us": 2,
             },
@@ -368,6 +465,36 @@ def test_complete_capture_reconstructs_curve_counts_and_digest() -> None:
     assert audit["matches_firmware"] is True
     assert audit["complete"] is True
     assert audit["run_evidence"]["eligible_masks"] == [0b11111, 0b11111]
+
+
+def test_recovery_capture_preserves_curve_and_audits_every_rung() -> None:
+    old_raw, old_records = _synthetic_complete_capture()
+    raw, records = _synthetic_complete_capture(schema_revision=2)
+
+    old_audit = audit_velocity_integral(old_raw, old_records)
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["matches_firmware"] is True
+    assert audit["complete"] is True
+    assert len(audit["recoveries"]) == 7
+    assert audit["run_evidence"] == old_audit["run_evidence"]
+
+
+def test_recovery_capture_rejects_missing_causal_record_and_wrong_stage() -> None:
+    raw, records = _synthetic_complete_capture(schema_revision=2)
+    recovery_index = next(
+        index
+        for index, (_raw, value) in enumerate(records)
+        if value["record_kind"] == "rung_origin_recovery"
+    )
+    records[recovery_index][1]["stage"] = 0
+    del records[recovery_index + 10]
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["matches_firmware"] is False
+    assert any("wrong stage" in item for item in audit["mismatches"])
+    assert any("recovery rungs" in item for item in audit["mismatches"])
 
 
 def test_capture_audit_reports_digest_and_observation_mismatch_paths() -> None:

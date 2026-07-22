@@ -107,3 +107,33 @@ def test_summary_tracks_velocity_integral_rungs_and_terminal() -> None:
 
     assert "velocity_integral_rungs=2" in text
     assert "velocity_integral_outcome=1" in text
+
+
+def test_summary_tracks_successful_and_contained_recoveries() -> None:
+    summary = LiveSummary()
+    for sequence, outcome in enumerate((0, 1, 2, 3), 1):
+        summary.observe(
+            0,
+            sequence,
+            Frame(
+                header=FrameHeader(
+                    9,
+                    32,
+                    FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
+                    0,
+                    0,
+                    1,
+                    0,
+                    sequence,
+                    sequence,
+                    1,
+                ),
+                payload={"record_kind": "rung_origin_recovery", "outcome": outcome},
+                raw_payload=b"",
+            ),
+        )
+
+    text = summary.render()
+
+    assert "recoveries=4" in text
+    assert "contained_recoveries=2" in text
