@@ -57,6 +57,7 @@ EVENT_COMMISSION_VELOCITY_INTEGRAL_COMPLETE = 139
 EVENT_COMMISSION_RESTORE_RESULT = 140
 EVENT_COMMISSION_RESTORE_ERROR_DRIFT = 141
 EVENT_COMMISSION_RESTORE_DISPOSITION = 142
+EVENT_COMMISSION_RUNG_ORIGIN_RECOVERY = 143
 EVENT_COMMISSION_DIAGNOSTIC_WARNING = 200
 
 _LEVEL_NAMES = {
@@ -101,6 +102,7 @@ _COMMISSIONING_EVENT_NAMES = {
     EVENT_COMMISSION_RESTORE_RESULT: "commission_restore_result",
     EVENT_COMMISSION_RESTORE_ERROR_DRIFT: "commission_restore_error_drift",
     EVENT_COMMISSION_RESTORE_DISPOSITION: "commission_restore_disposition",
+    EVENT_COMMISSION_RUNG_ORIGIN_RECOVERY: "commission_rung_origin_recovery",
     EVENT_COMMISSION_DIAGNOSTIC_WARNING: "commission_diagnostic_warning",
 }
 
@@ -419,7 +421,34 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
     _require(payload, 1, "velocity-sweep evidence")
     cursor = _EvidenceCursor(payload)
     kind = cursor.take("B")
-    if kind == 0:
+    if kind == 0 and len(payload) == 65:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("plan_digest", "Q"),
+                ("final_p", "H"),
+                ("planned_velocity_mrev_s", "I"),
+                ("target_velocity_rpm", "i"),
+                ("pwm_hz", "I"),
+                ("i_start", "H"),
+                ("positive_rung_count", "B"),
+                ("family_size", "H"),
+                ("moving_stroke_us", "I"),
+                ("zero_settle_us", "I"),
+                ("analysis_budget_us", "I"),
+                ("maximum_workflow_ms", "I"),
+                ("recovery_origin_band_counts", "I"),
+                ("recovery_nominal_slot_us", "I"),
+                ("recovery_maximum_slot_us", "I"),
+                ("recovery_slot_count", "B"),
+                ("hard_torque_limit", "H"),
+                ("usable_torque_limit", "H"),
+            ),
+        )
+        decoded["evidence_sequence"] = 1
+        decoded["record_kind"] = "integral_plan_marker"
+    elif kind == 0:
         decoded = _take_fields(
             cursor,
             (
@@ -498,6 +527,19 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 )
             )
             decoded["record_kind"] = "integral_plan_schedule"
+        elif fragment == 2:
+            decoded.update(
+                _take_fields(
+                    cursor,
+                    (
+                        ("recovery_origin_band_counts", "I"),
+                        ("recovery_nominal_slot_us", "I"),
+                        ("recovery_maximum_slot_us", "I"),
+                        ("recovery_slot_count", "B"),
+                    ),
+                )
+            )
+            decoded["record_kind"] = "integral_plan_recovery"
         else:
             raise DecodeError(f"unknown velocity-integral plan fragment {fragment}")
         decoded["plan_fragment"] = fragment
@@ -518,7 +560,8 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         decoded["plan_digest"] = decoded["plan_digest_low"] | (decoded["plan_digest_high"] << 32)
         decoded["record_kind"] = "integral_plan_marker"
     elif kind == 1:
-        stage_b = len(payload) == 78
+        stage_b = len(payload) in (78, 91)
+        stage_b_recovery = len(payload) == 91
         plan_fields = [
             ("run_sequence", "I"),
             ("evidence_sequence", "H"),
@@ -542,6 +585,19 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ("zero_settle_us", "I"),
                 ("nominal_workflow_ms", "I"),
                 ("maximum_workflow_ms", "I"),
+            )
+        )
+        if stage_b_recovery:
+            plan_fields.extend(
+                (
+                    ("recovery_origin_band_counts", "I"),
+                    ("recovery_nominal_slot_us", "I"),
+                    ("recovery_maximum_slot_us", "I"),
+                    ("recovery_slot_count", "B"),
+                )
+            )
+        plan_fields.extend(
+            (
                 ("max_stroke_travel_mrev", "I"),
                 ("settle_travel_reserve_mrev", "I"),
                 ("negative_position_headroom_mrev", "I"),
@@ -554,6 +610,10 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             cursor,
             tuple(plan_fields),
         )
+        if stage_b:
+            decoded["plan_digest"] = decoded["plan_digest_low"] | (
+                decoded["plan_digest_high"] << 32
+            )
         decoded["record_kind"] = "plan"
     elif kind == 2 and len(payload) in (46, 77):
         decoded = _take_fields(
@@ -799,7 +859,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             ]
         decoded = _take_fields(cursor, tuple(fields))
         decoded["record_kind"] = "rung"
-    elif kind == 4 and len(payload) == 58:
+    elif kind == 4 and len(payload) in (58, 59):
         decoded = _take_fields(
             cursor,
             (
@@ -822,6 +882,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         decoded["current_terminus"] = (
             None if current_terminus_plus_one == 0 else current_terminus_plus_one - 1
         )
+        decoded["recovery_unavailable"] = cursor.take("B") if len(payload) == 59 else 0
         decoded["run_started_us"] = cursor.take("I") | (cursor.take("I") << 32)
         decoded["run_completed_us"] = cursor.take("I") | (cursor.take("I") << 32)
         decoded["plan_digest"] = decoded["plan_digest_low"] | (decoded["plan_digest_high"] << 32)
@@ -1004,6 +1065,14 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                     ("digest_high", "I"),
                     ("outcome", "B"),
                     ("cause", "B"),
+                ),
+            )
+        )
+        decoded["recovery_unavailable"] = cursor.take("B") if len(payload) == 86 else 0
+        decoded.update(
+            _take_fields(
+                cursor,
+                (
                     ("run_started_low", "I"),
                     ("run_started_high", "I"),
                     ("run_completed_low", "I"),
@@ -1012,6 +1081,30 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             )
         )
         decoded["record_kind"] = "stage_b_terminal"
+    elif kind == 9 and len(payload) == 55:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("stage", "B"),
+                ("rung_index", "B"),
+                ("velocity_p", "H"),
+                ("planned_velocity_mrev_s", "I"),
+                ("start_offset_counts", "i"),
+                ("closest_offset_counts", "i"),
+                ("final_offset_counts", "i"),
+                ("origin_band_counts", "I"),
+                ("lower_rate_q", "Q"),
+                ("moving_duration_us", "I"),
+                ("settle_duration_us", "I"),
+                ("total_duration_us", "I"),
+                ("peak_torque_target_abs", "H"),
+                ("binding_source", "B"),
+                ("outcome", "B"),
+            ),
+        )
+        decoded["record_kind"] = "rung_origin_recovery"
     elif kind == 9:
         decoded = _take_fields(
             cursor,

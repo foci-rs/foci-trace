@@ -270,6 +270,43 @@ def test_decodes_canonical_velocity_sweep_plan() -> None:
     assert frame.payload["usable_torque_limit"] == 900
 
 
+def test_decodes_stage_b_recovery_plan_geometry() -> None:
+    payload = bytearray([1])
+    payload.extend(struct.pack("<IHII", 7, 0, 1, 2))
+    payload.extend(
+        struct.pack(
+            "<IBIIHBiHHBHIIII",
+            5_000,
+            1,
+            4_800,
+            7_500,
+            1,
+            0,
+            288,
+            8,
+            128,
+            5,
+            4,
+            256_000,
+            500_000,
+            298_632,
+            298_632,
+        )
+    )
+    payload.extend(struct.pack("<IIIB", 1_000, 1_816_958, 3_000_000, 23))
+    payload.extend(struct.pack("<IIIIHH", 2_500, 250, 28_100, 28_100, 1_000, 900))
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert len(payload) == 91
+    assert frame.payload["record_kind"] == "plan"
+    assert frame.payload["plan_digest"] == 0x0000_0002_0000_0001
+    assert frame.payload["recovery_origin_band_counts"] == 1_000
+    assert frame.payload["recovery_nominal_slot_us"] == 1_816_958
+    assert frame.payload["recovery_maximum_slot_us"] == 3_000_000
+    assert frame.payload["recovery_slot_count"] == 23
+
+
 def test_decodes_fragmented_velocity_integral_response_plan() -> None:
     core = bytearray([0])
     core.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
@@ -333,6 +370,68 @@ def test_decodes_fragmented_velocity_integral_response_plan() -> None:
     assert schedule_frame.payload["requested_velocity_source"] == 1
 
 
+def test_decodes_velocity_integral_recovery_plan_fragment() -> None:
+    payload = bytearray([0])
+    payload.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
+    payload.extend(struct.pack("<BIIIB", 2, 1_000, 1_816_958, 3_000_000, 7))
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert frame.payload["record_kind"] == "integral_plan_recovery"
+    assert frame.payload["plan_digest"] == 0x5566_7788_1122_3344
+    assert frame.payload["recovery_origin_band_counts"] == 1_000
+    assert frame.payload["recovery_nominal_slot_us"] == 1_816_958
+    assert frame.payload["recovery_maximum_slot_us"] == 3_000_000
+    assert frame.payload["recovery_slot_count"] == 7
+
+
+def test_decodes_rung_origin_recovery_record() -> None:
+    payload = struct.pack(
+        "<BIHBBHIiiiIQIIIHBB",
+        9,
+        7,
+        12,
+        1,
+        4,
+        1_448,
+        4_394,
+        8_458,
+        900,
+        734,
+        1_000,
+        3_150_000,
+        1_200_000,
+        500_000,
+        1_936_000,
+        2_533,
+        1,
+        1,
+    )
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert frame.payload == {
+        "record_kind": "rung_origin_recovery",
+        "run_sequence": 7,
+        "evidence_sequence": 12,
+        "stage": 1,
+        "rung_index": 4,
+        "velocity_p": 1_448,
+        "planned_velocity_mrev_s": 4_394,
+        "start_offset_counts": 8_458,
+        "closest_offset_counts": 900,
+        "final_offset_counts": 734,
+        "origin_band_counts": 1_000,
+        "lower_rate_q": 3_150_000,
+        "moving_duration_us": 1_200_000,
+        "settle_duration_us": 500_000,
+        "total_duration_us": 1_936_000,
+        "peak_torque_target_abs": 2_533,
+        "binding_source": 1,
+        "outcome": 1,
+    }
+
+
 def test_decodes_velocity_integral_response_plan_marker() -> None:
     payload = bytearray([1])
     payload.extend(struct.pack("<IHIIHBI", 7, 1, 0x89AB_CDEF, 0x0123_4567, 1_448, 5, 69_888))
@@ -350,6 +449,39 @@ def test_decodes_velocity_integral_response_plan_marker() -> None:
         "plan_digest": 0x0123_4567_89AB_CDEF,
         "record_kind": "integral_plan_marker",
     }
+
+
+def test_decodes_recovery_aware_velocity_integral_plan_marker() -> None:
+    payload = struct.pack(
+        "<BIQHIiIHBHIIIIIIIBHH",
+        0,
+        7,
+        0x0123_4567_89AB_CDEF,
+        1_448,
+        4_394,
+        264,
+        25_000,
+        5,
+        5,
+        28,
+        512_000,
+        500_000,
+        236_000,
+        90_888,
+        1_000,
+        1_816_958,
+        3_000_000,
+        7,
+        2_816,
+        2_534,
+    )
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert len(payload) == 65
+    assert frame.payload["record_kind"] == "integral_plan_marker"
+    assert frame.payload["evidence_sequence"] == 1
+    assert frame.payload["recovery_slot_count"] == 7
 
 
 def test_decodes_velocity_integral_response_observation() -> None:
@@ -840,6 +972,7 @@ def test_decode_commissioning_event_names() -> None:
         (137, "commission_velocity_integral_derived"),
         (138, "commission_velocity_integral_terminal"),
         (139, "commission_velocity_integral_complete"),
+        (143, "commission_rung_origin_recovery"),
     ),
 )
 def test_decode_velocity_integral_response_event_names(event_id: int, event_name: str) -> None:
