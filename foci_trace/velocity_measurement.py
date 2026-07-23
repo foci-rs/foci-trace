@@ -370,6 +370,7 @@ FNV1A64_OFFSET = 0xCBF29CE484222325
 FNV1A64_PRIME = 0x100000001B3
 STAGE_B_OUTCOME_COMPLETE = 1
 STAGE_B_OUTCOME_INCONCLUSIVE = 2
+STAGE_B_OUTCOME_FAULT = 3
 STAGE_B_CAUSE_NO_DIRECTIONAL_MODEL = 1
 STAGE_B_CAUSE_NO_JOINT_OPERABLE_REGION = 2
 STAGE_B_CAUSE_REPRODUCTION_MISMATCH = 5
@@ -2398,6 +2399,68 @@ def _compare_stage_b_causal_order(
     return f"Stage B causal order differs: firmware={observed} offline={expected}"
 
 
+def _stage_b_fault_prefix_replay(replay: dict[str, object]) -> dict[str, object]:
+    """Remove folds that a historical hard-current Fault never emitted."""
+    prefix = dict(replay)
+    prefix["directions"] = [
+        [region for region in regions if region["closure"] != "end_of_ladder"]
+        for regions in replay["directions"]
+    ]
+    prefix["joint_regions"] = [
+        region for region in replay["joint_regions"] if region["closure"] != "end_of_ladder"
+    ]
+    prefix["nomination"] = {}
+    prefix["nominated_p"] = 0
+    prefix["selected"] = [{}, {}]
+    prefix["sufficient"] = False
+    prefix["coverage"] = [None, None]
+    return prefix
+
+
+def _project_schema6_current_headroom(
+    replay: dict[str, object], *, terminal_rung: int
+) -> dict[str, object]:
+    """Project the schema-6 fold-before-terminal rule over preserved evidence."""
+    boundary_consensus = []
+    for directional_rungs in replay["directional_rungs"]:
+        matching = [
+            item for item in directional_rungs if int(item.get("rung_index", -1)) == terminal_rung
+        ]
+        source = matching[0] if matching else directional_rungs[-1]
+        boundary_consensus.append(
+            {
+                "class": int(source["class"]),
+                "included_mask": int(source["included_mask"]),
+            }
+        )
+    exclusions = []
+    for key, boundary in sorted(dict(replay["structured_boundaries"]).items()):
+        rung_index, slot = (int(part) for part in str(key).split("/"))
+        if rung_index == terminal_rung:
+            exclusions.append(
+                {
+                    "rung_index": rung_index,
+                    "slot": slot,
+                    "passing_suffix_mask": int(boundary["passing_suffix_mask"]),
+                }
+            )
+    selected = list(replay["selected"])
+    nomination = dict(replay["nomination"])
+    return {
+        "interpretation": "schema-6 current-headroom what-if",
+        "target_schema_revision": 6,
+        "firmware_authoritative": False,
+        "terminal_rung": terminal_rung,
+        "expected_recovery_rungs": list(range(terminal_rung)),
+        "directional_masks": [int(item["member_mask"]) for item in selected],
+        "joint_mask": int(nomination["member_mask"]),
+        "nominated_p": int(replay["nominated_p"]),
+        "directional_common_intervals": [list(item["common_interval"]) for item in selected],
+        "boundary_rung_consensus": boundary_consensus,
+        "triggering_observation_exclusions": exclusions,
+    }
+
+
 def _stage_b_candidate_from_terminal(
     audit: dict[str, object], *, plan_digest: int
 ) -> dict[str, object]:
@@ -2910,10 +2973,17 @@ def _audit_stage_b_velocity_sweep(
                     mismatches.append(f"Stage B {name}: firmware={plan[name]} offline={expected}")
         fully_acquired_rungs = int(terminal["emitted_observations"]) // slot_count
         recovery_rungs = [int(record["rung_index"]) for record in recovery_records]
-        if recovery_rungs != list(range(fully_acquired_rungs)):
+        historical_fault_prefix = (
+            fully_acquired_rungs > 0
+            and int(terminal["outcome"]) == STAGE_B_OUTCOME_FAULT
+            and int(terminal["cause"]) == 17
+            and recovery_rungs == list(range(fully_acquired_rungs - 1))
+        )
+        expected_recovery_rungs = list(range(fully_acquired_rungs - int(historical_fault_prefix)))
+        if recovery_rungs != expected_recovery_rungs:
             mismatches.append(
                 "Stage B recovery rungs differ from fully acquired rung sequence: "
-                f"firmware={recovery_rungs} offline={list(range(fully_acquired_rungs))}"
+                f"firmware={recovery_rungs} offline={expected_recovery_rungs}"
             )
         for record in recovery_records:
             if int(record["stage"]) != 0:
@@ -2951,7 +3021,12 @@ def _audit_stage_b_velocity_sweep(
         else:
             previous = value
 
-    replay = replay_stage_b_regions(raw_observations, evidence_records)
+    projected_replay = replay_stage_b_regions(raw_observations, evidence_records)
+    replay = (
+        _stage_b_fault_prefix_replay(projected_replay)
+        if recovery_schema and historical_fault_prefix
+        else projected_replay
+    )
     causal_mismatch = _compare_stage_b_causal_order(
         [value for _raw, value in logical_nonterminal] + [terminal], replay
     )
@@ -3509,6 +3584,14 @@ def _audit_stage_b_velocity_sweep(
             "interpretation": "schema-5 recovery authority over preserved evidence",
             "target_schema_revision": 5,
             "recoveries": recovery_projections,
+            "current_headroom_lifecycle": (
+                _project_schema6_current_headroom(
+                    projected_replay,
+                    terminal_rung=int(terminal["emitted_rungs"]) - 1,
+                )
+                if recovery_schema and historical_fault_prefix
+                else None
+            ),
         },
     }
 

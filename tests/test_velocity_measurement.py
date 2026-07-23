@@ -1504,6 +1504,102 @@ def test_stage_b_current_headroom_regions_follow_partial_rung() -> None:
     assert _compare_stage_b_causal_order(records, replay) == ""
 
 
+def test_schema_five_fault_prefix_keeps_unfinished_regions_out_of_parity() -> None:
+    from foci_trace.velocity_measurement import _stage_b_fault_prefix_replay
+
+    replay = {
+        "directions": [
+            [
+                {"kind": "fragment", "closure": "ineligible_gap", "member_mask": 1},
+                {"kind": "valid", "closure": "end_of_ladder", "member_mask": 0b1110},
+            ],
+            [{"kind": "valid", "closure": "end_of_ladder", "member_mask": 0b1110}],
+        ],
+        "joint_regions": [
+            {"closure": "ineligible_gap", "member_mask": 1},
+            {"closure": "end_of_ladder", "member_mask": 0b1110},
+        ],
+        "nomination": {"member_mask": 0b1110, "p": 1024},
+        "nominated_p": 1024,
+        "selected": [{"member_mask": 0b1110}, {"member_mask": 0b1110}],
+        "sufficient": True,
+        "coverage": ["full", "full"],
+    }
+
+    parity = _stage_b_fault_prefix_replay(replay)
+
+    assert parity["directions"] == [
+        [{"kind": "fragment", "closure": "ineligible_gap", "member_mask": 1}],
+        [],
+    ]
+    assert parity["joint_regions"] == [{"closure": "ineligible_gap", "member_mask": 1}]
+    assert parity["nomination"] == {}
+    assert parity["nominated_p"] == 0
+    assert parity["selected"] == [{}, {}]
+    assert parity["sufficient"] is False
+
+
+def test_schema_six_projection_keeps_complete_boundary_rung_in_all_folds() -> None:
+    from foci_trace.velocity_measurement import _project_schema6_current_headroom
+
+    replay = {
+        "directions": [
+            [
+                {
+                    "kind": "valid",
+                    "member_mask": 0x003C_0000,
+                    "common_interval": [16_689_709, 16_897_585],
+                }
+            ],
+            [
+                {
+                    "kind": "valid",
+                    "member_mask": 0x003C_0000,
+                    "common_interval": [-16_117_228, -15_501_617],
+                }
+            ],
+        ],
+        "directional_rungs": [
+            [{"class": 0, "included_mask": 0b1110}],
+            [{"class": 0, "included_mask": 0b1111}],
+        ],
+        "joint_regions": [{"member_mask": 0x003C_0000}],
+        "nomination": {"member_mask": 0x003C_0000, "p": 1024},
+        "nominated_p": 1024,
+        "selected": [
+            {
+                "member_mask": 0x003C_0000,
+                "common_interval": [16_689_709, 16_897_585],
+            },
+            {
+                "member_mask": 0x003C_0000,
+                "common_interval": [-16_117_228, -15_501_617],
+            },
+        ],
+        "structured_boundaries": {"21/0": {"passing_suffix_mask": 4}},
+    }
+
+    projection = _project_schema6_current_headroom(replay, terminal_rung=21)
+
+    assert projection["interpretation"] == "schema-6 current-headroom what-if"
+    assert projection["firmware_authoritative"] is False
+    assert projection["expected_recovery_rungs"] == list(range(21))
+    assert projection["directional_masks"] == [0x003C_0000, 0x003C_0000]
+    assert projection["joint_mask"] == 0x003C_0000
+    assert projection["nominated_p"] == 1024
+    assert projection["directional_common_intervals"] == [
+        [16_689_709, 16_897_585],
+        [-16_117_228, -15_501_617],
+    ]
+    assert projection["boundary_rung_consensus"] == [
+        {"class": 0, "included_mask": 0b1110},
+        {"class": 0, "included_mask": 0b1111},
+    ]
+    assert projection["triggering_observation_exclusions"] == [
+        {"rung_index": 21, "slot": 0, "passing_suffix_mask": 4}
+    ]
+
+
 def test_stage_b_handoff_requires_valid_models_in_both_directions() -> None:
     from foci_trace.velocity_measurement import _stage_b_handoff_sufficient
 

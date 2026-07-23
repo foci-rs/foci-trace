@@ -40,7 +40,12 @@ def test_summary_tracks_stage_b_regions_nomination_and_terminal() -> None:
         {"record_kind": "directional_region", "region_kind": 0},
         {"record_kind": "directional_region", "region_kind": 1},
         {"record_kind": "handoff", "nominated_p": 1448},
-        {"record_kind": "stage_b_terminal", "outcome": 0},
+        {
+            "record_kind": "stage_b_terminal",
+            "outcome": 0,
+            "cause": 4,
+            "recovery_unavailable": 1,
+        },
     ]
     for sequence, payload in enumerate(payloads, 1):
         summary.observe(
@@ -70,6 +75,8 @@ def test_summary_tracks_stage_b_regions_nomination_and_terminal() -> None:
     assert "stage_b_fragments=1" in text
     assert "stage_b_p=1448" in text
     assert "stage_b_outcome=0" in text
+    assert "stage_b_cause=4" in text
+    assert "stage_b_recovery_unavailable=true" in text
 
 
 def test_summary_tracks_velocity_integral_rungs_and_terminal() -> None:

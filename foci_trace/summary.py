@@ -35,6 +35,8 @@ class DeviceSummary:
     stage_b_fragments: int = 0
     stage_b_nominated_p: int = 0
     stage_b_outcome: int | None = None
+    stage_b_cause: int | None = None
+    stage_b_recovery_unavailable: bool = False
     velocity_integral_rungs: int = 0
     velocity_integral_outcome: int | None = None
     rung_origin_recoveries: int = 0
@@ -90,6 +92,10 @@ class LiveSummary:
                 device.stage_b_nominated_p = int(frame.payload["nominated_p"])
             elif kind == "stage_b_terminal":
                 device.stage_b_outcome = int(frame.payload["outcome"])
+                device.stage_b_cause = int(frame.payload["cause"])
+                device.stage_b_recovery_unavailable = bool(
+                    int(frame.payload["recovery_unavailable"])
+                )
             elif kind == "integral_rung":
                 device.velocity_integral_rungs += 1
             elif kind == "integral_terminal":
@@ -113,6 +119,8 @@ class LiveSummary:
                 "first_spi_cycles={first_spi} max_spi_cycles={max_spi} "
                 "stage_b_regions={regions} stage_b_fragments={fragments} "
                 "stage_b_p={stage_b_p} stage_b_outcome={stage_b_outcome} "
+                "stage_b_cause={stage_b_cause} "
+                "stage_b_recovery_unavailable={stage_b_recovery_unavailable} "
                 "velocity_integral_rungs={integral_rungs} "
                 "velocity_integral_outcome={integral_outcome} "
                 "recoveries={recoveries} contained_recoveries={contained_recoveries}".format(
@@ -134,6 +142,8 @@ class LiveSummary:
                     stage_b_outcome=(
                         "none" if item.stage_b_outcome is None else item.stage_b_outcome
                     ),
+                    stage_b_cause=("none" if item.stage_b_cause is None else item.stage_b_cause),
+                    stage_b_recovery_unavailable=str(item.stage_b_recovery_unavailable).lower(),
                     integral_rungs=item.velocity_integral_rungs,
                     integral_outcome=(
                         "none"
