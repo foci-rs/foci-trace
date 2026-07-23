@@ -230,6 +230,79 @@ def recovery_wrong_way(start_offset_counts: int, current_offset_counts: int) -> 
     return abs(current_offset_counts) > abs(start_offset_counts) + 1
 
 
+def _commanded_side_rate(direction: int, interval: list[int]) -> int | None:
+    if direction not in (-1, 1) or len(interval) != 2 or interval[0] > interval[1]:
+        return None
+    if direction == 1 and interval[0] > 0:
+        return int(interval[0])
+    if direction == -1 and interval[1] < 0:
+        return abs(int(interval[1]))
+    return None
+
+
+def select_recovery_authority(
+    direction: int,
+    ordinary_rate_intervals: list[list[int]],
+    structured_rate_intervals: list[list[int]],
+) -> dict[str, int]:
+    """Select the firmware-equivalent minimum recovery-only rate authority."""
+    ordinary = [
+        rate
+        for interval in ordinary_rate_intervals
+        if (rate := _commanded_side_rate(direction, interval)) is not None
+    ]
+    structured = [
+        rate
+        for interval in structured_rate_intervals
+        if (rate := _commanded_side_rate(direction, interval)) is not None
+    ]
+    ordinary_rate = min(ordinary, default=None)
+    structured_rate = min(structured, default=None)
+    if ordinary_rate is not None and (structured_rate is None or ordinary_rate <= structured_rate):
+        measured, source = ordinary_rate, 1
+    elif structured_rate is not None:
+        measured, source = structured_rate, 5
+    else:
+        return {"measured_lower_rate_q": 0, "lower_rate_q": 0, "binding_source": 2}
+    return {
+        "measured_lower_rate_q": measured,
+        "lower_rate_q": _compact_signed_rate(measured, upper=False),
+        "binding_source": source,
+    }
+
+
+def project_recovery_authority(
+    record: dict[str, object],
+    *,
+    direction: int,
+    ordinary_rate_intervals: list[list[int]],
+    structured_rate_intervals: list[list[int]],
+    primitive_cap_us: int,
+) -> dict[str, object]:
+    """Project schema-5 authority without changing a historical record's meaning."""
+    selected = select_recovery_authority(
+        direction, ordinary_rate_intervals, structured_rate_intervals
+    )
+    return_distance = recovery_return_distance_counts(
+        int(record["start_offset_counts"]), int(record["origin_band_counts"])
+    )
+    deadline_us = None
+    if return_distance and selected["lower_rate_q"]:
+        try:
+            deadline_us = recovery_runtime_us(
+                return_distance, selected["lower_rate_q"], primitive_cap_us
+            )
+        except ValueError:
+            pass
+    return {
+        "interpretation": "what_if_projection",
+        "target_schema_revision": 5,
+        **selected,
+        "return_distance_counts": return_distance,
+        "deadline_us": deadline_us,
+    }
+
+
 def audit_rung_origin_recovery(
     record: dict[str, object], plan: dict[str, object]
 ) -> dict[str, object]:
@@ -258,20 +331,20 @@ def audit_rung_origin_recovery(
     if int(record["peak_torque_target_abs"]) >= int(plan["usable_torque_limit"]):
         mismatches.append("recovery peak torque reached the usable limit")
     return_distance = recovery_return_distance_counts(start, origin_band)
-    expected: tuple[int, int]
+    expected: tuple[tuple[int, int], ...]
     runtime_us: int | None = None
     if return_distance == 0:
-        expected = (0, 0)
+        expected = ((0, 0),)
     elif lower_rate_q == 0:
-        expected = (2, 2)
+        expected = ((2, 2),)
     else:
         try:
             runtime_us = recovery_runtime_us(return_distance, lower_rate_q, maximum_slot_us)
         except ValueError:
-            expected = (3, 3)
+            expected = ((3, 3),)
         else:
-            expected = (1, 1)
-    if (outcome, binding) != expected:
+            expected = ((1, 1), (1, 5))
+    if (outcome, binding) not in expected:
         mismatches.append(
             "recovery outcome/binding differs from reconstructed authority "
             f"(firmware={(outcome, binding)} offline={expected})"
@@ -1524,6 +1597,66 @@ def _compact_signed_rate(value: int, *, upper: bool) -> int:
     return mantissa << shift
 
 
+def _project_stage_b_recovery_authorities(
+    plan: dict[str, object],
+    terminal: dict[str, object],
+    gains: list[int],
+    reconstructed: dict[tuple[int, int], dict[str, int]],
+    boundaries: dict[tuple[int, int], dict[str, object]],
+    recovery_records: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    projections = []
+    observations_per_direction = int(plan["observations_per_direction"])
+    for record in recovery_records:
+        rung_index = int(record["rung_index"])
+        if rung_index >= len(gains):
+            continue
+        direction = 1 if int(record["start_offset_counts"]) < 0 else -1
+        direction_slot = 0 if direction == 1 else 1
+        ordinary = []
+        structured = []
+        for observation_index in range(observations_per_direction):
+            key = (rung_index, observation_index * 2 + direction_slot)
+            observation = reconstructed.get(key)
+            if observation is None:
+                continue
+            if int(observation["classification"]) == 0:
+                ordinary.append(
+                    list(
+                        _rate_bounds_from_disturbance_cell(
+                            abs(int(plan["target_velocity_rpm"])) * direction,
+                            int(terminal["encoder_counts_per_rev"]),
+                            gains[rung_index],
+                            (
+                                int(observation["disturbance_low_q16"]),
+                                int(observation["disturbance_high_q16"]),
+                            ),
+                        )
+                    )
+                )
+            boundary = boundaries.get(key)
+            if 4 <= int(observation["classification"]) <= 8 and boundary is not None:
+                structured.append(list(boundary["common_rate_interval_q"]))
+        projection = project_recovery_authority(
+            record,
+            direction=direction,
+            ordinary_rate_intervals=ordinary,
+            structured_rate_intervals=structured,
+            primitive_cap_us=int(plan["recovery_maximum_slot_us"]),
+        )
+        projection.update(
+            {
+                "rung_index": rung_index,
+                "direction": direction,
+                "recorded_lower_rate_q": int(record["lower_rate_q"]),
+                "recorded_binding_source": int(record["binding_source"]),
+                "recorded_outcome": int(record["outcome"]),
+            }
+        )
+        projections.append(projection)
+    return projections
+
+
 def _common_wire_rate_bounds(values: list[int]) -> list[int]:
     """Normalize four compact directional rates to their shared wire shift."""
     encoded = [
@@ -2753,6 +2886,7 @@ def _audit_stage_b_velocity_sweep(
     recovery_records = [
         value for _raw, value in nonterminal if value["record_kind"] == "rung_origin_recovery"
     ]
+    recovery_projections: list[dict[str, object]] = []
     recovery_schema = "recovery_origin_band_counts" in plan
     if recovery_schema:
         try:
@@ -2880,12 +3014,13 @@ def _audit_stage_b_velocity_sweep(
     boundary_records = [
         value for _raw, value in evidence_records if value["record_kind"] == "structured_boundary"
     ]
-    expected_boundaries: dict[tuple[int, int], dict[str, object]] = {}
+    reconstructed_boundaries: dict[tuple[int, int], dict[str, object]] = {}
     for key in observation_records:
         raw = by_stroke.get(key[0] * slot_count + key[1], [])
         boundary = analyze_structured_boundary(raw)
         if boundary is not None:
-            expected_boundaries[key] = boundary
+            reconstructed_boundaries[key] = boundary
+    expected_boundaries = dict(reconstructed_boundaries)
     for record in boundary_records:
         key = (int(record["rung_index"]), int(record["slot"]))
         boundary = expected_boundaries.pop(key, None)
@@ -2908,6 +3043,46 @@ def _audit_stage_b_velocity_sweep(
         _compare_fields(mismatches, f"structured boundary {key}", record, expected, tuple(expected))
     if expected_boundaries:
         mismatches.append(f"missing structured boundaries {sorted(expected_boundaries)}")
+
+    if recovery_schema:
+        recovery_projections = _project_stage_b_recovery_authorities(
+            plan,
+            terminal,
+            list(replay["gains"]),
+            reconstructed,
+            reconstructed_boundaries,
+            recovery_records,
+        )
+        reported_schema = (
+            int(reproduction_v3["schema_revision"]) if reproduction_v3 is not None else None
+        )
+        if reported_schema == 5:
+            for projection in recovery_projections:
+                rung_index = int(projection["rung_index"])
+                if int(projection["recorded_lower_rate_q"]) != int(projection["lower_rate_q"]):
+                    mismatches.append(
+                        f"recovery rung {rung_index}: schema-5 selected rate differs "
+                        "from reconstructed authority"
+                    )
+                return_distance = int(projection["return_distance_counts"])
+                lower_rate = int(projection["lower_rate_q"])
+                if return_distance == 0:
+                    expected_outcome = (0, 0)
+                elif lower_rate == 0:
+                    expected_outcome = (2, 2)
+                elif projection["deadline_us"] is None:
+                    expected_outcome = (3, 3)
+                else:
+                    expected_outcome = (1, int(projection["binding_source"]))
+                recorded_outcome = (
+                    int(projection["recorded_outcome"]),
+                    int(projection["recorded_binding_source"]),
+                )
+                if recorded_outcome != expected_outcome:
+                    mismatches.append(
+                        f"recovery rung {rung_index}: schema-5 outcome/source differs "
+                        "from reconstructed authority"
+                    )
 
     rung_records = {
         int(value["rung_index"]): value
@@ -3330,6 +3505,11 @@ def _audit_stage_b_velocity_sweep(
         "mismatches": mismatches,
         "caveats": caveats,
         "recoveries": [dict(record) for record in recovery_records],
+        "what_if_projection": {
+            "interpretation": "schema-5 recovery authority over preserved evidence",
+            "target_schema_revision": 5,
+            "recoveries": recovery_projections,
+        },
     }
 
 

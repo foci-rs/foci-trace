@@ -11,10 +11,12 @@ from foci_trace.velocity_measurement import (
     audit_rung_origin_recovery,
     classify_absolute_rate,
     plan_rung_origin_recovery,
+    project_recovery_authority,
     recovery_return_distance_counts,
     recovery_runtime_us,
     recovery_target_rpm,
     recovery_wrong_way,
+    select_recovery_authority,
     velocity_report_to_json,
 )
 
@@ -74,9 +76,77 @@ def test_recovery_target_and_wrong_way_are_sign_symmetric() -> None:
 
 
 @pytest.mark.parametrize(
+    ("direction", "ordinary", "structured", "source", "measured", "stored"),
+    (
+        (1, [[10_000_000, 10_200_000]], [], 1, 10_000_000, 9_999_872),
+        (1, [], [[9_174_700, 9_400_298]], 5, 9_174_700, 9_174_528),
+        (1, [[9_000_000, 9_200_000]], [[9_174_700, 9_400_298]], 1, 9_000_000, 8_999_936),
+        (1, [[10_000_000, 10_200_000]], [[9_174_700, 9_400_298]], 5, 9_174_700, 9_174_528),
+        (1, [[9_174_700, 9_400_298]], [[9_174_700, 9_400_298]], 1, 9_174_700, 9_174_528),
+        (1, [[-10, 20]], [[-20, 0]], 2, 0, 0),
+        (-1, [], [[-9_500_000, -9_100_000]], 5, 9_100_000, 9_099_776),
+    ),
+)
+def test_recovery_authority_selector(
+    direction: int,
+    ordinary: list[list[int]],
+    structured: list[list[int]],
+    source: int,
+    measured: int,
+    stored: int,
+) -> None:
+    selected = select_recovery_authority(direction, ordinary, structured)
+
+    assert selected == {
+        "measured_lower_rate_q": measured,
+        "lower_rate_q": stored,
+        "binding_source": source,
+    }
+
+
+def test_schema_four_recovery_rule_is_preserved() -> None:
+    record = {
+        "start_offset_counts": -1_834,
+        "origin_band_counts": 1_000,
+        "lower_rate_q": 0,
+        "binding_source": 2,
+        "outcome": 2,
+    }
+    projected = project_recovery_authority(
+        record,
+        direction=1,
+        ordinary_rate_intervals=[],
+        structured_rate_intervals=[[9_174_700, 9_400_298]],
+        primitive_cap_us=3_000_000,
+    )
+
+    assert record["lower_rate_q"] == 0
+    assert record["binding_source"] == 2
+    assert record["outcome"] == 2
+    assert projected["interpretation"] == "what_if_projection"
+
+
+def test_p512_schema_five_projection() -> None:
+    projected = project_recovery_authority(
+        {"start_offset_counts": -1_834, "origin_band_counts": 1_000},
+        direction=1,
+        ordinary_rate_intervals=[],
+        structured_rate_intervals=[[9_174_700, 9_400_298]],
+        primitive_cap_us=3_000_000,
+    )
+
+    assert projected["measured_lower_rate_q"] == 9_174_700
+    assert projected["lower_rate_q"] == 9_174_528
+    assert projected["binding_source"] == 5
+    assert projected["return_distance_counts"] == 834
+    assert projected["deadline_us"] == 1_338_904
+
+
+@pytest.mark.parametrize(
     ("changes", "expected_mismatch"),
     (
         ({}, None),
+        ({"binding_source": 5}, None),
         (
             {
                 "start_offset_counts": 900,
