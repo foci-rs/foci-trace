@@ -146,6 +146,51 @@ def test_summary_tracks_successful_and_contained_recoveries() -> None:
     assert "contained_recoveries=2" in text
 
 
+def test_summary_keeps_best_effort_clip_uncertainty_visible() -> None:
+    summary = LiveSummary()
+    for sequence, payload in enumerate(
+        (
+            {
+                "record_kind": "velocity_primitive_current",
+                "contact": 0,
+                "moving_clip_uncertain": True,
+            },
+            {
+                "record_kind": "velocity_primitive_current",
+                "contact": 2,
+                "moving_clip_uncertain": True,
+            },
+        ),
+        1,
+    ):
+        summary.observe(
+            0,
+            sequence,
+            Frame(
+                header=FrameHeader(
+                    9,
+                    32,
+                    FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
+                    0,
+                    0,
+                    1,
+                    0,
+                    sequence,
+                    sequence,
+                    1,
+                ),
+                payload=payload,
+                raw_payload=b"",
+            ),
+        )
+
+    text = summary.render()
+
+    assert "current_records=2" in text
+    assert "current_contacts=1" in text
+    assert "clip_uncertain=2" in text
+
+
 def test_summary_surfaces_outer_safety_timing_margin() -> None:
     summary = LiveSummary()
     summary.observe(

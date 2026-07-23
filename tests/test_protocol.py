@@ -931,6 +931,47 @@ def test_decodes_outer_safety_timing_and_rejects_count_drift() -> None:
         decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, corrupt) + corrupt)
 
 
+def test_decodes_velocity_primitive_current_evidence() -> None:
+    payload = struct.pack(
+        "<BIHBBBHHHHIIBB",
+        31,
+        0x0102_0304,
+        0x0506,
+        1,
+        7,
+        3,
+        2_534,
+        2_534,
+        2_111,
+        2_534,
+        0x1122_3344,
+        0x5566_7788,
+        0,
+        2,
+    )
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert frame.payload == {
+        "record_kind": "velocity_primitive_current",
+        "run_sequence": 0x0102_0304,
+        "evidence_sequence": 0x0506,
+        "stage": 1,
+        "rung_index": 7,
+        "slot": 3,
+        "clamp_limit": 2_534,
+        "clamp_readback": 2_534,
+        "moving_pid_output_peak": 2_111,
+        "zero_pid_output_peak": 2_534,
+        "moving_status_flags": 0x1122_3344,
+        "zero_status_flags": 0x5566_7788,
+        "capability": 0,
+        "contact": 2,
+        "moving_clip_absence_proven": False,
+        "moving_clip_uncertain": True,
+    }
+
+
 def test_decode_v2_critical_keeps_legacy_torque_fields() -> None:
     payload = bytearray(84)
     payload[60:64] = struct.pack("<I", 0x1122_3344)

@@ -2312,6 +2312,8 @@ def _stage_b_record_identity(value: dict[str, object]) -> tuple[object, ...]:
         return kind, int(value["rung_index"])
     if kind == "rung_origin_recovery":
         return kind, int(value["rung_index"])
+    if kind == "velocity_primitive_current":
+        return kind, int(value["rung_index"]), int(value["slot"])
     if kind == "directional_region":
         return kind, int(value["direction"]), int(value["member_mask"])
     if kind == "joint_region":
@@ -2368,6 +2370,11 @@ def _compare_stage_b_causal_order(
         for value in records
         if value["record_kind"] == "observation"
     }
+    current_slots = {
+        (int(value["rung_index"]), int(value["slot"]))
+        for value in records
+        if value["record_kind"] == "velocity_primitive_current"
+    }
     rung_indexes = sorted(reported_rungs | {rung for rung, _slot in observation_slots})
     slot_count = int(replay.get("slot_count", 4))
     for rung_index in rung_indexes:
@@ -2377,6 +2384,8 @@ def _compare_stage_b_causal_order(
             expected.append(("observation", rung_index, slot))
             if (rung_index, slot) in boundary_keys:
                 expected.append(("structured_boundary", rung_index, slot))
+            if (rung_index, slot) in current_slots:
+                expected.append(("velocity_primitive_current", rung_index, slot))
         expected.extend(directional_at_boundary.get(rung_index, ()))
         expected.extend(joint_at_boundary.get(rung_index, ()))
         if rung_index in reported_rungs:
@@ -2612,7 +2621,7 @@ def audit_stage_b_reproduction_pair(
     if not isinstance(reproduction, dict):
         return {"matches_firmware": False, "mismatches": ["current capture lacks reproduction"]}
     schema_revision = int(reproduction.get("schema_revision", 2))
-    if schema_revision == 3:
+    if 3 <= schema_revision <= 7:
         plan = current.get("plan")
         if not isinstance(plan, dict):
             return {"matches_firmware": False, "mismatches": ["current capture lacks plan"]}
@@ -2949,6 +2958,23 @@ def _audit_stage_b_velocity_sweep(
     recovery_records = [
         value for _raw, value in nonterminal if value["record_kind"] == "rung_origin_recovery"
     ]
+    current_records = [
+        value for _raw, value in nonterminal if value["record_kind"] == "velocity_primitive_current"
+    ]
+    for record in current_records:
+        if int(record["stage"]) != 0:
+            mismatches.append("Stage B current evidence carries the wrong stage")
+        if int(record["clamp_readback"]) != int(record["clamp_limit"]):
+            mismatches.append("Stage B current evidence clamp readback differs")
+    if current_records and int(terminal["outcome"]) != STAGE_B_OUTCOME_FAULT:
+        observation_keys = {
+            (int(value["rung_index"]), int(value["slot"]))
+            for _raw, value in nonterminal
+            if value["record_kind"] == "observation"
+        }
+        current_keys = {(int(value["rung_index"]), int(value["slot"])) for value in current_records}
+        if current_keys != observation_keys:
+            mismatches.append("Stage B current evidence does not cover every observation")
     recovery_projections: list[dict[str, object]] = []
     recovery_schema = "recovery_origin_band_counts" in plan
     if recovery_schema:
@@ -3580,6 +3606,10 @@ def _audit_stage_b_velocity_sweep(
         "mismatches": mismatches,
         "caveats": caveats,
         "recoveries": [dict(record) for record in recovery_records],
+        "current_evidence": [dict(record) for record in current_records],
+        "limit_evidence_capabilities": sorted(
+            {int(record["capability"]) for record in current_records}
+        ),
         "what_if_projection": {
             "interpretation": "schema-5 recovery authority over preserved evidence",
             "target_schema_revision": 5,

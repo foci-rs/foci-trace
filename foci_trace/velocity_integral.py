@@ -707,6 +707,7 @@ def audit_velocity_integral(
             "integral_observation",
             "integral_rung",
             "rung_origin_recovery",
+            "velocity_primitive_current",
         )
     ]
     sequences = [int(value["evidence_sequence"]) for _raw, value in nonterminal]
@@ -847,6 +848,21 @@ def audit_velocity_integral(
     recovery_records = [
         value for _raw, value in nonterminal if value["record_kind"] == "rung_origin_recovery"
     ]
+    current_records = [
+        value for _raw, value in nonterminal if value["record_kind"] == "velocity_primitive_current"
+    ]
+    for record in current_records:
+        if int(record["stage"]) != 1:
+            mismatches.append("Stage C current evidence carries the wrong stage")
+        if int(record["clamp_readback"]) != int(record["clamp_limit"]):
+            mismatches.append("Stage C current evidence clamp readback differs")
+    if schema_revision >= 3 and int(terminal["outcome"]) != 3:
+        observation_keys = {
+            (int(value["rung_index"]), int(value["slot"])) for value in observation_records
+        }
+        current_keys = {(int(value["rung_index"]), int(value["slot"])) for value in current_records}
+        if current_keys != observation_keys:
+            mismatches.append("Stage C current evidence does not cover every observation")
     if schema_revision >= 2:
         fully_acquired_rungs = int(terminal["emitted_observations"]) // 8
         recovery_rungs = [int(record["rung_index"]) for record in recovery_records]
@@ -865,7 +881,10 @@ def audit_velocity_integral(
             )
         expected_order: list[tuple[str, int | None]] = [("integral_plan_marker", None)]
         for rung_index in range(fully_acquired_rungs):
-            expected_order.extend(("integral_observation", rung_index) for _ in range(8))
+            for _slot in range(8):
+                expected_order.append(("integral_observation", rung_index))
+                if schema_revision >= 3:
+                    expected_order.append(("velocity_primitive_current", rung_index))
             expected_order.append(("integral_rung", rung_index))
             expected_order.append(("rung_origin_recovery", rung_index))
         observed_order = [
@@ -966,6 +985,10 @@ def audit_velocity_integral(
         "mismatches": mismatches,
         "caveats": [],
         "recoveries": [dict(record) for record in recovery_records],
+        "current_evidence": [dict(record) for record in current_records],
+        "limit_evidence_capabilities": sorted(
+            {int(record["capability"]) for record in current_records}
+        ),
         "run_evidence": {
             "opening": opening,
             "positive": positive,

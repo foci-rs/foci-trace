@@ -42,6 +42,9 @@ class DeviceSummary:
     rung_origin_recoveries: int = 0
     contained_recoveries: int = 0
     outer_gap_max_us: int | None = None
+    velocity_current_records: int = 0
+    velocity_current_contacts: int = 0
+    velocity_clip_uncertain: int = 0
 
 
 class LiveSummary:
@@ -106,6 +109,12 @@ class LiveSummary:
                     device.contained_recoveries += 1
             elif kind == "outer_safety_timing":
                 device.outer_gap_max_us = int(frame.payload["max_realized_gap_us"])
+            elif kind == "velocity_primitive_current":
+                device.velocity_current_records += 1
+                if int(frame.payload["contact"]) != 0:
+                    device.velocity_current_contacts += 1
+                if bool(frame.payload["moving_clip_uncertain"]):
+                    device.velocity_clip_uncertain += 1
 
     def render(self) -> str:
         """Render one compact summary line."""
@@ -123,7 +132,9 @@ class LiveSummary:
                 "stage_b_recovery_unavailable={stage_b_recovery_unavailable} "
                 "velocity_integral_rungs={integral_rungs} "
                 "velocity_integral_outcome={integral_outcome} "
-                "recoveries={recoveries} contained_recoveries={contained_recoveries}".format(
+                "recoveries={recoveries} contained_recoveries={contained_recoveries} "
+                "current_records={current_records} current_contacts={current_contacts} "
+                "clip_uncertain={clip_uncertain}".format(
                     idx=device_index,
                     frames=item.frames,
                     gaps=item.gaps,
@@ -152,6 +163,9 @@ class LiveSummary:
                     ),
                     recoveries=item.rung_origin_recoveries,
                     contained_recoveries=item.contained_recoveries,
+                    current_records=item.velocity_current_records,
+                    current_contacts=item.velocity_current_contacts,
+                    clip_uncertain=item.velocity_clip_uncertain,
                 )
             )
             if item.outer_gap_max_us is not None:

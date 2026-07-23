@@ -1262,6 +1262,31 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         decoded["max_context_present"] = bool(decoded["max_context_present"])
         decoded["max_target_zero"] = bool(decoded["max_target_zero"])
         decoded["record_kind"] = "outer_safety_timing"
+    elif kind == 31:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("stage", "B"),
+                ("rung_index", "B"),
+                ("slot", "B"),
+                ("clamp_limit", "H"),
+                ("clamp_readback", "H"),
+                ("moving_pid_output_peak", "H"),
+                ("zero_pid_output_peak", "H"),
+                ("moving_status_flags", "I"),
+                ("zero_status_flags", "I"),
+                ("capability", "B"),
+                ("contact", "B"),
+            ),
+        )
+        moving_clear = (
+            decoded["contact"] != 1 and decoded["moving_pid_output_peak"] < decoded["clamp_limit"]
+        )
+        decoded["moving_clip_absence_proven"] = decoded["capability"] == 1 and moving_clear
+        decoded["moving_clip_uncertain"] = decoded["capability"] == 0 and moving_clear
+        decoded["record_kind"] = "velocity_primitive_current"
     else:
         raise DecodeError(f"unknown velocity-sweep evidence kind {kind}")
     cursor.finish()
