@@ -1061,6 +1061,7 @@ def test_decode_commissioning_event_names() -> None:
         (139, "commission_velocity_integral_complete"),
         (143, "commission_rung_origin_recovery"),
         (144, "commission_outer_safety_timing"),
+        (145, "commission_velocity_limit_latch_test"),
     ),
 )
 def test_decode_velocity_integral_response_event_names(event_id: int, event_name: str) -> None:
