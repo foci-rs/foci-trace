@@ -372,6 +372,37 @@ def test_decodes_fragmented_velocity_integral_response_plan() -> None:
     assert schedule_frame.payload["requested_velocity_source"] == 1
 
 
+def test_decodes_schema_four_minimum_positive_schedule() -> None:
+    schedule = bytearray([0])
+    schedule.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
+    schedule.extend(struct.pack("<BBHHHHHHH", 1, 7, 1, 2, 4, 8, 16, 32, 64))
+    schedule.extend(
+        struct.pack(
+            "<IIIIIIIBIIIIH",
+            512_000,
+            500_000,
+            236_000,
+            106_209,
+            116_856,
+            4_394,
+            10_000,
+            1,
+            2_500,
+            250,
+            28_100,
+            28_100,
+            3_000,
+        )
+    )
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, schedule) + schedule)
+
+    assert frame.payload["record_kind"] == "integral_plan_schedule"
+    assert frame.payload["positive_i"] == [1, 2, 4, 8, 16, 32, 64]
+    assert frame.payload["nominal_workflow_ms"] == 106_209
+    assert frame.payload["maximum_workflow_ms"] == 116_856
+
+
 def test_decodes_velocity_integral_recovery_plan_fragment() -> None:
     payload = bytearray([0])
     payload.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))

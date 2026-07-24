@@ -124,11 +124,15 @@ def derive_integral_ladder(
     moving_stroke_us: int,
     shortest_suffix_us: int,
     maximum_i: int,
+    *,
+    schema_revision: int,
 ) -> dict[str, object]:
     """Reconstruct the cap-only whole-octave positive-I ladder."""
+    if schema_revision not in range(1, 5):
+        raise ValueError("unsupported Stage-C evidence schema")
     if shortest_suffix_us < 2:
         raise ValueError("shortest suffix must contain at least two microseconds")
-    i_start = _largest_i_for_tau(pwm_hz, moving_stroke_us, maximum_i)
+    i_start = 1 if schema_revision >= 4 else _largest_i_for_tau(pwm_hz, moving_stroke_us, maximum_i)
     i_top_cap = _largest_i_for_tau(pwm_hz, shortest_suffix_us // 2, maximum_i)
     if i_start > i_top_cap:
         raise ValueError("integral ladder has insufficient structural span")
@@ -567,6 +571,7 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
             int(plan["moving_stroke_us"]),
             64_000,
             32_767,
+            schema_revision=int(plan["schema_revision"]),
         )
     except ValueError as error:
         mismatches.append(f"plan ladder reconstruction failed: {error}")

@@ -90,6 +90,20 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
                 "recovery_slot_count": 7,
             }
         )
+    if schema_revision >= 4:
+        plan.update(
+            {
+                "positive_rung_count": 7,
+                "positive_i": [1, 2, 4, 8, 16, 32, 64],
+                "family_size": 36,
+                "total_rung_count": 9,
+                "expected_observations": 72,
+                "nominal_workflow_ms": 106_209,
+                "maximum_workflow_ms": 116_856,
+                "recovery_slot_count": 9,
+                "limit_evidence_capability": 1,
+            }
+        )
     return plan
 
 
@@ -532,13 +546,59 @@ def test_reproduction_pair_checks_anchor_relative_curve_and_terminal() -> None:
     assert pair["comparison"]["reproduced_masks"] == [0b11111, 0b11111]
 
 
-def test_tau_geometry_reconstructs_the_fixed_whole_octave_ladder() -> None:
+def test_schema_aware_geometry_preserves_old_and_new_whole_octave_ladders() -> None:
     assert velocity_i_tau_us(5, 25_000) == 524_288
     assert velocity_i_tau_us(80, 25_000) == 32_768
 
-    ladder = derive_integral_ladder(25_000, 512_000, 64_000, 32_767)
+    schema_three = derive_integral_ladder(
+        25_000,
+        512_000,
+        64_000,
+        32_767,
+        schema_revision=3,
+    )
+    schema_four = derive_integral_ladder(
+        25_000,
+        512_000,
+        64_000,
+        32_767,
+        schema_revision=4,
+    )
 
-    assert ladder == {"i_start": 5, "i_top_cap": 81, "positive_i": [5, 10, 20, 40, 80]}
+    assert schema_three == {
+        "i_start": 5,
+        "i_top_cap": 81,
+        "positive_i": [5, 10, 20, 40, 80],
+    }
+    assert schema_four == {
+        "i_start": 1,
+        "i_top_cap": 81,
+        "positive_i": [1, 2, 4, 8, 16, 32, 64],
+    }
+
+
+def test_schema_four_plan_reconstructs_exact_counts_and_duration() -> None:
+    plan = _plan(schema_revision=4)
+    plan["plan_digest"] = integral_plan_digest(plan)
+    mismatches: list[str] = []
+
+    from foci_trace.velocity_integral import _validate_plan
+
+    _validate_plan(plan, mismatches)
+
+    assert mismatches == []
+
+
+@pytest.mark.parametrize("schema_revision", [0, 5])
+def test_integral_ladder_rejects_unsupported_schema(schema_revision: int) -> None:
+    with pytest.raises(ValueError, match="unsupported Stage-C evidence schema"):
+        derive_integral_ladder(
+            25_000,
+            512_000,
+            64_000,
+            32_767,
+            schema_revision=schema_revision,
+        )
 
 
 def test_depth_three_consensus_preserves_closed_endpoint_and_ambiguity() -> None:
