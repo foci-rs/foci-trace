@@ -2544,6 +2544,11 @@ def test_recovery_records_route_to_their_owning_stage(monkeypatch) -> None:
         {"record_kind": "rung_origin_recovery", "run_sequence": 7, "stage": 0},
         {"record_kind": "stage_b_terminal", "run_sequence": 7},
         {"record_kind": "integral_plan_core", "run_sequence": 8},
+        {
+            "record_kind": "velocity_primitive_current",
+            "run_sequence": 8,
+            "stage": 1,
+        },
         {"record_kind": "rung_origin_recovery", "run_sequence": 8, "stage": 1},
         {"record_kind": "integral_terminal", "run_sequence": 8},
     )
@@ -2570,6 +2575,7 @@ def test_recovery_records_route_to_their_owning_stage(monkeypatch) -> None:
     assert routed["stage_b"] == ["plan", "rung_origin_recovery", "stage_b_terminal"]
     assert routed["stage_c"] == [
         "integral_plan_core",
+        "velocity_primitive_current",
         "rung_origin_recovery",
         "integral_terminal",
     ]

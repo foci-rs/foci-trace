@@ -531,17 +531,22 @@ def test_decodes_velocity_integral_response_terminal() -> None:
     payload = bytearray([4])
     payload.extend(struct.pack("<IHII", 7, 15, 0x1122_3344, 0x5566_7788))
     payload.extend(struct.pack("<II", 0x99AA_BBCC, 0xDDEE_FF00))
-    payload.extend(struct.pack("<BBHHHHIIB", 1, 0, 56, 56, 7, 7, 0b11111, 0b01111, 6))
+    payload.extend(struct.pack("<BBBHHHHIIB", 1, 0, 1, 56, 9, 7, 1, 0b11111, 0b01111, 2))
     payload.extend(struct.pack("<IIII", 100, 0, 200, 0))
 
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
 
-    assert len(payload) == 58
+    assert len(payload) == 59
     assert frame.payload["record_kind"] == "integral_terminal"
     assert frame.payload["plan_digest"] == 0x5566_7788_1122_3344
     assert frame.payload["digest"] == 0xDDEE_FF00_99AA_BBCC
+    assert frame.payload["recovery_unavailable"] == 1
+    assert frame.payload["expected_observations"] == 56
+    assert frame.payload["emitted_observations"] == 9
+    assert frame.payload["expected_rungs"] == 7
+    assert frame.payload["emitted_rungs"] == 1
     assert frame.payload["eligible_masks"] == [0b11111, 0b01111]
-    assert frame.payload["current_terminus"] == 5
+    assert frame.payload["current_terminus"] == 1
     assert frame.payload["run_completed_us"] == 200
 
 

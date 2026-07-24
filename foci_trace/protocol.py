@@ -864,29 +864,37 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         decoded = _take_fields(cursor, tuple(fields))
         decoded["record_kind"] = "rung"
     elif kind == 4 and len(payload) in (58, 59):
-        decoded = _take_fields(
-            cursor,
+        fields = [
+            ("run_sequence", "I"),
+            ("evidence_sequence", "H"),
+            ("plan_digest_low", "I"),
+            ("plan_digest_high", "I"),
+            ("digest_low", "I"),
+            ("digest_high", "I"),
+            ("outcome", "B"),
+            ("cause", "B"),
+        ]
+        if len(payload) == 59:
+            fields.append(("recovery_unavailable", "B"))
+        fields.extend(
             (
-                ("run_sequence", "I"),
-                ("evidence_sequence", "H"),
-                ("plan_digest_low", "I"),
-                ("plan_digest_high", "I"),
-                ("digest_low", "I"),
-                ("digest_high", "I"),
-                ("outcome", "B"),
-                ("cause", "B"),
                 ("expected_observations", "H"),
                 ("emitted_observations", "H"),
                 ("expected_rungs", "H"),
                 ("emitted_rungs", "H"),
-            ),
+            )
+        )
+        decoded = _take_fields(
+            cursor,
+            tuple(fields),
         )
         decoded["eligible_masks"] = [cursor.take("I") for _ in range(2)]
         current_terminus_plus_one = cursor.take("B")
         decoded["current_terminus"] = (
             None if current_terminus_plus_one == 0 else current_terminus_plus_one - 1
         )
-        decoded["recovery_unavailable"] = cursor.take("B") if len(payload) == 59 else 0
+        if len(payload) == 58:
+            decoded["recovery_unavailable"] = 0
         decoded["run_started_us"] = cursor.take("I") | (cursor.take("I") << 32)
         decoded["run_completed_us"] = cursor.take("I") | (cursor.take("I") << 32)
         decoded["plan_digest"] = decoded["plan_digest_low"] | (decoded["plan_digest_high"] << 32)

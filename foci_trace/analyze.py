@@ -1936,6 +1936,10 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                     item.payload.get("record_kind") != "rung_origin_recovery"
                     or int(item.payload.get("stage", -1)) == 0
                 )
+                and (
+                    item.payload.get("record_kind") != "velocity_primitive_current"
+                    or int(item.payload.get("stage", -1)) == 0
+                )
             }
         )
         for run_sequence in run_sequences:
@@ -1948,6 +1952,10 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                     not str(item.payload.get("record_kind", "")).startswith("integral_")
                     and (
                         item.payload.get("record_kind") != "rung_origin_recovery"
+                        or int(item.payload.get("stage", -1)) == 0
+                    )
+                    and (
+                        item.payload.get("record_kind") != "velocity_primitive_current"
                         or int(item.payload.get("stage", -1)) == 0
                     )
                 )
@@ -2010,6 +2018,10 @@ def _velocity_integral_audits(states: dict[int, _DeviceState]) -> list[dict[str,
                         item.payload.get("record_kind") == "rung_origin_recovery"
                         and int(item.payload.get("stage", -1)) == 1
                     )
+                    or (
+                        item.payload.get("record_kind") == "velocity_primitive_current"
+                        and int(item.payload.get("stage", -1)) == 1
+                    )
                 )
                 and "run_sequence" in item.payload
             }
@@ -2023,6 +2035,10 @@ def _velocity_integral_audits(states: dict[int, _DeviceState]) -> list[dict[str,
                     str(item.payload.get("record_kind", "")).startswith("integral_")
                     or (
                         item.payload.get("record_kind") == "rung_origin_recovery"
+                        and int(item.payload.get("stage", -1)) == 1
+                    )
+                    or (
+                        item.payload.get("record_kind") == "velocity_primitive_current"
                         and int(item.payload.get("stage", -1)) == 1
                     )
                 )
