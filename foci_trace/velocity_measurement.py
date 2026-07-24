@@ -373,6 +373,7 @@ STAGE_B_OUTCOME_INCONCLUSIVE = 2
 STAGE_B_OUTCOME_FAULT = 3
 STAGE_B_CAUSE_NO_DIRECTIONAL_MODEL = 1
 STAGE_B_CAUSE_NO_JOINT_OPERABLE_REGION = 2
+STAGE_B_CAUSE_CURRENT_HEADROOM = 4
 STAGE_B_CAUSE_REPRODUCTION_MISMATCH = 5
 STAGE_B_CAUSE_RECOVERY_UNAVAILABLE = 7
 
@@ -2720,6 +2721,29 @@ def audit_stage_b_reproduction_pair(
     return {"matches_firmware": not mismatches, "mismatches": mismatches}
 
 
+def _stage_b_terminal_boundary(
+    *,
+    terminal: dict[str, object],
+    current_records: list[dict[str, object]],
+    completed_rungs: int,
+) -> tuple[str, int | None, list[int]]:
+    """Recover the terminal fold boundary from primitive-wide current evidence."""
+    if int(terminal.get("cause", 0)) != STAGE_B_CAUSE_CURRENT_HEADROOM:
+        return "end_of_ladder", None, []
+
+    emitted_rungs = int(terminal.get("emitted_rungs", 0))
+    boundary_rung = emitted_rungs - 1 if emitted_rungs else None
+    partial_rungs = sorted(
+        {
+            int(record["rung_index"])
+            for record in current_records
+            if int(record["rung_index"]) >= completed_rungs
+            and int(record.get("contact", 0)) in (1, 2)
+        }
+    )
+    return "current_headroom", boundary_rung, partial_rungs
+
+
 def replay_stage_b_regions(
     raw_observations: list[VelocityObservation],
     evidence_records: list[tuple[bytes, dict[str, object]]],
@@ -2818,15 +2842,30 @@ def replay_stage_b_regions(
             }
         )
     completed_rungs = len(joint_inputs)
+    observation_current_rungs = {
+        rung_index
+        for (rung_index, _slot), observation in reconstructed.items()
+        if rung_index >= completed_rungs and int(observation["classification"]) == 3
+    }
+    current_records = [
+        value
+        for _raw, value in evidence_records
+        if value["record_kind"] == "velocity_primitive_current"
+    ]
+    terminal_closure, terminal_boundary_rung, observed_current_rungs = _stage_b_terminal_boundary(
+        terminal=terminal,
+        current_records=current_records,
+        completed_rungs=completed_rungs,
+    )
     partial_current_rungs = sorted(
         {
-            rung_index
-            for (rung_index, _slot), observation in reconstructed.items()
-            if rung_index >= completed_rungs and int(observation["classification"]) == 3
+            *observation_current_rungs,
+            *observed_current_rungs,
         }
     )
-    terminal_closure = "current_headroom" if partial_current_rungs else "end_of_ladder"
-    terminal_boundary_rung = partial_current_rungs[0] if partial_current_rungs else None
+    if partial_current_rungs and terminal_boundary_rung is None:
+        terminal_closure = "current_headroom"
+        terminal_boundary_rung = partial_current_rungs[0]
     partial_directional_rungs: dict[int, list[dict[str, object]]] = {}
     for rung_index in partial_current_rungs if observations_per_direction == 4 else ():
         first_record = next(
