@@ -2728,7 +2728,9 @@ def _stage_b_terminal_boundary(
     completed_rungs: int,
 ) -> tuple[str, int | None, list[int]]:
     """Recover the terminal fold boundary from primitive-wide current evidence."""
-    if int(terminal.get("cause", 0)) != STAGE_B_CAUSE_CURRENT_HEADROOM:
+    if int(terminal.get("cause", 0)) != STAGE_B_CAUSE_CURRENT_HEADROOM and not bool(
+        terminal.get("recovery_unavailable", 0)
+    ):
         return "end_of_ladder", None, []
 
     emitted_rungs = int(terminal.get("emitted_rungs", 0))

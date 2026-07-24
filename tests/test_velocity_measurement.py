@@ -1496,6 +1496,30 @@ def test_stage_b_braking_contact_marks_partial_current_headroom_boundary() -> No
     assert partial_rungs == [21]
 
 
+def test_stage_b_complete_retains_partial_current_headroom_boundary() -> None:
+    from foci_trace.velocity_measurement import _stage_b_terminal_boundary
+
+    closure, boundary_rung, partial_rungs = _stage_b_terminal_boundary(
+        terminal={
+            "cause": 0,
+            "emitted_rungs": 22,
+            "recovery_unavailable": 1,
+        },
+        current_records=[
+            {
+                "rung_index": 21,
+                "slot": 0,
+                "contact": 2,
+            }
+        ],
+        completed_rungs=21,
+    )
+
+    assert closure == "current_headroom"
+    assert boundary_rung == 21
+    assert partial_rungs == [21]
+
+
 def test_stage_b_current_headroom_regions_follow_partial_rung() -> None:
     from foci_trace.velocity_measurement import _compare_stage_b_causal_order
 
