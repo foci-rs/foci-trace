@@ -82,6 +82,8 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
         _append_integer(encoded, int(plan["recovery_slot_count"]), 1)
     _append_integer(encoded, int(plan["hard_torque_limit"]), 2)
     _append_integer(encoded, int(plan["usable_torque_limit"]), 2)
+    if int(plan["schema_revision"]) >= 3:
+        _append_integer(encoded, int(plan["limit_evidence_capability"]), 1)
     _append_integer(encoded, int(plan["requested_velocity_mrev_s"]), 4)
     _append_integer(encoded, int(plan["machine_velocity_ceiling_mrev_s"]), 4)
     _append_integer(encoded, int(plan["requested_velocity_source"]), 1)
@@ -243,6 +245,8 @@ def reconstruct_observation(
     raw: list[VelocityObservation],
     identity: dict[str, object],
     plan: dict[str, object],
+    *,
+    observed_torque_peak_abs: int | None = None,
 ) -> dict[str, object]:
     """Reconstruct one canonical observation from its moving raw samples."""
     if not raw:
@@ -251,7 +255,11 @@ def reconstruct_observation(
     slot = int(identity["slot"])
     direction = 0 if slot % 2 == 0 else 1
     stationarity = _stationary_suffix(raw[-256:])
-    predicted = max(item.peak_torque_target_abs or 0 for item in raw)
+    predicted = (
+        max(item.peak_torque_target_abs or 0 for item in raw)
+        if observed_torque_peak_abs is None
+        else observed_torque_peak_abs
+    )
     common: dict[str, object] = {
         "rung_index": rung_index,
         "slot": slot,
@@ -690,6 +698,23 @@ def audit_velocity_integral(
         **(plan_recoveries[0] if plan_recoveries else {}),
         "record_kind": "integral_plan",
     }
+    current_records = [
+        value
+        for _raw, value in evidence_records
+        if value["record_kind"] == "velocity_primitive_current"
+    ]
+    current_capabilities = {int(value["capability"]) for value in current_records}
+    if schema_revision >= 3:
+        if "limit_evidence_capability" not in plan and len(current_capabilities) == 1:
+            plan["limit_evidence_capability"] = next(iter(current_capabilities))
+        elif (
+            "limit_evidence_capability" in plan
+            and current_capabilities
+            and current_capabilities != {int(plan["limit_evidence_capability"])}
+        ):
+            fragment_mismatches.append(
+                "Stage C current evidence capability differs from the immutable plan"
+            )
     run_sequence = int(plan["run_sequence"])
     mismatches = fragment_mismatches
     _validate_plan(plan, mismatches)
@@ -718,9 +743,9 @@ def audit_velocity_integral(
     marker_records = [
         value for _raw, value in nonterminal if value["record_kind"] == "integral_plan_marker"
     ]
-    if len(marker_records) != 1:
-        mismatches.append("exactly one compact integral plan marker is required")
-    else:
+    if len(marker_records) > 1:
+        mismatches.append("at most one compact integral plan marker is permitted")
+    elif marker_records:
         _compare_fields(
             {
                 "run_sequence": run_sequence,
@@ -772,6 +797,9 @@ def audit_velocity_integral(
     observation_records = [
         value for _raw, value in nonterminal if value["record_kind"] == "integral_observation"
     ]
+    current_by_key = {
+        (int(value["rung_index"]), int(value["slot"])): value for value in current_records
+    }
     reconstructed: dict[tuple[int, int], dict[str, object]] = {}
     expected_gains = [0, *plan["positive_i"], 0]  # type: ignore[list-item]
     for record in observation_records:
@@ -797,6 +825,11 @@ def audit_velocity_integral(
             raw,
             {"rung_index": rung_index, "slot": slot, "i_raw": expected_gains[rung_index]},
             plan,
+            observed_torque_peak_abs=(
+                int(current_by_key[key]["moving_pid_output_peak"])
+                if key in current_by_key
+                else None
+            ),
         )
         _compare_fields(
             expected,
@@ -848,9 +881,6 @@ def audit_velocity_integral(
     recovery_records = [
         value for _raw, value in nonterminal if value["record_kind"] == "rung_origin_recovery"
     ]
-    current_records = [
-        value for _raw, value in nonterminal if value["record_kind"] == "velocity_primitive_current"
-    ]
     for record in current_records:
         if int(record["stage"]) != 1:
             mismatches.append("Stage C current evidence carries the wrong stage")
@@ -879,7 +909,9 @@ def audit_velocity_integral(
                 f"recovery rung {record['rung_index']}: {item}"
                 for item in recovery_audit["mismatches"]
             )
-        expected_order: list[tuple[str, int | None]] = [("integral_plan_marker", None)]
+        expected_order: list[tuple[str, int | None]] = []
+        if marker_records:
+            expected_order.append(("integral_plan_marker", None))
         for rung_index in range(fully_acquired_rungs):
             for _slot in range(8):
                 expected_order.append(("integral_observation", rung_index))
@@ -917,7 +949,11 @@ def audit_velocity_integral(
                 0 if rung_index == 0 else 2 if rung_index == len(expected_gains) - 1 else 1
             )
             expected["observation_classes"] = [item["classification"] for item in observations]
-            reported = record["directions"][direction]  # type: ignore[index]
+            reported = dict(record["directions"][direction])  # type: ignore[index]
+            reported["components"] = [
+                tuple(component)
+                for component in reported["components"]  # type: ignore[union-attr]
+            ]
             _compare_fields(
                 expected,
                 reported,

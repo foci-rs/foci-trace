@@ -97,6 +97,14 @@ def test_integral_plan_digest_hashes_every_immutable_input_in_firmware_order() -
     assert integral_plan_digest(_plan()) == 0x2DD99123497A4876
 
 
+def test_schema_three_plan_digest_hashes_limit_evidence_capability() -> None:
+    latched = _plan(schema_revision=3)
+    latched["limit_evidence_capability"] = 1
+    polling = {**latched, "limit_evidence_capability": 0}
+
+    assert integral_plan_digest(latched) != integral_plan_digest(polling)
+
+
 def _plan_marker(plan: dict[str, object], sequence: int) -> tuple[bytes, dict[str, object]]:
     if int(plan["schema_revision"]) >= 2:
         raw = struct.pack(
@@ -587,6 +595,28 @@ def test_constant_rate_observation_reconstructs_firmware_fields() -> None:
     assert result["suffix_len"] == 256
     assert result["selected_level"] == 4
     assert result["selected_blocks"] == 16
+
+
+def test_current_observer_peak_overrides_sparse_trace_peak() -> None:
+    raw = [VelocityObservation(17, 1_000, 1, 8, 17, 1_218) for _ in range(256)]
+    plan = {
+        "family_size": 20,
+        "target_velocity_rpm": 264,
+        "encoder_counts_per_rev": 4_000,
+        "final_p": 1_024,
+        "hard_torque_limit": 2_816,
+        "usable_torque_limit": 2_534,
+    }
+
+    result = reconstruct_observation(
+        raw,
+        {"rung_index": 1, "slot": 0, "i_raw": 5},
+        plan,
+        observed_torque_peak_abs=2_534,
+    )
+
+    assert result["predicted_torque_target_abs"] == 2_534
+    assert result["classification"] == 3
 
 
 def test_delta_subtraction_and_sparse_reproduction_are_exact() -> None:

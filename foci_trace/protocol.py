@@ -502,6 +502,8 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             decoded["stage_b_plan_digest"] = decoded["stage_b_plan_digest_low"] | (
                 decoded["stage_b_plan_digest_high"] << 32
             )
+            if len(payload) == 88:
+                decoded["limit_evidence_capability"] = cursor.take("B")
             decoded["record_kind"] = "integral_plan_core"
         elif fragment == 1:
             decoded["positive_rung_count"] = cursor.take("B")

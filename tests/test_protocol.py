@@ -326,6 +326,7 @@ def test_decodes_fragmented_velocity_integral_response_plan() -> None:
     )
     core.extend(struct.pack("<IiIIBHBHH", 4_394, 264, 25_000, 4_000, 5, 28, 7, 56, 2_816))
     core.extend(struct.pack("<H", 2_534))
+    core.append(1)
 
     schedule = bytearray([0])
     schedule.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
@@ -352,7 +353,7 @@ def test_decodes_fragmented_velocity_integral_response_plan() -> None:
     core_frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, core) + core)
     schedule_frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, schedule) + schedule)
 
-    assert len(core) == 87
+    assert len(core) == 88
     assert len(schedule) == 74
     assert core_frame.payload["record_kind"] == "integral_plan_core"
     assert core_frame.payload["run_sequence"] == 7
@@ -363,6 +364,7 @@ def test_decodes_fragmented_velocity_integral_response_plan() -> None:
         [17_000_000, 18_000_000],
         [-19_000_000, -18_000_000],
     ]
+    assert core_frame.payload["limit_evidence_capability"] == 1
     assert schedule_frame.payload["record_kind"] == "integral_plan_schedule"
     assert schedule_frame.payload["plan_digest"] == 0x5566_7788_1122_3344
     assert schedule_frame.payload["positive_i"] == [5, 10, 20, 40, 80]
