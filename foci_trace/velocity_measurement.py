@@ -2342,7 +2342,7 @@ _STAGE_B_REPRODUCTION_FRAGMENT_KINDS = (
 
 def _normalized_reproduction_fragment_kind(kind: object) -> str:
     value = str(kind)
-    return value.removeprefix("reproduction_v3_")
+    return value.removeprefix("reproduction_v3_").removeprefix("reproduction_")
 
 
 def _assemble_stage_b_reproduction(

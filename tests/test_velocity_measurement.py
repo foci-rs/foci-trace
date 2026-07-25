@@ -1436,6 +1436,62 @@ def test_stage_b_reproduction_v3_group_requires_exact_fragment_order() -> None:
         _assemble_stage_b_reproduction_v3([records[0], records[2], records[1], *records[3:]])
 
 
+def test_stage_b_reproduction_v4_group_accepts_shared_fragment_names() -> None:
+    from foci_trace.velocity_measurement import _assemble_stage_b_reproduction
+
+    identity = {"run_sequence": 7, "evidence_sequence": 34}
+    records = [
+        {
+            **identity,
+            "record_kind": "reproduction_v4_header",
+            "schema_revision": 8,
+            "outcome": 1,
+            "reason_mask": 0,
+            "previous_provisional_p": 1024,
+            "current_provisional_p": 1024,
+            "final_p": 1024,
+            "selected_joint_mask": 0x001C_0000,
+            "selected_first_rung": 18,
+            "selected_member_count": 3,
+            "forward_validity": 3,
+            "reverse_validity": 3,
+            "reduced_margin": 0,
+        },
+        *(
+            {
+                **identity,
+                "record_kind": "reproduction_membership",
+                "object": object_index,
+            }
+            for object_index in range(3)
+        ),
+        *(
+            {
+                **identity,
+                "record_kind": f"reproduction_{kind}",
+                "direction": direction,
+            }
+            for kind in ("pooled", "common", "coverage")
+            for direction in range(2)
+        ),
+        {
+            **identity,
+            "record_kind": "reproduction_digest",
+            "previous_digest_low": 1,
+            "previous_digest_high": 2,
+            "current_digest_low": 3,
+            "current_digest_high": 4,
+        },
+    ]
+
+    assembled = _assemble_stage_b_reproduction(records)
+
+    assert assembled is not None
+    assert assembled["record_kind"] == "reproduction_v4"
+    assert assembled["selected_joint_mask"] == 0x001C_0000
+    assert len(assembled["memberships"]) == 3
+
+
 def test_stage_b_causal_order_rejects_reordered_directional_closures() -> None:
     from foci_trace.velocity_measurement import _compare_stage_b_causal_order
 
