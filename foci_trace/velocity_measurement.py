@@ -378,8 +378,8 @@ STAGE_B_CAUSE_REPRODUCTION_MISMATCH = 5
 STAGE_B_CAUSE_RECOVERY_UNAVAILABLE = 7
 
 
-def _stage_b_inconclusive_cause(model_direction_mask: int, *, recovery_unavailable: bool) -> int:
-    if recovery_unavailable:
+def _stage_b_inconclusive_cause(model_direction_mask: int, *, recovery_failure: bool) -> int:
+    if recovery_failure:
         return STAGE_B_CAUSE_RECOVERY_UNAVAILABLE
     if model_direction_mask != 3:
         return STAGE_B_CAUSE_NO_DIRECTIONAL_MODEL
@@ -3505,9 +3505,14 @@ def _audit_stage_b_velocity_sweep(
     if list(terminal["selected_intervals"]) != expected_intervals:
         mismatches.append("Stage B terminal selected intervals differ from replay")
     if not replay["sufficient"] and int(terminal["outcome"]) == STAGE_B_OUTCOME_INCONCLUSIVE:
+        recovery_failure = any(
+            int(record["outcome"]) in (2, 3)
+            and int(record["rung_index"]) + 1 < int(plan["rung_count"])
+            for record in recovery_records
+        )
         expected_cause = _stage_b_inconclusive_cause(
             model_direction_mask,
-            recovery_unavailable=bool(terminal.get("recovery_unavailable", 0)),
+            recovery_failure=recovery_failure,
         )
         if int(terminal["cause"]) != expected_cause:
             mismatches.append(

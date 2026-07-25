@@ -995,12 +995,12 @@ def test_stage_b_recovery_is_statistically_excluded_at_partial_terminus() -> Non
     assert with_recovery == without_recovery
 
 
-def test_stage_b_recovery_unavailable_owns_the_inconclusive_cause() -> None:
+def test_stage_b_recovery_failure_owns_the_inconclusive_cause() -> None:
     from foci_trace.velocity_measurement import _stage_b_inconclusive_cause
 
-    assert _stage_b_inconclusive_cause(0, recovery_unavailable=False) == 1
-    assert _stage_b_inconclusive_cause(3, recovery_unavailable=False) == 2
-    assert _stage_b_inconclusive_cause(0, recovery_unavailable=True) == 7
+    assert _stage_b_inconclusive_cause(0, recovery_failure=False) == 1
+    assert _stage_b_inconclusive_cause(3, recovery_failure=False) == 2
+    assert _stage_b_inconclusive_cause(0, recovery_failure=True) == 7
 
 
 def test_rung_disjoint_pair_has_no_reportable_disturbance_interval() -> None:
