@@ -368,6 +368,7 @@ def _f32(value: float | int) -> float:
 
 FNV1A64_OFFSET = 0xCBF29CE484222325
 FNV1A64_PRIME = 0x100000001B3
+STAGE_B_OUTCOME_COMPLETE_CANDIDATE = 0
 STAGE_B_OUTCOME_COMPLETE = 1
 STAGE_B_OUTCOME_INCONCLUSIVE = 2
 STAGE_B_OUTCOME_FAULT = 3
@@ -2008,12 +2009,44 @@ def _stage_b_handoff_sufficient(
     directional: list[list[dict[str, object]]],
     nomination: dict[str, object],
     selected: list[dict[str, object]],
+    *,
+    schema_revision: int,
 ) -> bool:
-    """Return whether one run has the complete bidirectional Stage B handoff."""
+    """Return whether one run has the complete Stage B handoff for its schema."""
+    if schema_revision >= 8:
+        return bool(nomination)
     has_directional_models = all(
         any(region["kind"] == "valid" for region in regions) for regions in directional
     )
     return has_directional_models and bool(nomination) and all(bool(item) for item in selected)
+
+
+def _select_schema8_directional_evidence(
+    regions: list[dict[str, object]],
+    *,
+    provisional_rung: int,
+) -> dict[str, object]:
+    """Select the schema-8 directional model or fragment retained for one run."""
+    candidates = [dict(region) for region in regions]
+    valid = [region for region in candidates if region["kind"] == "valid"]
+    if valid:
+        candidates = valid
+    if not candidates:
+        return {}
+
+    def rank(region: dict[str, object]) -> tuple[int, int, int]:
+        first = int(region["first_rung"])
+        last = int(region["last_rung"])
+        distance = (
+            first - provisional_rung
+            if provisional_rung < first
+            else provisional_rung - last
+            if provisional_rung > last
+            else 0
+        )
+        return (-int(region["member_count"]), distance, first)
+
+    return min(candidates, key=rank)
 
 
 def _compare_stage_b_candidates_schema2(
@@ -2167,24 +2200,12 @@ def _schema8_run_candidate(report: dict[str, object]) -> dict[str, object]:
 
     selected = []
     for regions in replay["directions"]:  # type: ignore[index]
-        candidates = [dict(region) for region in regions]
-        valid = [region for region in candidates if region["kind"] == "valid"]
-        if valid:
-            candidates = valid
-
-        def rank(region: dict[str, object]) -> tuple[int, int, int]:
-            first = int(region["first_rung"])
-            last = int(region["last_rung"])
-            distance = (
-                first - provisional_rung
-                if provisional_rung < first
-                else provisional_rung - last
-                if provisional_rung > last
-                else 0
+        selected.append(
+            _select_schema8_directional_evidence(
+                list(regions),
+                provisional_rung=provisional_rung,
             )
-            return (-int(region["member_count"]), distance, first)
-
-        selected.append(min(candidates, key=rank) if candidates else {})
+        )
 
     return {
         "nominated_p": int(provisional["p"]),
@@ -2458,6 +2479,17 @@ def _stage_b_record_identity(value: dict[str, object]) -> tuple[object, ...]:
     return (kind,)
 
 
+def _stage_b_replay_expects_handoff(replay: dict[str, object]) -> bool:
+    """Return whether the schema emits the full directional handoff record."""
+    sufficient = bool(replay.get("sufficient", replay.get("nomination")))
+    return sufficient and (
+        int(replay.get("schema_revision", 7)) < 8
+        or all(
+            any(region["kind"] == "valid" for region in regions) for regions in replay["directions"]
+        )
+    )
+
+
 def _compare_stage_b_causal_order(
     records: list[dict[str, object]], replay: dict[str, object]
 ) -> str:
@@ -2531,7 +2563,7 @@ def _compare_stage_b_causal_order(
         expected.extend(joint_after_rung.get(rung_index, ()))
     expected.extend(directional_at_end)
     expected.extend(joint_at_end)
-    if replay.get("sufficient", bool(replay["nomination"])):
+    if _stage_b_replay_expects_handoff(replay):
         expected.append(("handoff",))
     if any(
         value["record_kind"] in ("reproduction", "reproduction_v3", "reproduction_v4")
@@ -2975,6 +3007,19 @@ def replay_stage_b_regions(
     if len(plans) != 1 or len(terminals) != 1:
         raise ValueError("one plan and one terminal are required for Stage B replay")
     plan, terminal = plans[0], terminals[0]
+    schema_revision = (
+        8
+        if any(
+            value["record_kind"] == "reproduction_v4"
+            or value["record_kind"] == "handoff"
+            and "joint_union_mask" in value
+            for _raw, value in evidence_records
+        )
+        or int(terminal.get("outcome", STAGE_B_OUTCOME_INCONCLUSIVE))
+        in (STAGE_B_OUTCOME_COMPLETE_CANDIDATE, STAGE_B_OUTCOME_COMPLETE)
+        and int(terminal.get("model_direction_mask", 3)) != 3
+        else 7
+    )
     by_stroke: dict[int, list[VelocityObservation]] = {}
     for observation in raw_observations:
         by_stroke.setdefault(observation.stroke_index, []).append(observation)
@@ -3126,15 +3171,26 @@ def replay_stage_b_regions(
         int(plan.get("p_top", gains[-1] if gains else 1)),
     )
     nominated_rung = int(nomination["rung_index"]) if nomination else 0
-    selected = [
-        _select_directional_region(
-            [region for region in regions if region["kind"] == "valid"],
-            nominated_rung,
-            gains,
+    selected = []
+    for regions in directional:
+        candidates = (
+            [_select_schema8_directional_evidence(regions, provisional_rung=nominated_rung)]
+            if schema_revision >= 8
+            else [region for region in regions if region["kind"] == "valid"]
         )
-        for regions in directional
-    ]
-    sufficient = _stage_b_handoff_sufficient(directional, nomination, selected)
+        selected.append(
+            _select_directional_region(
+                [region for region in candidates if region],
+                nominated_rung,
+                gains,
+            )
+        )
+    sufficient = _stage_b_handoff_sufficient(
+        directional,
+        nomination,
+        selected,
+        schema_revision=schema_revision,
+    )
     structured_boundaries = {}
     for key, observation in reconstructed.items():
         if not 4 <= int(observation["classification"]) <= 8:
@@ -3155,6 +3211,7 @@ def replay_stage_b_regions(
         "gains": gains,
         "structured_boundaries": structured_boundaries,
         "slot_count": slot_count,
+        "schema_revision": schema_revision,
     }
 
 
@@ -3642,11 +3699,12 @@ def _audit_stage_b_velocity_sweep(
         mismatches.append(f"missing joint regions {sorted(expected_joint)}")
 
     handoffs = [value for _raw, value in evidence_records if value["record_kind"] == "handoff"]
-    if replay["sufficient"] and len(handoffs) != 1:
+    expects_handoff = _stage_b_replay_expects_handoff(replay)
+    if expects_handoff and len(handoffs) != 1:
         mismatches.append(f"expected one Stage B handoff, found {len(handoffs)}")
-    elif not replay["sufficient"] and handoffs:
-        mismatches.append("Stage B handoff exists without sufficient bidirectional evidence")
-    elif replay["sufficient"]:
+    elif not expects_handoff and handoffs:
+        mismatches.append("Stage B handoff exists without complete directional model evidence")
+    elif expects_handoff:
         handoff = handoffs[0]
         nomination = replay["nomination"]
         expected = {
@@ -3702,14 +3760,7 @@ def _audit_stage_b_velocity_sweep(
         for index, regions in enumerate(replay["directions"])
         if any(region["kind"] == "valid" for region in regions)
     )
-    candidate_schema_revision = (
-        8
-        if any(
-            value["record_kind"] == "handoff" and "joint_union_mask" in value
-            for _raw, value in evidence_records
-        )
-        else 7
-    )
+    candidate_schema_revision = int(replay["schema_revision"])
     if replay["sufficient"]:
         expected_memberships = _candidate_terminal_memberships(
             replay,

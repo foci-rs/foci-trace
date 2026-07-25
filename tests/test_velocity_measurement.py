@@ -1771,7 +1771,7 @@ def test_schema_six_projection_keeps_complete_boundary_rung_in_all_folds() -> No
     ]
 
 
-def test_stage_b_handoff_requires_valid_models_in_both_directions() -> None:
+def test_stage_b_handoff_sufficiency_is_schema_aware() -> None:
     from foci_trace.velocity_measurement import _stage_b_handoff_sufficient
 
     nomination = {"member_mask": 1}
@@ -1781,14 +1781,65 @@ def test_stage_b_handoff_requires_valid_models_in_both_directions() -> None:
         [{"kind": "valid"}],
     ]
 
-    assert _stage_b_handoff_sufficient(one_sided, nomination, selected) is False
+    assert (
+        _stage_b_handoff_sufficient(
+            one_sided,
+            nomination,
+            selected,
+            schema_revision=7,
+        )
+        is False
+    )
+    assert (
+        _stage_b_handoff_sufficient(
+            one_sided,
+            nomination,
+            selected,
+            schema_revision=8,
+        )
+        is True
+    )
 
     bidirectional = [
         [{"kind": "valid"}],
         [{"kind": "valid"}],
     ]
     selected[0] = {"member_mask": 1}
-    assert _stage_b_handoff_sufficient(bidirectional, nomination, selected) is True
+    assert (
+        _stage_b_handoff_sufficient(
+            bidirectional,
+            nomination,
+            selected,
+            schema_revision=7,
+        )
+        is True
+    )
+
+
+def test_schema8_directional_retention_prefers_fragment_near_provisional_p() -> None:
+    from foci_trace.velocity_measurement import _select_schema8_directional_evidence
+
+    selected = _select_schema8_directional_evidence(
+        [
+            {
+                "kind": "fragment",
+                "first_rung": 16,
+                "last_rung": 16,
+                "member_count": 1,
+                "member_mask": 0x0001_0000,
+            },
+            {
+                "kind": "fragment",
+                "first_rung": 19,
+                "last_rung": 20,
+                "member_count": 2,
+                "member_mask": 0x0018_0000,
+            },
+        ],
+        provisional_rung=19,
+    )
+
+    assert selected["member_mask"] == 0x0018_0000
 
 
 def test_stage_b_reproduction_pair_joins_previous_digest_and_candidate() -> None:
