@@ -42,6 +42,7 @@ class DeviceSummary:
     velocity_integral_rungs: int = 0
     velocity_integral_outcome: int | None = None
     velocity_integral_bookend_mask: int | None = None
+    velocity_integral_rest_boundary: tuple[int, int] | None = None
     rung_origin_recoveries: int = 0
     contained_recoveries: int = 0
     outer_gap_max_us: int | None = None
@@ -124,6 +125,11 @@ class LiveSummary:
                     device.velocity_integral_bookend_mask = int(
                         frame.payload["bookend_available_mask"]
                     )
+            elif kind == "integral_rest_boundary":
+                device.velocity_integral_rest_boundary = (
+                    int(frame.payload["positive_rung_index"]),
+                    int(frame.payload["slot"]),
+                )
             elif kind == "rung_origin_recovery":
                 device.rung_origin_recoveries += 1
                 if int(frame.payload["outcome"]) >= 2:
@@ -156,6 +162,7 @@ class LiveSummary:
                 "velocity_integral_rungs={integral_rungs} "
                 "velocity_integral_outcome={integral_outcome} "
                 "velocity_integral_bookends={integral_bookends} "
+                "velocity_integral_rest_boundary={integral_rest_boundary} "
                 "recoveries={recoveries} contained_recoveries={contained_recoveries} "
                 "current_records={current_records} current_contacts={current_contacts} "
                 "clip_uncertain={clip_uncertain}".format(
@@ -195,6 +202,11 @@ class LiveSummary:
                         "none"
                         if item.velocity_integral_bookend_mask is None
                         else f"0x{item.velocity_integral_bookend_mask:02x}"
+                    ),
+                    integral_rest_boundary=(
+                        "none"
+                        if item.velocity_integral_rest_boundary is None
+                        else ":".join(str(value) for value in item.velocity_integral_rest_boundary)
                     ),
                     recoveries=item.rung_origin_recoveries,
                     contained_recoveries=item.contained_recoveries,

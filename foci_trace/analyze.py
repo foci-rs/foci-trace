@@ -2738,7 +2738,8 @@ def format_analysis(
         stage_b_lines.append(
             "velocity_integral dev={device} source={source} run={run} eligible={eligible} "
             "stage_b_validity={validity} reduced_margin={margin} "
-            "bookend_available={bookends} matches_firmware={matches}".format(
+            "bookend_available={bookends} rest_boundary={boundary} "
+            "matches_firmware={matches}".format(
                 device=integral.get("device_index", "?"),
                 source=integral.get("source_index", "?"),
                 run=integral.get("run_sequence", "?"),
@@ -2754,6 +2755,7 @@ def format_analysis(
                 bookends=[value is not None for value in evidence.get("bookend", [])]
                 if isinstance(evidence, dict)
                 else [],
+                boundary=evidence.get("rest_boundary") if isinstance(evidence, dict) else None,
                 matches=str(bool(integral.get("matches_firmware"))).lower(),
             )
         )

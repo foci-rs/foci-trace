@@ -984,6 +984,70 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             ),
         )
         decoded["record_kind"] = "directional_region"
+    elif kind == 5 and len(payload) != 19:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest", "Q"),
+                ("positive_rung_index", "B"),
+                ("slot", "B"),
+                ("i_raw", "H"),
+                ("direction", "b"),
+                ("active_sample_count", "H"),
+                ("active_duration_us", "I"),
+                ("active_net_displacement_counts", "i"),
+                ("active_minimum_displacement_counts", "i"),
+                ("active_maximum_displacement_counts", "i"),
+                ("active_transition_count", "H"),
+                ("first_transition_sample_index", "H"),
+                ("first_transition_elapsed_us", "I"),
+                ("first_transition_delta_counts", "i"),
+                ("first_transition_displacement_counts", "i"),
+                ("last_transition_sample_index", "H"),
+                ("last_transition_elapsed_us", "I"),
+                ("last_transition_delta_counts", "i"),
+                ("last_transition_displacement_counts", "i"),
+                ("active_stationarity_code", "B"),
+            ),
+        )
+        if decoded["active_stationarity_code"] == 0:
+            decoded.update(
+                _take_fields(
+                    cursor,
+                    (
+                        ("active_suffix_len", "H"),
+                        ("active_selected_level", "B"),
+                        ("active_selected_blocks", "I"),
+                        ("active_slope_mantissa", "i"),
+                        ("active_slope_shift", "B"),
+                        ("active_slope_half_width_mantissa", "I"),
+                        ("active_slope_half_width_shift", "B"),
+                        ("active_lag_one_q", "i"),
+                        ("active_lag_one_half_width_q", "I"),
+                        ("active_residual_mantissa", "I"),
+                        ("active_residual_shift", "B"),
+                        ("active_tested_suffixes", "B"),
+                    ),
+                )
+            )
+        decoded.update(
+            _take_fields(
+                cursor,
+                (
+                    ("clamp_limit", "H"),
+                    ("moving_pid_output_peak", "H"),
+                    ("zero_pid_output_peak", "H"),
+                    ("moving_status_flags", "I"),
+                    ("zero_status_flags", "I"),
+                    ("limit_evidence_capability", "B"),
+                    ("current_contact", "B"),
+                    ("cleanup_confirmed", "B"),
+                ),
+            )
+        )
+        decoded["record_kind"] = "integral_rest_boundary"
     elif kind == 5:
         decoded = _take_fields(
             cursor,

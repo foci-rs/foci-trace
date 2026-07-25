@@ -2524,7 +2524,10 @@ def test_velocity_integral_audit_is_added_only_when_present() -> None:
         "source_index": 1,
         "run_sequence": 7,
         "matches_firmware": True,
-        "run_evidence": {"eligible_masks": [0b11111, 0b11111]},
+        "run_evidence": {
+            "eligible_masks": [0b11111, 0b11111],
+            "rest_boundary": {"positive_rung_index": 3, "slot": 5},
+        },
     }
     analysis = CaptureAnalysis(devices=[], velocity_integral_audits=[audit])
 
@@ -2533,6 +2536,7 @@ def test_velocity_integral_audit_is_added_only_when_present() -> None:
     assert "integral_responses" not in empty
     assert encoded["integral_responses"] == [audit]
     assert "velocity_integral dev=0 source=1 run=7" in format_analysis(analysis)
+    assert "rest_boundary={'positive_rung_index': 3, 'slot': 5}" in format_analysis(analysis)
 
 
 def test_recovery_records_route_to_their_owning_stage(monkeypatch) -> None:
@@ -2550,6 +2554,7 @@ def test_recovery_records_route_to_their_owning_stage(monkeypatch) -> None:
             "stage": 1,
         },
         {"record_kind": "rung_origin_recovery", "run_sequence": 8, "stage": 1},
+        {"record_kind": "integral_rest_boundary", "run_sequence": 8},
         {"record_kind": "integral_terminal", "run_sequence": 8},
     )
     state.velocity_sweep_evidence = [
@@ -2577,5 +2582,6 @@ def test_recovery_records_route_to_their_owning_stage(monkeypatch) -> None:
         "integral_plan_core",
         "velocity_primitive_current",
         "rung_origin_recovery",
+        "integral_rest_boundary",
         "integral_terminal",
     ]

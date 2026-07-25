@@ -635,6 +635,45 @@ def test_decodes_schema_four_velocity_integral_bookend_masks() -> None:
     assert frame.payload["current_terminus"] is None
 
 
+def test_decodes_schema_five_velocity_integral_rest_boundary() -> None:
+    payload = bytearray([5])
+    payload.extend(struct.pack("<IHQBBHb", 7, 19, 0x0123_4567_89AB_CDEF, 3, 5, 8, -1))
+    payload.extend(struct.pack("<HIiiiH", 433, 433_000, -31, -33, 2, 7))
+    payload.extend(struct.pack("<HIii", 3, 3_000, -1, -1))
+    payload.extend(struct.pack("<HIii", 401, 401_000, 2, -31))
+    payload.extend(
+        struct.pack(
+            "<BHBIiBIBiIIBB",
+            0,
+            64,
+            2,
+            16,
+            -7,
+            0,
+            11,
+            0,
+            13,
+            17,
+            19,
+            0,
+            3,
+        )
+    )
+    payload.extend(struct.pack("<HHHIIBBB", 2_534, 2_111, 2_400, 0, 1 << 15, 1, 0, 1))
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert len(payload) == 117
+    assert frame.payload["record_kind"] == "integral_rest_boundary"
+    assert frame.payload["positive_rung_index"] == 3
+    assert frame.payload["slot"] == 5
+    assert frame.payload["active_stationarity_code"] == 0
+    assert frame.payload["active_suffix_len"] == 64
+    assert frame.payload["first_transition_displacement_counts"] == -1
+    assert frame.payload["last_transition_displacement_counts"] == -31
+    assert frame.payload["cleanup_confirmed"] == 1
+
+
 def test_decodes_stage_b_canonical_records_and_plan_identity() -> None:
     plan_values = (
         7,

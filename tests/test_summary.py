@@ -85,6 +85,11 @@ def test_summary_tracks_velocity_integral_rungs_and_terminal() -> None:
         (
             {"record_kind": "integral_rung"},
             {"record_kind": "integral_rung"},
+            {
+                "record_kind": "integral_rest_boundary",
+                "positive_rung_index": 3,
+                "slot": 5,
+            },
             {"record_kind": "integral_terminal", "outcome": 1},
         ),
         1,
@@ -114,6 +119,7 @@ def test_summary_tracks_velocity_integral_rungs_and_terminal() -> None:
 
     assert "velocity_integral_rungs=2" in text
     assert "velocity_integral_outcome=1" in text
+    assert "velocity_integral_rest_boundary=3:5" in text
 
 
 def test_summary_tracks_successful_and_contained_recoveries() -> None:

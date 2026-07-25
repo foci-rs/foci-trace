@@ -161,12 +161,14 @@ def derive_integral_ladder(
     build_revision: int | None,
 ) -> dict[str, object]:
     """Reconstruct the cap-only whole-octave positive-I ladder."""
-    if schema_revision not in range(1, 5):
+    if schema_revision not in range(1, 6):
         raise ValueError("unsupported Stage-C evidence schema")
     if shortest_suffix_us < 2:
         raise ValueError("shortest suffix must contain at least two microseconds")
     numerator = integral_numerator_for_build(build_revision)
-    if schema_revision >= 4:
+    if schema_revision >= 5:
+        i_start = 1
+    elif schema_revision >= 4:
         i_start = numerator // _LEGACY_Q8_8_I_NUMERATOR
     else:
         i_start = _largest_i_for_tau(
@@ -183,8 +185,10 @@ def derive_integral_ladder(
     )
     if i_start > i_top_cap:
         raise ValueError("integral ladder has insufficient structural span")
-    rungs: list[int] = []
-    candidate = i_start
+    if schema_revision >= 5 and i_top_cap < 3:
+        raise ValueError("integral ladder requires the fixed three-rung prefix")
+    rungs = [1, 2, 3] if schema_revision >= 5 else []
+    candidate = 4 if schema_revision >= 5 else i_start
     while candidate <= i_top_cap:
         rungs.append(candidate)
         candidate <<= 1
@@ -674,6 +678,10 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
         maximum_duration_us = base_duration_us + expected_rungs * int(
             plan["recovery_maximum_slot_us"]
         )
+        if schema_revision >= 5:
+            cleanup_duration_us = int(plan["zero_settle_us"]) + int(plan["analysis_budget_us"])
+            nominal_duration_us += cleanup_duration_us
+            maximum_duration_us += cleanup_duration_us
         expected_nominal_ms = (nominal_duration_us + 999) // 1_000
         expected_maximum_ms = (maximum_duration_us + 999) // 1_000
     else:
@@ -723,6 +731,11 @@ def audit_velocity_integral(
     ]
     terminals = [
         value for _raw, value in evidence_records if value["record_kind"] == "integral_terminal"
+    ]
+    rest_boundaries = [
+        (raw, value)
+        for raw, value in evidence_records
+        if value["record_kind"] == "integral_rest_boundary"
     ]
     identities = (
         plan_cores or plan_schedules or terminals or [value for _raw, value in evidence_records]
@@ -800,6 +813,9 @@ def audit_velocity_integral(
         mismatches.append("terminal run sequence differs from plan")
     if int(terminal["plan_digest"]) != int(plan["plan_digest"]):
         mismatches.append("terminal plan digest differs from full plan")
+    if len(rest_boundaries) > 1:
+        mismatches.append("at most one integral rest-boundary record is permitted")
+    rest_boundary = rest_boundaries[0] if len(rest_boundaries) == 1 else None
 
     nonterminal = [
         (raw, value)
@@ -818,6 +834,26 @@ def audit_velocity_integral(
         mismatches.append(f"integral evidence sequence is not contiguous: {sequences}")
     if int(terminal["evidence_sequence"]) != len(nonterminal) + 1:
         mismatches.append("integral terminal sequence does not follow final evidence record")
+    if rest_boundary is not None:
+        boundary = rest_boundary[1]
+        if int(boundary["evidence_sequence"]) != int(terminal["evidence_sequence"]):
+            mismatches.append("integral rest boundary does not share the terminal sequence")
+        if int(boundary["run_sequence"]) != run_sequence:
+            mismatches.append("integral rest boundary carries the wrong run sequence")
+        if int(boundary["plan_digest"]) != int(plan["plan_digest"]):
+            mismatches.append("integral rest boundary carries the wrong plan digest")
+        positive_rung_index = int(boundary["positive_rung_index"])
+        slot = int(boundary["slot"])
+        if not 0 <= positive_rung_index < int(plan["positive_rung_count"]):
+            mismatches.append("integral rest boundary rung is outside the positive ladder")
+        elif int(boundary["i_raw"]) != int(plan["positive_i"][positive_rung_index]):  # type: ignore[index]
+            mismatches.append("integral rest boundary carries the wrong I gain")
+        if not 0 <= slot < 8:
+            mismatches.append("integral rest boundary slot is outside the fixed schedule")
+        elif int(boundary["direction"]) != (1 if slot % 2 == 0 else -1):
+            mismatches.append("integral rest boundary carries the wrong direction")
+        if int(boundary["cleanup_confirmed"]) not in (0, 1):
+            mismatches.append("integral rest boundary cleanup flag is not boolean")
     marker_records = [
         value for _raw, value in nonterminal if value["record_kind"] == "integral_plan_marker"
     ]
@@ -862,6 +898,8 @@ def audit_velocity_integral(
     digest = _fnv1a64(_compact_plan_marker(plan, run_sequence))
     for raw, _value in nonterminal:
         digest = _fnv1a64(raw, digest)
+    if rest_boundary is not None:
+        digest = _fnv1a64(rest_boundary[0], digest)
     if digest != int(terminal["digest"]):
         mismatches.append(
             f"terminal digest: firmware=0x{int(terminal['digest']):016x} offline=0x{digest:016x}"
@@ -969,15 +1007,34 @@ def audit_velocity_integral(
             (int(value["rung_index"]), int(value["slot"])) for value in observation_records
         }
         current_keys = {(int(value["rung_index"]), int(value["slot"])) for value in current_records}
-        if current_keys != observation_keys:
+        expected_current_keys = set(observation_keys)
+        if schema_revision >= 5 and rest_boundary is not None:
+            expected_current_keys.add(
+                (
+                    int(rest_boundary[1]["positive_rung_index"]) + 1,
+                    int(rest_boundary[1]["slot"]),
+                )
+            )
+        if current_keys != expected_current_keys:
             mismatches.append("Stage C current evidence does not cover every observation")
     if schema_revision >= 2:
-        fully_acquired_rungs = int(terminal["emitted_observations"]) // 8
         recovery_rungs = [int(record["rung_index"]) for record in recovery_records]
-        if recovery_rungs != list(range(fully_acquired_rungs)):
+        if schema_revision >= 5 and rest_boundary is not None:
+            expected_recovery_rungs = sorted(
+                {int(record["rung_index"]) for record in rung_records}
+                | (
+                    {int(rest_boundary[1]["positive_rung_index"]) + 1}
+                    if int(terminal["cause"]) == 10
+                    else set()
+                )
+            )
+        else:
+            fully_acquired_rungs = int(terminal["emitted_observations"]) // 8
+            expected_recovery_rungs = list(range(fully_acquired_rungs))
+        if recovery_rungs != expected_recovery_rungs:
             mismatches.append(
                 "integral recovery rungs differ from fully acquired rung sequence: "
-                f"firmware={recovery_rungs} offline={list(range(fully_acquired_rungs))}"
+                f"firmware={recovery_rungs} offline={expected_recovery_rungs}"
             )
         for record in recovery_records:
             if int(record["stage"]) != 1:
@@ -990,13 +1047,35 @@ def audit_velocity_integral(
         expected_order: list[tuple[str, int | None]] = []
         if marker_records:
             expected_order.append(("integral_plan_marker", None))
-        for rung_index in range(fully_acquired_rungs):
-            for _slot in range(8):
-                expected_order.append(("integral_observation", rung_index))
-                if schema_revision >= 3:
-                    expected_order.append(("velocity_primitive_current", rung_index))
-            expected_order.append(("integral_rung", rung_index))
-            expected_order.append(("rung_origin_recovery", rung_index))
+        if schema_revision >= 5 and rest_boundary is not None:
+            observation_keys = {
+                (int(value["rung_index"]), int(value["slot"])) for value in observation_records
+            }
+            rung_indexes = {int(value["rung_index"]) for value in rung_records}
+            recovery_indexes = {int(value["rung_index"]) for value in recovery_records}
+            boundary_key = (
+                int(rest_boundary[1]["positive_rung_index"]) + 1,
+                int(rest_boundary[1]["slot"]),
+            )
+            for rung_index in sorted(rung_indexes | recovery_indexes | {boundary_key[0]}):
+                for slot in range(8):
+                    if (rung_index, slot) in observation_keys:
+                        expected_order.append(("integral_observation", rung_index))
+                        expected_order.append(("velocity_primitive_current", rung_index))
+                    elif (rung_index, slot) == boundary_key:
+                        expected_order.append(("velocity_primitive_current", rung_index))
+                if rung_index in rung_indexes:
+                    expected_order.append(("integral_rung", rung_index))
+                if rung_index in recovery_indexes:
+                    expected_order.append(("rung_origin_recovery", rung_index))
+        else:
+            for rung_index in expected_recovery_rungs:
+                for _slot in range(8):
+                    expected_order.append(("integral_observation", rung_index))
+                    if schema_revision >= 3:
+                        expected_order.append(("velocity_primitive_current", rung_index))
+                expected_order.append(("integral_rung", rung_index))
+                expected_order.append(("rung_origin_recovery", rung_index))
         observed_order = [
             (str(value["record_kind"]), int(value["rung_index"]) if "rung_index" in value else None)
             for _raw, value in nonterminal
@@ -1107,6 +1186,17 @@ def audit_velocity_integral(
         bookend,
         eligible_masks,
     )
+    if cause in (9, 10) and rest_boundary is None:
+        mismatches.append("rest-boundary terminal cause lacks its canonical boundary record")
+    if rest_boundary is not None and not faulted:
+        if int(rest_boundary[1]["cleanup_confirmed"]) != 1:
+            mismatches.append("non-fault rest-boundary terminal lacks confirmed cleanup")
+        if cause == 9 and (outcome != 2 or sufficient):
+            mismatches.append("cause 9 requires an insufficient Inconclusive run")
+        elif cause == 10 and (outcome not in (0, 1) or not sufficient):
+            mismatches.append("cause 10 requires a sufficient candidate or complete run")
+        elif cause not in (9, 10):
+            mismatches.append("non-fault rest-boundary terminal uses the wrong cause")
     if not faulted and sufficient and outcome not in (0, 1) and not (outcome == 2 and cause == 2):
         mismatches.append("sufficient integral curve has an incompatible terminal outcome")
     if not sufficient and outcome not in (2, 3):
@@ -1126,6 +1216,7 @@ def audit_velocity_integral(
         ),
         "recoveries": [dict(record) for record in recovery_records],
         "current_evidence": [dict(record) for record in current_records],
+        "rest_boundary": dict(rest_boundary[1]) if rest_boundary is not None else None,
         "limit_evidence_capabilities": sorted(
             {int(record["capability"]) for record in current_records}
         ),
@@ -1137,6 +1228,14 @@ def audit_velocity_integral(
             "current_terminus": terminal["current_terminus"],
             "directional_validity": list(plan.get("directional_validity", [])),
             "reduced_margin": bool(plan.get("reduced_margin", False)),
+            "rest_boundary": (
+                {
+                    "positive_rung_index": int(rest_boundary[1]["positive_rung_index"]),
+                    "slot": int(rest_boundary[1]["slot"]),
+                }
+                if rest_boundary is not None
+                else None
+            ),
         },
     }
 
@@ -1177,7 +1276,12 @@ def audit_integral_reproduction_pair(
         positive_rung_count=positive_count,
     )
     expected_outcome = 1 if comparison["reproduces"] else 2
-    expected_cause = 0 if comparison["reproduces"] else 2
+    current_boundary = current_evidence.get("rest_boundary")  # type: ignore[union-attr]
+    expected_cause = (
+        10
+        if comparison["reproduces"] and current_boundary is not None
+        else (0 if comparison["reproduces"] else 2)
+    )
     if int(current_terminal["outcome"]) != expected_outcome:  # type: ignore[index]
         mismatches.append("terminal outcome differs from integral reproduction comparison")
     if int(current_terminal["cause"]) != expected_cause:  # type: ignore[index]
@@ -1186,4 +1290,9 @@ def audit_integral_reproduction_pair(
         "matches_firmware": not mismatches,
         "mismatches": mismatches,
         "comparison": comparison,
+        "previous_rest_boundary": previous_evidence.get("rest_boundary"),  # type: ignore[union-attr]
+        "current_rest_boundary": current_boundary,
+        "rest_boundary_equal": (
+            previous_evidence.get("rest_boundary") == current_boundary  # type: ignore[union-attr]
+        ),
     }

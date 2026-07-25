@@ -122,6 +122,20 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
                 "limit_evidence_capability": 1,
             }
         )
+    if schema_revision >= 5:
+        plan.update(
+            {
+                "build_revision": CURRENT_Q4_12_BUILD,
+                "positive_rung_count": 12,
+                "positive_i": [1, 2, 3, 4, 8, 16, 32, 64, 128, 256, 512, 1_024],
+                "family_size": 56,
+                "total_rung_count": 14,
+                "expected_observations": 112,
+                "nominal_workflow_ms": 165_950,
+                "maximum_workflow_ms": 182_512,
+                "recovery_slot_count": 14,
+            }
+        )
     return plan
 
 
@@ -276,6 +290,11 @@ def _plan_records(plan: dict[str, object]) -> list[tuple[bytes, dict[str, object
                 },
             )
         )
+    if int(plan["schema_revision"]) >= 3:
+        records[0][1]["limit_evidence_capability"] = plan["limit_evidence_capability"]
+    if int(plan["schema_revision"]) >= 4:
+        records[0][1]["directional_validity"] = plan["directional_validity"]
+        records[0][1]["reduced_margin"] = plan["reduced_margin"]
     return records
 
 
@@ -305,6 +324,48 @@ def _recovery_record(rung_index: int, sequence: int) -> tuple[bytes, dict[str, o
         *values.values(),
     )
     return raw, {"record_kind": "rung_origin_recovery", **values}
+
+
+def _current_record(rung_index: int, slot: int, sequence: int) -> tuple[bytes, dict[str, object]]:
+    values = {
+        "run_sequence": 7,
+        "evidence_sequence": sequence,
+        "stage": 1,
+        "rung_index": rung_index,
+        "slot": slot,
+        "clamp_limit": 900,
+        "clamp_readback": 900,
+        "moving_pid_output_peak": 100,
+        "zero_pid_output_peak": 120,
+        "moving_status_flags": 0,
+        "zero_status_flags": 0,
+        "capability": 1,
+        "contact": 0,
+    }
+    raw = struct.pack("<BIHBBBHHHHIIBB", 31, *values.values())
+    return raw, {"record_kind": "velocity_primitive_current", **values}
+
+
+def _rest_boundary_record(sequence: int) -> tuple[bytes, dict[str, object]]:
+    raw = bytearray([5])
+    raw.extend(struct.pack("<IHQBBHb", 7, sequence, 0, 11, 0, 1_024, 1))
+    raw.extend(struct.pack("<HIiiiH", 433, 433_000, 2, 0, 2, 2))
+    raw.extend(struct.pack("<HIii", 3, 3_000, 1, 1))
+    raw.extend(struct.pack("<HIii", 401, 401_000, 1, 2))
+    raw.extend(struct.pack("<B", 4))
+    raw.extend(struct.pack("<HHHIIBBB", 900, 100, 120, 0, 0, 1, 0, 1))
+    return bytes(raw), {
+        "record_kind": "integral_rest_boundary",
+        "run_sequence": 7,
+        "evidence_sequence": sequence,
+        "plan_digest": 0,
+        "positive_rung_index": 11,
+        "slot": 0,
+        "i_raw": 1_024,
+        "direction": 1,
+        "active_stationarity_code": 4,
+        "cleanup_confirmed": 1,
+    }
 
 
 def _observation_record(
@@ -428,6 +489,9 @@ def _synthetic_complete_capture(
             direction_results[direction].append(result)
             records.append(_observation_record(result, sequence, int(plan["plan_digest"])))
             sequence += 1
+            if schema_revision >= 3:
+                records.append(_current_record(rung_index, slot, sequence))
+                sequence += 1
         directions = []
         for direction, observations in enumerate(direction_results):
             interval = tuple(observations[0]["deficit_interval_q"])
@@ -517,6 +581,70 @@ def _synthetic_complete_capture(
     return raw_observations, records
 
 
+def _synthetic_schema_five_boundary_capture() -> tuple[
+    list[VelocityObservation], list[tuple[bytes, dict[str, object]]]
+]:
+    raw_observations, records = _synthetic_complete_capture(schema_revision=5)
+    plan = _plan(schema_revision=5)
+    plan["plan_digest"] = integral_plan_digest(plan)
+    terminal = records.pop()
+    records = [
+        (raw, value)
+        for raw, value in records
+        if not (
+            int(value.get("rung_index", -1)) == 12
+            and (
+                value["record_kind"] in ("integral_observation", "integral_rung")
+                or (
+                    value["record_kind"] == "velocity_primitive_current" and int(value["slot"]) != 0
+                )
+            )
+        )
+    ]
+    sequence = 1
+    resequenced = []
+    for raw, value in records:
+        if (
+            value["record_kind"].startswith("integral_plan_")
+            and value["record_kind"] != "integral_plan_marker"
+        ):
+            resequenced.append((raw, value))
+            continue
+        value["evidence_sequence"] = sequence
+        if value["record_kind"] != "integral_plan_marker":
+            encoded = bytearray(raw)
+            encoded[5:7] = sequence.to_bytes(2, "little")
+            raw = bytes(encoded)
+        resequenced.append((raw, value))
+        sequence += 1
+    boundary_raw, boundary = _rest_boundary_record(sequence)
+    boundary["plan_digest"] = plan["plan_digest"]
+    encoded_boundary = bytearray(boundary_raw)
+    encoded_boundary[7:15] = int(plan["plan_digest"]).to_bytes(8, "little")
+    boundary_raw = bytes(encoded_boundary)
+    digest = 0xCBF29CE484222325
+    for byte in _plan_marker(plan, 1)[0]:
+        digest = ((digest ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    for raw, value in resequenced:
+        if value["record_kind"] in ("integral_plan_core", "integral_plan_schedule"):
+            continue
+        for byte in raw:
+            digest = ((digest ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    for byte in boundary_raw:
+        digest = ((digest ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    terminal[1].update(
+        {
+            "evidence_sequence": sequence,
+            "digest": digest,
+            "cause": 10,
+            "emitted_observations": 104,
+            "emitted_rungs": 13,
+            "eligible_masks": [0x7FF, 0x7FF],
+        }
+    )
+    return raw_observations, [*resequenced, (boundary_raw, boundary), terminal]
+
+
 def test_complete_capture_reconstructs_curve_counts_and_digest() -> None:
     raw, records = _synthetic_complete_capture()
 
@@ -603,6 +731,40 @@ def test_reproduction_pair_checks_anchor_relative_curve_and_terminal() -> None:
     assert pair["comparison"]["reproduced_masks"] == [0b11111, 0b11111]
 
 
+def test_schema_five_boundary_is_digest_bearing_and_lifecycle_audited() -> None:
+    raw, records = _synthetic_schema_five_boundary_capture()
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["matches_firmware"] is True
+    assert audit["complete"] is True
+    assert audit["terminal"]["cause"] == 10
+    assert audit["rest_boundary"]["positive_rung_index"] == 11
+    assert audit["rest_boundary"]["cleanup_confirmed"] == 1
+    assert audit["run_evidence"]["rest_boundary"] == {
+        "positive_rung_index": 11,
+        "slot": 0,
+    }
+
+
+def test_schema_five_pair_reports_boundary_references_without_gating() -> None:
+    raw, records = _synthetic_schema_five_boundary_capture()
+    previous = audit_velocity_integral(raw, records)
+    previous["run_evidence"]["rest_boundary"] = None
+    current = audit_velocity_integral(raw, records)
+    current["terminal"]["outcome"] = 1
+
+    pair = audit_integral_reproduction_pair(previous, current)
+
+    assert pair["matches_firmware"] is True
+    assert pair["rest_boundary_equal"] is False
+    assert pair["previous_rest_boundary"] is None
+    assert pair["current_rest_boundary"] == {
+        "positive_rung_index": 11,
+        "slot": 0,
+    }
+
+
 def test_schema_aware_geometry_preserves_old_and_new_whole_octave_ladders() -> None:
     assert velocity_i_tau_us(5, 25_000, LEGACY_Q8_8_BUILD) == 524_288
     assert velocity_i_tau_us(80, 25_000, LEGACY_Q8_8_BUILD) == 32_768
@@ -623,6 +785,14 @@ def test_schema_aware_geometry_preserves_old_and_new_whole_octave_ladders() -> N
         schema_revision=4,
         build_revision=LEGACY_Q8_8_BUILD,
     )
+    schema_five = derive_integral_ladder(
+        25_000,
+        512_000,
+        64_000,
+        32_767,
+        schema_revision=5,
+        build_revision=CURRENT_Q4_12_BUILD,
+    )
 
     assert schema_three == {
         "i_start": 5,
@@ -633,6 +803,11 @@ def test_schema_aware_geometry_preserves_old_and_new_whole_octave_ladders() -> N
         "i_start": 1,
         "i_top_cap": 81,
         "positive_i": [1, 2, 4, 8, 16, 32, 64],
+    }
+    assert schema_five == {
+        "i_start": 1,
+        "i_top_cap": 1310,
+        "positive_i": [1, 2, 3, 4, 8, 16, 32, 64, 128, 256, 512, 1024],
     }
 
 
@@ -715,6 +890,23 @@ def test_schema_four_plan_reconstructs_exact_counts_and_duration() -> None:
     assert mismatches == []
 
 
+def test_schema_five_plan_reconstructs_exact_counts_and_cleanup_duration() -> None:
+    plan = _plan(schema_revision=5)
+    plan["plan_digest"] = integral_plan_digest(plan)
+    mismatches: list[str] = []
+
+    from foci_trace.velocity_integral import _validate_plan
+
+    _validate_plan(plan, mismatches)
+
+    assert plan["positive_i"] == [1, 2, 3, 4, 8, 16, 32, 64, 128, 256, 512, 1_024]
+    assert plan["family_size"] == 56
+    assert plan["expected_observations"] == 112
+    assert plan["nominal_workflow_ms"] == 165_950
+    assert plan["maximum_workflow_ms"] == 182_512
+    assert mismatches == []
+
+
 def test_schema_four_sufficiency_requires_both_closing_bookends() -> None:
     from foci_trace.velocity_integral import _stage_c_run_sufficient
 
@@ -726,7 +918,7 @@ def test_schema_four_sufficiency_requires_both_closing_bookends() -> None:
     assert _stage_c_run_sufficient(3, opening, [None, None], masks) is True
 
 
-@pytest.mark.parametrize("schema_revision", [0, 5])
+@pytest.mark.parametrize("schema_revision", [0, 6])
 def test_integral_ladder_rejects_unsupported_schema(schema_revision: int) -> None:
     with pytest.raises(ValueError, match="unsupported Stage-C evidence schema"):
         derive_integral_ladder(
