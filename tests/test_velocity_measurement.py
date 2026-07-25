@@ -1236,6 +1236,50 @@ def test_stage_b_core_projection_preserves_reduced_and_transferred_coverage() ->
     assert projected["coverage"][1]["coverage"] == "full"
 
 
+def test_schema8_projection_selects_shared_operating_component_from_captures() -> None:
+    import json
+    from pathlib import Path
+
+    from foci_trace.velocity_measurement import project_stage_b_schema8_pair
+
+    capture_root = (
+        Path(__file__).resolve().parents[4]
+        / "docs/artifacts/trace-captures/2026-07-20-foc-183-velocity-integral-response"
+    )
+    names = (
+        "foc-183-stepper-x-schema7-capability-fixed-candidate-20260723-192516.velocity.json",
+        "foc-183-stepper-x-schema7-capability-fixed-composite-20260723-194119.velocity.json",
+        "foc-183-stepper-x-schema7-4-compact-candidate-20260724-165436.velocity.json",
+    )
+    reports = [json.loads((capture_root / name).read_text())["sweeps"][0] for name in names]
+    compact_reverse = reports[2]["stage_b_replay"]["directions"][1]
+
+    assert [
+        (int(fragment["member_mask"]), int(fragment["member_count"]))
+        for fragment in compact_reverse
+    ] == [(0x0001_0000, 1), (0x0018_0000, 2)]
+
+    projections = (
+        project_stage_b_schema8_pair(reports[0], reports[1]),
+        project_stage_b_schema8_pair(reports[0], reports[2]),
+        project_stage_b_schema8_pair(reports[1], reports[2]),
+    )
+
+    assert [projection["final_p"] for projection in projections] == [1024, 1024, 1024]
+    assert projections[0]["selected_joint_mask"] == 0x001C_0000
+    assert projections[0]["reduced_margin"] is False
+    for projection in projections[1:]:
+        assert projection["interpretation"] == "schema-8 what-if"
+        assert projection["current_candidate"]["nominated_p"] == 256
+        assert projection["current_candidate"]["memberships"][1] == 0x0018_0000
+        assert projection["selected_joint_mask"] == 0x0018_0000
+        assert projection["selected_first_rung"] == 19
+        assert projection["selected_member_count"] == 2
+        assert projection["reduced_margin"] is True
+        assert projection["directional_validity"] == [3, 1]
+    assert all(projection["final_p"] != 1448 for projection in projections)
+
+
 def test_stage_b_core_projection_derives_exact_core_common_offline() -> None:
     from foci_trace.velocity_measurement import project_stage_b_core_pair
 
