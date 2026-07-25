@@ -1,4 +1,7 @@
+import json
 import struct
+from fractions import Fraction
+from pathlib import Path
 
 import pytest
 
@@ -10,12 +13,25 @@ from foci_trace.velocity_integral import (
     delta_e,
     depth_three_consensus,
     derive_integral_ladder,
+    integral_numerator_for_build,
     integral_plan_digest,
     reconstruct_observation,
     stage_c_slot_transition,
+    UnsupportedIntegralRepresentationError,
     velocity_i_tau_us,
 )
 from foci_trace.velocity_measurement import VelocityObservation
+
+
+LEGACY_Q8_8_BUILD = 0x75536758
+CURRENT_Q4_12_BUILD = 0x05E21F75
+
+
+def _fnv1a32(value: str) -> int:
+    digest = 0x811C9DC5
+    for byte in value.encode():
+        digest = ((digest ^ byte) * 0x01000193) & 0xFFFFFFFF
+    return digest
 
 
 def _evidence(
@@ -40,7 +56,7 @@ def _evidence(
 
 def _plan(schema_revision: int = 1) -> dict[str, object]:
     plan: dict[str, object] = {
-        "build_revision": 3,
+        "build_revision": LEGACY_Q8_8_BUILD,
         "schema_revision": schema_revision,
         "channel": 0,
         "stage_b_plan_digest": 0xDDEEFF0099AABBCC,
@@ -110,7 +126,7 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
 
 
 def test_integral_plan_digest_hashes_every_immutable_input_in_firmware_order() -> None:
-    assert integral_plan_digest(_plan()) == 0x2DD99123497A4876
+    assert integral_plan_digest(_plan()) == 0x8E228108A8F0E004
 
 
 def test_schema_three_plan_digest_hashes_limit_evidence_capability() -> None:
@@ -588,8 +604,8 @@ def test_reproduction_pair_checks_anchor_relative_curve_and_terminal() -> None:
 
 
 def test_schema_aware_geometry_preserves_old_and_new_whole_octave_ladders() -> None:
-    assert velocity_i_tau_us(5, 25_000) == 524_288
-    assert velocity_i_tau_us(80, 25_000) == 32_768
+    assert velocity_i_tau_us(5, 25_000, LEGACY_Q8_8_BUILD) == 524_288
+    assert velocity_i_tau_us(80, 25_000, LEGACY_Q8_8_BUILD) == 32_768
 
     schema_three = derive_integral_ladder(
         25_000,
@@ -597,6 +613,7 @@ def test_schema_aware_geometry_preserves_old_and_new_whole_octave_ladders() -> N
         64_000,
         32_767,
         schema_revision=3,
+        build_revision=LEGACY_Q8_8_BUILD,
     )
     schema_four = derive_integral_ladder(
         25_000,
@@ -604,6 +621,7 @@ def test_schema_aware_geometry_preserves_old_and_new_whole_octave_ladders() -> N
         64_000,
         32_767,
         schema_revision=4,
+        build_revision=LEGACY_Q8_8_BUILD,
     )
 
     assert schema_three == {
@@ -616,6 +634,73 @@ def test_schema_aware_geometry_preserves_old_and_new_whole_octave_ladders() -> N
         "i_top_cap": 81,
         "positive_i": [1, 2, 4, 8, 16, 32, 64],
     }
+
+
+def test_build_revision_selects_the_recorded_integral_representation() -> None:
+    assert _fnv1a32("0.1.0") == LEGACY_Q8_8_BUILD
+    assert _fnv1a32("0.2.0") == CURRENT_Q4_12_BUILD
+    assert integral_numerator_for_build(LEGACY_Q8_8_BUILD) == 65_536
+    assert integral_numerator_for_build(CURRENT_Q4_12_BUILD) == 1_048_576
+
+    assert velocity_i_tau_us(16, 25_000, LEGACY_Q8_8_BUILD) == 163_840
+    assert velocity_i_tau_us(16, 25_000, CURRENT_Q4_12_BUILD) == 2_621_440
+    samples_per_stroke = 25_000 * 512_000 // 1_000_000
+    assert Fraction(samples_per_stroke * 16, 65_536) == Fraction(25, 8)
+    assert Fraction(samples_per_stroke * 16, 1_048_576) == Fraction(25, 128)
+
+
+def test_current_build_reconstructs_the_migrated_raw_q4_12_ladder() -> None:
+    from foci_trace.velocity_integral import _validate_plan
+
+    plan = _plan(schema_revision=4)
+    plan.update(
+        {
+            "build_revision": CURRENT_Q4_12_BUILD,
+            "positive_i": [16, 32, 64, 128, 256, 512, 1_024],
+        }
+    )
+    plan["plan_digest"] = integral_plan_digest(plan)
+    mismatches: list[str] = []
+
+    _validate_plan(plan, mismatches)
+
+    assert mismatches == []
+
+
+def test_committed_schema_four_q8_8_plan_remains_bit_exact() -> None:
+    from foci_trace.velocity_integral import _validate_plan
+
+    capture = (
+        Path(__file__).resolve().parents[4]
+        / "docs/artifacts/trace-captures/2026-07-20-foc-183-velocity-integral-response"
+        / "foc-183-stepper-x-stage-c-resume1-trace-only-current-20260725-004335.velocity.json"
+    )
+    response = json.loads(capture.read_text())["integral_responses"][0]
+    plan = response["plan"]
+    mismatches: list[str] = []
+
+    assert response["matches_firmware"] is True
+    assert plan["build_revision"] == LEGACY_Q8_8_BUILD
+    _validate_plan(plan, mismatches)
+
+    assert mismatches == []
+
+
+@pytest.mark.parametrize("build_revision", [None, 0xDEADBEEF])
+def test_unknown_build_refuses_to_guess_integral_representation(
+    build_revision: int | None,
+) -> None:
+    from foci_trace.velocity_integral import _validate_plan
+
+    with pytest.raises(UnsupportedIntegralRepresentationError):
+        integral_numerator_for_build(build_revision)
+    plan = _plan(schema_revision=4)
+    if build_revision is None:
+        del plan["build_revision"]
+    else:
+        plan["build_revision"] = build_revision
+    with pytest.raises(UnsupportedIntegralRepresentationError):
+        _validate_plan(plan, [])
 
 
 def test_schema_four_plan_reconstructs_exact_counts_and_duration() -> None:
@@ -650,6 +735,7 @@ def test_integral_ladder_rejects_unsupported_schema(schema_revision: int) -> Non
             64_000,
             32_767,
             schema_revision=schema_revision,
+            build_revision=LEGACY_Q8_8_BUILD,
         )
 
 

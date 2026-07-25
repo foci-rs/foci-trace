@@ -18,7 +18,10 @@ from .velocity_measurement import (
 
 
 _MICROS_PER_SECOND = 1_000_000
-_I_NUMERATOR = 65_536 * _MICROS_PER_SECOND
+_LEGACY_Q8_8_BUILD_REVISION = 0x75536758
+_CURRENT_Q4_12_BUILD_REVISION = 0x05E21F75
+_LEGACY_Q8_8_I_NUMERATOR = 65_536
+_CURRENT_Q4_12_I_NUMERATOR = 1_048_576
 _I_MAX_POSITIVE_RUNGS = 30
 _I_CONFIDENCE_FAMILY_MAX = 128
 _I_OBSERVATIONS_PER_DIRECTION = 4
@@ -26,6 +29,25 @@ _I32_MIN = -(1 << 31)
 _I32_MAX = (1 << 31) - 1
 _FNV1A64_OFFSET = 0xCBF29CE484222325
 _FNV1A64_PRIME = 0x100000001B3
+
+
+class UnsupportedIntegralRepresentationError(ValueError):
+    """Raised when a firmware build has no declared integral-gain domain."""
+
+
+def integral_numerator_for_build(build_revision: int | None) -> int:
+    """Return the integral normalization recorded by one firmware build."""
+    if build_revision == _LEGACY_Q8_8_BUILD_REVISION:
+        return _LEGACY_Q8_8_I_NUMERATOR
+    if build_revision == _CURRENT_Q4_12_BUILD_REVISION:
+        return _CURRENT_Q4_12_I_NUMERATOR
+    if build_revision is None:
+        raise UnsupportedIntegralRepresentationError(
+            "missing firmware build revision for integral-gain interpretation"
+        )
+    raise UnsupportedIntegralRepresentationError(
+        f"unsupported integral-gain representation for build 0x{build_revision:08x}"
+    )
 
 
 def _fnv1a64(data: bytes, initial: int = _FNV1A64_OFFSET) -> int:
@@ -102,20 +124,26 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     return _fnv1a64(bytes(encoded))
 
 
-def velocity_i_tau_us(i_raw: int, pwm_hz: int) -> int:
+def velocity_i_tau_us(i_raw: int, pwm_hz: int, build_revision: int | None) -> int:
     """Return the advanced-PI time constant with firmware-equivalent ceiling."""
     if i_raw <= 0 or pwm_hz <= 0:
         raise ValueError("velocity I and PWM frequency must be positive")
+    numerator = integral_numerator_for_build(build_revision) * _MICROS_PER_SECOND
     denominator = i_raw * pwm_hz
-    return (_I_NUMERATOR + denominator - 1) // denominator
+    return (numerator + denominator - 1) // denominator
 
 
-def _largest_i_for_tau(pwm_hz: int, minimum_tau_us: int, maximum_i: int) -> int:
+def _largest_i_for_tau(
+    pwm_hz: int,
+    minimum_tau_us: int,
+    maximum_i: int,
+    build_revision: int | None,
+) -> int:
     if pwm_hz <= 0 or minimum_tau_us <= 0 or maximum_i <= 0:
         raise ValueError("integral ladder geometry must be positive")
     largest = 0
     for candidate in range(1, maximum_i + 1):
-        if velocity_i_tau_us(candidate, pwm_hz) < minimum_tau_us:
+        if velocity_i_tau_us(candidate, pwm_hz, build_revision) < minimum_tau_us:
             break
         largest = candidate
     if largest == 0:
@@ -130,14 +158,29 @@ def derive_integral_ladder(
     maximum_i: int,
     *,
     schema_revision: int,
+    build_revision: int | None,
 ) -> dict[str, object]:
     """Reconstruct the cap-only whole-octave positive-I ladder."""
     if schema_revision not in range(1, 5):
         raise ValueError("unsupported Stage-C evidence schema")
     if shortest_suffix_us < 2:
         raise ValueError("shortest suffix must contain at least two microseconds")
-    i_start = 1 if schema_revision >= 4 else _largest_i_for_tau(pwm_hz, moving_stroke_us, maximum_i)
-    i_top_cap = _largest_i_for_tau(pwm_hz, shortest_suffix_us // 2, maximum_i)
+    numerator = integral_numerator_for_build(build_revision)
+    if schema_revision >= 4:
+        i_start = numerator // _LEGACY_Q8_8_I_NUMERATOR
+    else:
+        i_start = _largest_i_for_tau(
+            pwm_hz,
+            moving_stroke_us,
+            maximum_i,
+            build_revision,
+        )
+    i_top_cap = _largest_i_for_tau(
+        pwm_hz,
+        shortest_suffix_us // 2,
+        maximum_i,
+        build_revision,
+    )
     if i_start > i_top_cap:
         raise ValueError("integral ladder has insufficient structural span")
     rungs: list[int] = []
@@ -556,6 +599,8 @@ def _direction_consensus(
 
 
 def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
+    build_revision = plan.get("build_revision")
+    integral_numerator_for_build(build_revision if isinstance(build_revision, int) else None)
     try:
         calculated_digest = integral_plan_digest(plan)
     except (KeyError, OverflowError, TypeError, ValueError) as error:
@@ -576,6 +621,7 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
             64_000,
             32_767,
             schema_revision=int(plan["schema_revision"]),
+            build_revision=plan.get("build_revision"),
         )
     except ValueError as error:
         mismatches.append(f"plan ladder reconstruction failed: {error}")
