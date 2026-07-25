@@ -372,6 +372,27 @@ def test_decodes_fragmented_velocity_integral_response_plan() -> None:
     assert schedule_frame.payload["requested_velocity_source"] == 1
 
 
+def test_decodes_schema_four_velocity_integral_authority() -> None:
+    core = bytearray([0])
+    core.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
+    core.append(0)
+    core.extend(struct.pack("<IHBIIH", 3, 4, 0, 0x99AA_BBCC, 0xDDEE_FF00, 1_024))
+    core.extend(struct.pack("<III", 0x001C_0000, 0x0018_0000, 0x0018_0000))
+    core.extend(struct.pack("<BBB", 3, 1, 1))
+    core.extend(struct.pack("<iiii", 17_000_000, 18_000_000, -19_000_000, -18_000_000))
+    core.extend(struct.pack("<IiIIBHBHHH", 4_394, 264, 25_000, 4_000, 7, 36, 9, 72, 2_816, 2_534))
+    core.append(1)
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, core) + core)
+
+    assert len(core) == 91
+    assert frame.payload["record_kind"] == "integral_plan_core"
+    assert frame.payload["directional_validity"] == [3, 1]
+    assert frame.payload["reduced_margin"] is True
+    assert frame.payload["directional_pooled_intervals"][1] == [-19_000_000, -18_000_000]
+    assert frame.payload["limit_evidence_capability"] == 1
+
+
 def test_decodes_schema_four_minimum_positive_schedule() -> None:
     schedule = bytearray([0])
     schedule.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
@@ -581,6 +602,37 @@ def test_decodes_velocity_integral_response_terminal() -> None:
     assert frame.payload["eligible_masks"] == [0b11111, 0b01111]
     assert frame.payload["current_terminus"] == 1
     assert frame.payload["run_completed_us"] == 200
+
+
+def test_decodes_schema_four_velocity_integral_bookend_masks() -> None:
+    payload = bytearray([4])
+    payload.extend(struct.pack("<IHII", 7, 15, 0x1122_3344, 0x5566_7788))
+    payload.extend(struct.pack("<II", 0x99AA_BBCC, 0xDDEE_FF00))
+    payload.extend(
+        struct.pack(
+            "<BBBHHHHIIBBB",
+            1,
+            0,
+            0,
+            72,
+            72,
+            9,
+            9,
+            0b1111111,
+            0b0111111,
+            0b11,
+            0b10,
+            0,
+        )
+    )
+    payload.extend(struct.pack("<IIII", 100, 0, 200, 0))
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert len(payload) == 61
+    assert frame.payload["opening_available_mask"] == 0b11
+    assert frame.payload["bookend_available_mask"] == 0b10
+    assert frame.payload["current_terminus"] is None
 
 
 def test_decodes_stage_b_canonical_records_and_plan_identity() -> None:
@@ -795,31 +847,52 @@ def test_decodes_compact_stage_b_rung_from_hardware_capture() -> None:
     assert frame.payload["flags"] == 4
 
 
-def test_decodes_stage_b_reproduction_v3_fragments() -> None:
+def test_decodes_stage_b_reproduction_schema_headers_and_shared_fragments() -> None:
     fragments = [
         (
             struct.pack("<BIHBBHHHBH", 10, 7, 33, 1, 0, 1448, 1024, 1448, 0, 3),
             "reproduction_v3_header",
         ),
         (
+            struct.pack(
+                "<BIHBBHHHIBBBBBH",
+                10,
+                7,
+                34,
+                1,
+                0,
+                256,
+                1024,
+                1024,
+                0x0018_0000,
+                19,
+                2,
+                3,
+                1,
+                1,
+                8,
+            ),
+            "reproduction_v4_header",
+        ),
+        (
             struct.pack("<BIHBIIIIIbb", 11, 7, 33, 0, 0x38, 0x3C, 0x38, 0, 4, -1, 0),
-            "reproduction_v3_membership",
+            "reproduction_membership",
         ),
         (
             struct.pack("<BIHBiiiiii", 14, 7, 33, 0, 100, 120, 105, 125, 105, 120),
-            "reproduction_v3_pooled",
+            "reproduction_pooled",
         ),
         (
             struct.pack("<BIHBiiiiiiB", 16, 7, 33, 0, 104, 115, 108, 118, 108, 115, 1),
-            "reproduction_v3_common",
+            "reproduction_common",
         ),
         (
             struct.pack("<BIHBBiHH", 18, 7, 33, 0, 1, -2, 1448, 724),
-            "reproduction_v3_coverage",
+            "reproduction_coverage",
         ),
         (
             struct.pack("<BIHIIII", 20, 7, 33, 1, 2, 3, 4),
-            "reproduction_v3_digest",
+            "reproduction_digest",
         ),
     ]
 
@@ -830,11 +903,16 @@ def test_decodes_stage_b_reproduction_v3_fragments() -> None:
 
     assert [value["record_kind"] for value in decoded] == [kind for _payload, kind in fragments]
     assert decoded[0]["schema_revision"] == 3
-    assert decoded[1]["low_delta"] == -1
-    assert decoded[2]["overlap_high"] == 120
-    assert decoded[3]["nonempty"] == 1
-    assert decoded[4]["signed_rung_distance"] == -2
-    assert decoded[5]["current_digest_high"] == 4
+    assert decoded[1]["schema_revision"] == 8
+    assert decoded[1]["selected_joint_mask"] == 0x0018_0000
+    assert decoded[1]["selected_member_count"] == 2
+    assert decoded[1]["forward_validity"] == 3
+    assert decoded[1]["reverse_validity"] == 1
+    assert decoded[2]["low_delta"] == -1
+    assert decoded[3]["overlap_high"] == 120
+    assert decoded[4]["nonempty"] == 1
+    assert decoded[5]["signed_rung_distance"] == -2
+    assert decoded[6]["current_digest_high"] == 4
 
 
 def test_decodes_canonical_four_observation_rung() -> None:

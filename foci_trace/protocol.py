@@ -479,6 +479,9 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             )
             decoded["directional_memberships"] = [cursor.take("I") for _ in range(2)]
             decoded["joint_membership"] = cursor.take("I")
+            if decoded["schema_revision"] >= 4:
+                decoded["directional_validity"] = [cursor.take("B") for _ in range(2)]
+                decoded["reduced_margin"] = bool(cursor.take("B"))
             decoded["directional_pooled_intervals"] = [
                 [cursor.take("i"), cursor.take("i")] for _ in range(2)
             ]
@@ -502,7 +505,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             decoded["stage_b_plan_digest"] = decoded["stage_b_plan_digest_low"] | (
                 decoded["stage_b_plan_digest_high"] << 32
             )
-            if len(payload) == 88:
+            if decoded["schema_revision"] >= 3 or len(payload) == 88:
                 decoded["limit_evidence_capability"] = cursor.take("B")
             decoded["record_kind"] = "integral_plan_core"
         elif fragment == 1:
@@ -865,7 +868,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             ]
         decoded = _take_fields(cursor, tuple(fields))
         decoded["record_kind"] = "rung"
-    elif kind == 4 and len(payload) in (58, 59):
+    elif kind == 4 and len(payload) in (58, 59, 61):
         fields = [
             ("run_sequence", "I"),
             ("evidence_sequence", "H"),
@@ -876,7 +879,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             ("outcome", "B"),
             ("cause", "B"),
         ]
-        if len(payload) == 59:
+        if len(payload) in (59, 61):
             fields.append(("recovery_unavailable", "B"))
         fields.extend(
             (
@@ -891,6 +894,9 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             tuple(fields),
         )
         decoded["eligible_masks"] = [cursor.take("I") for _ in range(2)]
+        if len(payload) == 61:
+            decoded["opening_available_mask"] = cursor.take("B")
+            decoded["bookend_available_mask"] = cursor.take("B")
         current_terminus_plus_one = cursor.take("B")
         decoded["current_terminus"] = (
             None if current_terminus_plus_one == 0 else current_terminus_plus_one - 1
@@ -1148,21 +1154,46 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         decoded["record_kind"] = "reproduction"
         decoded["schema_revision"] = 2
     elif kind == 10:
-        decoded = _take_fields(
-            cursor,
-            (
-                ("run_sequence", "I"),
-                ("evidence_sequence", "H"),
-                ("outcome", "B"),
-                ("reason_mask", "B"),
-                ("previous_nominated_p", "H"),
-                ("current_nominated_p", "H"),
-                ("final_p", "H"),
-                ("reduced_margin", "B"),
-                ("schema_revision", "H"),
-            ),
+        common_fields = (
+            ("run_sequence", "I"),
+            ("evidence_sequence", "H"),
+            ("outcome", "B"),
+            ("reason_mask", "B"),
         )
-        decoded["record_kind"] = "reproduction_v3_header"
+        decoded = _take_fields(cursor, common_fields)
+        if len(payload) == 26:
+            decoded.update(
+                _take_fields(
+                    cursor,
+                    (
+                        ("previous_provisional_p", "H"),
+                        ("current_provisional_p", "H"),
+                        ("final_p", "H"),
+                        ("selected_joint_mask", "I"),
+                        ("selected_first_rung", "B"),
+                        ("selected_member_count", "B"),
+                        ("forward_validity", "B"),
+                        ("reverse_validity", "B"),
+                        ("reduced_margin", "B"),
+                        ("schema_revision", "H"),
+                    ),
+                )
+            )
+            decoded["record_kind"] = "reproduction_v4_header"
+        else:
+            decoded.update(
+                _take_fields(
+                    cursor,
+                    (
+                        ("previous_nominated_p", "H"),
+                        ("current_nominated_p", "H"),
+                        ("final_p", "H"),
+                        ("reduced_margin", "B"),
+                        ("schema_revision", "H"),
+                    ),
+                )
+            )
+            decoded["record_kind"] = "reproduction_v3_header"
     elif 11 <= kind <= 13:
         decoded = _take_fields(
             cursor,
@@ -1179,7 +1210,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ("high_delta", "b"),
             ),
         )
-        decoded["record_kind"] = "reproduction_v3_membership"
+        decoded["record_kind"] = "reproduction_membership"
     elif 14 <= kind <= 15:
         decoded = _take_fields(
             cursor,
@@ -1195,7 +1226,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ("overlap_high", "i"),
             ),
         )
-        decoded["record_kind"] = "reproduction_v3_pooled"
+        decoded["record_kind"] = "reproduction_pooled"
     elif 16 <= kind <= 17:
         decoded = _take_fields(
             cursor,
@@ -1212,7 +1243,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ("nonempty", "B"),
             ),
         )
-        decoded["record_kind"] = "reproduction_v3_common"
+        decoded["record_kind"] = "reproduction_common"
     elif 18 <= kind <= 19:
         decoded = _take_fields(
             cursor,
@@ -1226,7 +1257,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ("gain_ratio_den", "H"),
             ),
         )
-        decoded["record_kind"] = "reproduction_v3_coverage"
+        decoded["record_kind"] = "reproduction_coverage"
     elif kind == 20:
         decoded = _take_fields(
             cursor,
@@ -1239,7 +1270,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ("current_digest_high", "I"),
             ),
         )
-        decoded["record_kind"] = "reproduction_v3_digest"
+        decoded["record_kind"] = "reproduction_digest"
     elif kind == 30:
         decoded = _take_fields(
             cursor,
