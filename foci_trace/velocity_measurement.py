@@ -2021,6 +2021,11 @@ def _stage_b_handoff_sufficient(
     return has_directional_models and bool(nomination) and all(bool(item) for item in selected)
 
 
+def _stage_b_model_mask_from_validity(validity: list[int]) -> int:
+    """Return the directional model mask for reproduced schema-8 validity."""
+    return sum((1 << index) for index, code in enumerate(validity) if code in (3, 4))
+
+
 def _select_schema8_directional_evidence(
     regions: list[dict[str, object]],
     *,
@@ -3796,6 +3801,9 @@ def _audit_stage_b_velocity_sweep(
         prior_v4, current_v4 = _stage_b_candidates_from_v4(reproduction_group, plan)
         v4_projection = _project_stage_b_schema8_candidates(prior_v4, current_v4)
         reproduction_projection = v4_projection
+        model_direction_mask = _stage_b_model_mask_from_validity(
+            [int(value) for value in v4_projection["directional_validity"]]
+        )
         expected_memberships = [
             *list(v4_projection["core_masks"][:2]),
             int(v4_projection["selected_joint_mask"]),

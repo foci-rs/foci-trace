@@ -1842,6 +1842,14 @@ def test_schema8_directional_retention_prefers_fragment_near_provisional_p() -> 
     assert selected["member_mask"] == 0x0018_0000
 
 
+def test_schema8_terminal_model_mask_uses_reproduced_validity() -> None:
+    from foci_trace.velocity_measurement import _stage_b_model_mask_from_validity
+
+    assert _stage_b_model_mask_from_validity([1, 3]) == 0b10
+    assert _stage_b_model_mask_from_validity([4, 3]) == 0b11
+    assert _stage_b_model_mask_from_validity([0, 2]) == 0
+
+
 def test_stage_b_reproduction_pair_joins_previous_digest_and_candidate() -> None:
     from foci_trace.velocity_measurement import audit_stage_b_reproduction_pair
 
