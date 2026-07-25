@@ -37,8 +37,11 @@ class DeviceSummary:
     stage_b_outcome: int | None = None
     stage_b_cause: int | None = None
     stage_b_recovery_unavailable: bool = False
+    stage_b_directional_validity: tuple[int, int] | None = None
+    stage_b_reduced_margin: bool = False
     velocity_integral_rungs: int = 0
     velocity_integral_outcome: int | None = None
+    velocity_integral_bookend_mask: int | None = None
     rung_origin_recoveries: int = 0
     contained_recoveries: int = 0
     outer_gap_max_us: int | None = None
@@ -99,10 +102,28 @@ class LiveSummary:
                 device.stage_b_recovery_unavailable = bool(
                     int(frame.payload["recovery_unavailable"])
                 )
+            elif kind == "reproduction_v4_header":
+                device.stage_b_nominated_p = int(frame.payload["final_p"])
+                device.stage_b_directional_validity = (
+                    int(frame.payload["forward_validity"]),
+                    int(frame.payload["reverse_validity"]),
+                )
+                device.stage_b_reduced_margin = bool(frame.payload["reduced_margin"])
+            elif kind == "integral_plan_core" and "directional_validity" in frame.payload:
+                validity = frame.payload["directional_validity"]
+                device.stage_b_directional_validity = (
+                    int(validity[0]),
+                    int(validity[1]),
+                )
+                device.stage_b_reduced_margin = bool(frame.payload["reduced_margin"])
             elif kind == "integral_rung":
                 device.velocity_integral_rungs += 1
             elif kind == "integral_terminal":
                 device.velocity_integral_outcome = int(frame.payload["outcome"])
+                if "bookend_available_mask" in frame.payload:
+                    device.velocity_integral_bookend_mask = int(
+                        frame.payload["bookend_available_mask"]
+                    )
             elif kind == "rung_origin_recovery":
                 device.rung_origin_recoveries += 1
                 if int(frame.payload["outcome"]) >= 2:
@@ -130,8 +151,11 @@ class LiveSummary:
                 "stage_b_p={stage_b_p} stage_b_outcome={stage_b_outcome} "
                 "stage_b_cause={stage_b_cause} "
                 "stage_b_recovery_unavailable={stage_b_recovery_unavailable} "
+                "stage_b_validity={stage_b_validity} "
+                "stage_b_reduced_margin={stage_b_reduced_margin} "
                 "velocity_integral_rungs={integral_rungs} "
                 "velocity_integral_outcome={integral_outcome} "
+                "velocity_integral_bookends={integral_bookends} "
                 "recoveries={recoveries} contained_recoveries={contained_recoveries} "
                 "current_records={current_records} current_contacts={current_contacts} "
                 "clip_uncertain={clip_uncertain}".format(
@@ -155,11 +179,22 @@ class LiveSummary:
                     ),
                     stage_b_cause=("none" if item.stage_b_cause is None else item.stage_b_cause),
                     stage_b_recovery_unavailable=str(item.stage_b_recovery_unavailable).lower(),
+                    stage_b_validity=(
+                        "none"
+                        if item.stage_b_directional_validity is None
+                        else ",".join(str(value) for value in item.stage_b_directional_validity)
+                    ),
+                    stage_b_reduced_margin=str(item.stage_b_reduced_margin).lower(),
                     integral_rungs=item.velocity_integral_rungs,
                     integral_outcome=(
                         "none"
                         if item.velocity_integral_outcome is None
                         else item.velocity_integral_outcome
+                    ),
+                    integral_bookends=(
+                        "none"
+                        if item.velocity_integral_bookend_mask is None
+                        else f"0x{item.velocity_integral_bookend_mask:02x}"
                     ),
                     recoveries=item.rung_origin_recoveries,
                     contained_recoveries=item.contained_recoveries,

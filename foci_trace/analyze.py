@@ -2714,13 +2714,17 @@ def format_analysis(
             projection = pair_audit["projection"]
             memberships = projection.get("memberships", [])
             stage_b_lines.append(
-                "stage_b_core provenance=firmware_schema3 previous={previous} current={current} "
-                "core={core} final_p={final_p} reason_mask={reason} reduced_margin={margin} "
+                "stage_b_core interpretation={interpretation} previous={previous} "
+                "current={current} core={core} selected={selected} final_p={final_p} "
+                "validity={validity} reason_mask={reason} reduced_margin={margin} "
                 "coverage={coverage} conservative_common={common} offline_derived={derived}".format(
+                    interpretation=projection.get("interpretation", "firmware-schema-3"),
                     previous=[value["previous"] for value in memberships],
                     current=[value["current"] for value in memberships],
                     core=projection.get("core_masks", []),
+                    selected=projection.get("selected_joint_mask", "contiguous-core"),
                     final_p=projection.get("final_p", 0),
+                    validity=projection.get("directional_validity", "legacy"),
                     reason=projection.get("reason_mask", 0),
                     margin=str(bool(projection.get("reduced_margin"))).lower(),
                     coverage=projection.get("coverage", []),
@@ -2733,11 +2737,23 @@ def format_analysis(
         masks = evidence.get("eligible_masks", []) if isinstance(evidence, dict) else []
         stage_b_lines.append(
             "velocity_integral dev={device} source={source} run={run} eligible={eligible} "
-            "matches_firmware={matches}".format(
+            "stage_b_validity={validity} reduced_margin={margin} "
+            "bookend_available={bookends} matches_firmware={matches}".format(
                 device=integral.get("device_index", "?"),
                 source=integral.get("source_index", "?"),
                 run=integral.get("run_sequence", "?"),
                 eligible=masks,
+                validity=evidence.get("directional_validity", [])
+                if isinstance(evidence, dict)
+                else [],
+                margin=str(
+                    bool(evidence.get("reduced_margin", False))
+                    if isinstance(evidence, dict)
+                    else False
+                ).lower(),
+                bookends=[value is not None for value in evidence.get("bookend", [])]
+                if isinstance(evidence, dict)
+                else [],
                 matches=str(bool(integral.get("matches_firmware"))).lower(),
             )
         )

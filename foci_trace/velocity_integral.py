@@ -50,6 +50,10 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     for membership in plan["directional_memberships"]:  # type: ignore[union-attr]
         _append_integer(encoded, int(membership), 4)
     _append_integer(encoded, int(plan["joint_membership"]), 4)
+    if int(plan["schema_revision"]) >= 4:
+        for validity in plan["directional_validity"]:  # type: ignore[union-attr]
+            _append_integer(encoded, int(validity), 1)
+        _append_integer(encoded, int(bool(plan["reduced_margin"])), 1)
     for interval in plan["directional_pooled_intervals"]:  # type: ignore[union-attr]
         _append_integer(encoded, int(interval[0]), 4, signed=True)
         _append_integer(encoded, int(interval[1]), 4, signed=True)
@@ -588,6 +592,16 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
         + int(plan["analysis_budget_us"])
     )
     schema_revision = int(plan["schema_revision"])
+    if schema_revision >= 4:
+        validity = plan.get("directional_validity")
+        if (
+            not isinstance(validity, list)
+            or len(validity) != 2
+            or any(int(value) not in range(5) for value in validity)
+        ):
+            mismatches.append("plan Stage-B directional validity is outside the typed domain")
+        if not isinstance(plan.get("reduced_margin"), bool):
+            mismatches.append("plan Stage-B reduced-margin field is not boolean")
     if schema_revision >= 2:
         try:
             recovery = plan_rung_origin_recovery(
@@ -629,6 +643,19 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
     ):
         if int(plan[name]) != expected:
             mismatches.append(f"plan {name}: firmware={plan[name]} offline={expected}")
+
+
+def _stage_c_run_sufficient(
+    schema_revision: int,
+    opening: list[tuple[int, int] | None],
+    bookend: list[tuple[int, int] | None],
+    eligible_masks: list[int],
+) -> bool:
+    """Return whether one run can participate in its schema's reproduction gate."""
+    anchors_available = all(interval is not None for interval in opening)
+    positive_floor = all(mask.bit_count() >= 3 for mask in eligible_masks)
+    bookends_available = schema_revision < 4 or all(interval is not None for interval in bookend)
+    return anchors_available and positive_floor and bookends_available
 
 
 def audit_velocity_integral(
@@ -1007,8 +1034,22 @@ def audit_velocity_integral(
         mismatches.append("terminal emitted-observation count differs from capture")
     if int(terminal["emitted_rungs"]) != len(rung_records):
         mismatches.append("terminal emitted-rung count differs from capture")
-    sufficient = all(interval is not None for interval in opening) and all(
-        mask.bit_count() >= 3 for mask in eligible_masks
+    opening_available_mask = sum(
+        (1 << direction) for direction, interval in enumerate(opening) if interval is not None
+    )
+    bookend_available_mask = sum(
+        (1 << direction) for direction, interval in enumerate(bookend) if interval is not None
+    )
+    if schema_revision >= 4:
+        if int(terminal.get("opening_available_mask", -1)) != opening_available_mask:
+            mismatches.append("terminal opening-anchor availability mask differs from replay")
+        if int(terminal.get("bookend_available_mask", -1)) != bookend_available_mask:
+            mismatches.append("terminal bookend availability mask differs from replay")
+    sufficient = _stage_c_run_sufficient(
+        schema_revision,
+        opening,
+        bookend,
+        eligible_masks,
     )
     outcome = int(terminal["outcome"])
     cause = int(terminal["cause"])
@@ -1036,6 +1077,8 @@ def audit_velocity_integral(
             "eligible_masks": eligible_masks,
             "bookend": bookend,
             "current_terminus": terminal["current_terminus"],
+            "directional_validity": list(plan.get("directional_validity", [])),
+            "reduced_margin": bool(plan.get("reduced_margin", False)),
         },
     }
 

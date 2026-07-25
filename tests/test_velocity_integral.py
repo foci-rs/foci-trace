@@ -93,6 +93,8 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
     if schema_revision >= 4:
         plan.update(
             {
+                "directional_validity": [3, 1],
+                "reduced_margin": True,
                 "positive_rung_count": 7,
                 "positive_i": [1, 2, 4, 8, 16, 32, 64],
                 "family_size": 36,
@@ -117,6 +119,15 @@ def test_schema_three_plan_digest_hashes_limit_evidence_capability() -> None:
     polling = {**latched, "limit_evidence_capability": 0}
 
     assert integral_plan_digest(latched) != integral_plan_digest(polling)
+
+
+def test_schema_four_plan_digest_hashes_stage_b_validity_context() -> None:
+    full = _plan(schema_revision=4)
+    transferred = {**full, "directional_validity": [3, 4]}
+    full_margin = {**full, "reduced_margin": False}
+
+    assert integral_plan_digest(full) != integral_plan_digest(transferred)
+    assert integral_plan_digest(full) != integral_plan_digest(full_margin)
 
 
 def _plan_marker(plan: dict[str, object], sequence: int) -> tuple[bytes, dict[str, object]]:
@@ -587,6 +598,17 @@ def test_schema_four_plan_reconstructs_exact_counts_and_duration() -> None:
     _validate_plan(plan, mismatches)
 
     assert mismatches == []
+
+
+def test_schema_four_sufficiency_requires_both_closing_bookends() -> None:
+    from foci_trace.velocity_integral import _stage_c_run_sufficient
+
+    opening = [(10, 20), (-20, -10)]
+    masks = [0b111, 0b111]
+
+    assert _stage_c_run_sufficient(4, opening, [(11, 21), (-21, -11)], masks) is True
+    assert _stage_c_run_sufficient(4, opening, [(11, 21), None], masks) is False
+    assert _stage_c_run_sufficient(3, opening, [None, None], masks) is True
 
 
 @pytest.mark.parametrize("schema_revision", [0, 5])
