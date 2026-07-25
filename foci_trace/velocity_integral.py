@@ -1010,6 +1010,9 @@ def audit_velocity_integral(
             rung_results[rung_index] = expected_directions
 
     positive_count = int(plan["positive_rung_count"])
+    outcome = int(terminal["outcome"])
+    cause = int(terminal["cause"])
+    faulted = outcome == 3
     positive: list[list[tuple[int, int] | None]] = [[None] * positive_count for _ in range(2)]
     eligible_masks = [0, 0]
     opening: list[tuple[int, int] | None] = [None, None]
@@ -1026,7 +1029,10 @@ def audit_velocity_integral(
             else:
                 positive[direction][rung_index - 1] = interval
                 eligible_masks[direction] |= 1 << (rung_index - 1)
-    if eligible_masks != list(terminal["eligible_masks"]):
+    terminal_eligible_masks = list(terminal["eligible_masks"])
+    if faulted and terminal_eligible_masks != [0, 0]:
+        mismatches.append("fault terminal retained nonempty eligible masks")
+    elif not faulted and eligible_masks != terminal_eligible_masks:
         mismatches.append(
             f"terminal eligible masks: firmware={terminal['eligible_masks']} offline={eligible_masks}"
         )
@@ -1041,9 +1047,13 @@ def audit_velocity_integral(
         (1 << direction) for direction, interval in enumerate(bookend) if interval is not None
     )
     if schema_revision >= 4:
-        if int(terminal.get("opening_available_mask", -1)) != opening_available_mask:
+        terminal_opening_mask = int(terminal.get("opening_available_mask", -1))
+        terminal_bookend_mask = int(terminal.get("bookend_available_mask", -1))
+        if faulted and (terminal_opening_mask != 0 or terminal_bookend_mask != 0):
+            mismatches.append("fault terminal retained nonempty anchor availability")
+        elif not faulted and terminal_opening_mask != opening_available_mask:
             mismatches.append("terminal opening-anchor availability mask differs from replay")
-        if int(terminal.get("bookend_available_mask", -1)) != bookend_available_mask:
+        if not faulted and terminal_bookend_mask != bookend_available_mask:
             mismatches.append("terminal bookend availability mask differs from replay")
     sufficient = _stage_c_run_sufficient(
         schema_revision,
@@ -1051,9 +1061,7 @@ def audit_velocity_integral(
         bookend,
         eligible_masks,
     )
-    outcome = int(terminal["outcome"])
-    cause = int(terminal["cause"])
-    if sufficient and outcome not in (0, 1) and not (outcome == 2 and cause == 2):
+    if not faulted and sufficient and outcome not in (0, 1) and not (outcome == 2 and cause == 2):
         mismatches.append("sufficient integral curve has an incompatible terminal outcome")
     if not sufficient and outcome not in (2, 3):
         mismatches.append("insufficient integral curve has an incompatible terminal outcome")
@@ -1065,7 +1073,11 @@ def audit_velocity_integral(
         "complete": sufficient,
         "matches_firmware": not mismatches,
         "mismatches": mismatches,
-        "caveats": [],
+        "caveats": (
+            ["fault terminal is authoritative; run evidence is the derived pre-fault prefix"]
+            if faulted
+            else []
+        ),
         "recoveries": [dict(record) for record in recovery_records],
         "current_evidence": [dict(record) for record in current_records],
         "limit_evidence_capabilities": sorted(

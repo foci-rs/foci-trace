@@ -387,7 +387,7 @@ def _synthetic_complete_capture(
     records.append(_plan_marker(plan, sequence))
     sequence += 1
     raw_observations: list[VelocityObservation] = []
-    gains = [0, 5, 10, 20, 40, 80, 0]
+    gains = [0, *plan["positive_i"], 0]
     for rung_index, gain in enumerate(gains):
         direction_results: list[list[dict[str, object]]] = [[], []]
         for slot in range(8):
@@ -418,7 +418,7 @@ def _synthetic_complete_capture(
             directions.append(
                 {
                     "direction": direction,
-                    "kind": 0 if rung_index == 0 else 2 if rung_index == 6 else 1,
+                    "kind": 0 if rung_index == 0 else 2 if rung_index == len(gains) - 1 else 1,
                     "classification": 0,
                     "component_count": 1,
                     "components": [interval],
@@ -475,15 +475,26 @@ def _synthetic_complete_capture(
                 "digest": digest,
                 "outcome": 0,
                 "cause": 0,
-                "expected_observations": 56,
-                "emitted_observations": 56,
-                "expected_rungs": 7,
-                "emitted_rungs": 7,
-                "eligible_masks": [0b11111, 0b11111],
+                "expected_observations": 8 * len(gains),
+                "emitted_observations": 8 * len(gains),
+                "expected_rungs": len(gains),
+                "emitted_rungs": len(gains),
+                "eligible_masks": [
+                    (1 << int(plan["positive_rung_count"])) - 1,
+                    (1 << int(plan["positive_rung_count"])) - 1,
+                ],
                 "current_terminus": None,
                 "recovery_unavailable": 0,
                 "run_started_us": 1,
                 "run_completed_us": 2,
+                **(
+                    {
+                        "opening_available_mask": 3,
+                        "bookend_available_mask": 3,
+                    }
+                    if schema_revision >= 4
+                    else {}
+                ),
             },
         )
     )
@@ -543,6 +554,25 @@ def test_capture_audit_reports_digest_and_observation_mismatch_paths() -> None:
     assert audit["matches_firmware"] is False
     assert any("terminal digest" in item for item in audit["mismatches"])
     assert any("classification" in item for item in audit["mismatches"])
+
+
+def test_fault_terminal_keeps_empty_firmware_evidence_and_reports_prefix() -> None:
+    raw, records = _synthetic_complete_capture(schema_revision=2)
+    terminal = records[-1][1]
+    terminal.update(
+        {
+            "outcome": 3,
+            "cause": 11,
+            "eligible_masks": [0, 0],
+        }
+    )
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["matches_firmware"] is True
+    assert audit["terminal"]["eligible_masks"] == [0, 0]
+    assert audit["run_evidence"]["eligible_masks"] == [0b11111, 0b11111]
+    assert "pre-fault prefix" in audit["caveats"][0]
 
 
 def test_reproduction_pair_checks_anchor_relative_curve_and_terminal() -> None:
