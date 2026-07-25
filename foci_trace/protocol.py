@@ -1001,20 +1001,29 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         )
         decoded["record_kind"] = "joint_region"
     elif kind == 6:
-        decoded = _take_fields(
-            cursor,
+        fields = [
+            ("run_sequence", "I"),
+            ("evidence_sequence", "H"),
+            ("nominated_p", "H"),
+            ("coverage_mask", "B"),
+        ]
+        if len(payload) == 75:
+            fields.extend(
+                (
+                    ("model_direction_mask", "B"),
+                    ("joint_union_mask", "I"),
+                )
+            )
+        fields.extend(
             (
-                ("run_sequence", "I"),
-                ("evidence_sequence", "H"),
-                ("nominated_p", "H"),
-                ("coverage_mask", "B"),
                 ("joint_member_mask", "I"),
                 ("nominated_rung", "B"),
                 ("distance_to_start_q16", "I"),
                 ("distance_to_top_q16", "I"),
                 ("nomination_flags", "B"),
-            ),
+            )
         )
+        decoded = _take_fields(cursor, tuple(fields))
         directions = []
         for _ in range(2):
             directions.append(

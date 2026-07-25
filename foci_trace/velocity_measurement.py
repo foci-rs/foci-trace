@@ -3158,6 +3158,17 @@ def replay_stage_b_regions(
     }
 
 
+def _candidate_terminal_memberships(replay: dict[str, object], schema_revision: int) -> list[int]:
+    directional = [int(item["member_mask"]) for item in replay["selected"]]
+    if schema_revision >= 8:
+        joint = 0
+        for region in replay["joint_regions"]:
+            joint |= int(region["member_mask"])
+    else:
+        joint = int(replay["nomination"]["member_mask"])
+    return [*directional, joint]
+
+
 def _audit_stage_b_velocity_sweep(
     raw_observations: list[VelocityObservation],
     evidence_records: list[tuple[bytes, dict[str, object]]],
@@ -3645,12 +3656,28 @@ def _audit_stage_b_velocity_sweep(
                 for index, item in enumerate(replay["selected"])
                 if item["coverage"] == "full"
             ),
-            "joint_member_mask": nomination["member_mask"],
             "nominated_rung": nomination["rung_index"],
             "distance_to_start_q16": nomination["distance_to_start_q16"],
             "distance_to_top_q16": nomination["distance_to_top_q16"],
             "nomination_flags": int(nomination["reduced_margin"]),
         }
+        if "joint_union_mask" in handoff:
+            joint_union = 0
+            for region in replay["joint_regions"]:
+                joint_union |= int(region["member_mask"])
+            expected.update(
+                {
+                    "model_direction_mask": sum(
+                        (1 << index)
+                        for index, regions in enumerate(replay["directions"])
+                        if any(region["kind"] == "valid" for region in regions)
+                    ),
+                    "joint_union_mask": joint_union,
+                    "joint_member_mask": nomination["member_mask"],
+                }
+            )
+        else:
+            expected["joint_member_mask"] = nomination["member_mask"]
         _compare_fields(mismatches, "Stage B handoff", handoff, expected, tuple(expected))
         for direction, selected in zip(handoff["directions"], replay["selected"], strict=True):
             expected_direction = {
@@ -3675,11 +3702,19 @@ def _audit_stage_b_velocity_sweep(
         for index, regions in enumerate(replay["directions"])
         if any(region["kind"] == "valid" for region in regions)
     )
+    candidate_schema_revision = (
+        8
+        if any(
+            value["record_kind"] == "handoff" and "joint_union_mask" in value
+            for _raw, value in evidence_records
+        )
+        else 7
+    )
     if replay["sufficient"]:
-        expected_memberships = [
-            *(int(item["member_mask"]) for item in replay["selected"]),
-            int(replay["nomination"]["member_mask"]),
-        ]
+        expected_memberships = _candidate_terminal_memberships(
+            replay,
+            candidate_schema_revision,
+        )
         expected_intervals = [list(item["pooled_interval"]) for item in replay["selected"]]
         expected_nominated_p = int(replay["nominated_p"])
         expected_coverage_mask = sum(

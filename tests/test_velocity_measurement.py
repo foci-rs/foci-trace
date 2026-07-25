@@ -1280,6 +1280,33 @@ def test_schema8_projection_selects_shared_operating_component_from_captures() -
     assert all(projection["final_p"] != 1448 for projection in projections)
 
 
+def test_schema8_candidate_terminal_uses_joint_union_membership() -> None:
+    from foci_trace.velocity_measurement import _candidate_terminal_memberships
+
+    replay = {
+        "selected": [
+            {"member_mask": 0b11100},
+            {"member_mask": 0b11100},
+        ],
+        "joint_regions": [
+            {"member_mask": 0b00011},
+            {"member_mask": 0b11100},
+        ],
+        "nomination": {"member_mask": 0b11100},
+    }
+
+    assert _candidate_terminal_memberships(replay, 8) == [
+        0b11100,
+        0b11100,
+        0b11111,
+    ]
+    assert _candidate_terminal_memberships(replay, 7) == [
+        0b11100,
+        0b11100,
+        0b11100,
+    ]
+
+
 def test_stage_b_core_projection_derives_exact_core_common_offline() -> None:
     from foci_trace.velocity_measurement import project_stage_b_core_pair
 

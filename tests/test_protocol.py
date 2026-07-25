@@ -847,6 +847,48 @@ def test_decodes_compact_stage_b_rung_from_hardware_capture() -> None:
     assert frame.payload["flags"] == 4
 
 
+def test_decodes_schema8_handoff_union_and_selected_component() -> None:
+    payload = bytes([6]) + struct.pack(
+        "<IHHBBIIBIIBIiiBBHHiBIiiBBHHiB",
+        7,
+        23,
+        1024,
+        3,
+        3,
+        0b11111,
+        0b11100,
+        3,
+        0x0002_0000,
+        0x0004_0000,
+        1,
+        0b11100,
+        12,
+        18,
+        0,
+        0,
+        1,
+        1,
+        0,
+        0,
+        0b11100,
+        -18,
+        -12,
+        0,
+        0,
+        1,
+        1,
+        0,
+        0,
+    )
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert frame.payload["record_kind"] == "handoff"
+    assert frame.payload["model_direction_mask"] == 3
+    assert frame.payload["joint_union_mask"] == 0b11111
+    assert frame.payload["joint_member_mask"] == 0b11100
+
+
 def test_decodes_stage_b_reproduction_schema_headers_and_shared_fragments() -> None:
     fragments = [
         (
