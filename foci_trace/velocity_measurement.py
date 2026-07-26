@@ -321,6 +321,9 @@ def audit_rung_origin_recovery(
     lower_rate_q = int(record["lower_rate_q"])
     outcome = int(record["outcome"])
     binding = int(record["binding_source"])
+    historical_schema_five_contact = (
+        int(plan.get("schema_revision", 0)) == 5 and outcome == 4 and binding == 6
+    )
     moving_us = int(record["moving_duration_us"])
     settle_us = int(record["settle_duration_us"])
     total_us = int(record["total_duration_us"])
@@ -328,7 +331,10 @@ def audit_rung_origin_recovery(
         mismatches.append("recovery stage is invalid")
     if recovery_wrong_way(start, closest):
         mismatches.append("recovery record contains wrong-way growth")
-    if int(record["peak_torque_target_abs"]) >= int(plan["usable_torque_limit"]):
+    if (
+        int(record["peak_torque_target_abs"]) >= int(plan["usable_torque_limit"])
+        and not historical_schema_five_contact
+    ):
         mismatches.append("recovery peak torque reached the usable limit")
     return_distance = recovery_return_distance_counts(start, origin_band)
     expected: tuple[tuple[int, int], ...]
@@ -344,6 +350,8 @@ def audit_rung_origin_recovery(
             expected = ((3, 3),)
         else:
             expected = ((1, 1), (1, 5))
+    if historical_schema_five_contact:
+        expected = ((4, 6),)
     if (outcome, binding) not in expected:
         mismatches.append(
             "recovery outcome/binding differs from reconstructed authority "
@@ -358,7 +366,11 @@ def audit_rung_origin_recovery(
             mismatches.append("recovery total duration differs from moving plus settle duration")
         if runtime_us is not None and total_us > runtime_us:
             mismatches.append("recovery total duration exceeds reconstructed deadline")
-    return {"matches_firmware": not mismatches, "mismatches": mismatches}
+    return {
+        "matches_firmware": not mismatches,
+        "mismatches": mismatches,
+        "historical_attribution_caveat": historical_schema_five_contact,
+    }
 
 
 def _f32(value: float | int) -> float:

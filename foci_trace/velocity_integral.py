@@ -1002,6 +1002,7 @@ def audit_velocity_integral(
             mismatches.append("Stage C current evidence carries the wrong stage")
         if int(record["clamp_readback"]) != int(record["clamp_limit"]):
             mismatches.append("Stage C current evidence clamp readback differs")
+    historical_attribution_caveat = False
     if schema_revision >= 3 and int(terminal["outcome"]) != 3:
         observation_keys = {
             (int(value["rung_index"]), int(value["slot"])) for value in observation_records
@@ -1040,6 +1041,9 @@ def audit_velocity_integral(
             if int(record["stage"]) != 1:
                 mismatches.append("integral recovery record carries the wrong stage")
             recovery_audit = audit_rung_origin_recovery(record, plan)
+            historical_attribution_caveat |= bool(
+                recovery_audit.get("historical_attribution_caveat", False)
+            )
             mismatches.extend(
                 f"recovery rung {record['rung_index']}: {item}"
                 for item in recovery_audit["mismatches"]
@@ -1201,7 +1205,16 @@ def audit_velocity_integral(
         mismatches.append("sufficient integral curve has an incompatible terminal outcome")
     if not sufficient and outcome not in (2, 3):
         mismatches.append("insufficient integral curve has an incompatible terminal outcome")
-    return {
+    caveats = (
+        ["fault terminal is authoritative; run evidence is the derived pre-fault prefix"]
+        if faulted
+        else []
+    )
+    if historical_attribution_caveat:
+        caveats.append(
+            "schema-5 recovery peak preserves the recorded hard-limit attribution caveat"
+        )
+    result = {
         "run_sequence": run_sequence,
         "plan": dict(plan),
         "terminal": dict(terminal),
@@ -1209,11 +1222,8 @@ def audit_velocity_integral(
         "complete": sufficient,
         "matches_firmware": not mismatches,
         "mismatches": mismatches,
-        "caveats": (
-            ["fault terminal is authoritative; run evidence is the derived pre-fault prefix"]
-            if faulted
-            else []
-        ),
+        "caveats": caveats,
+        "historical_attribution_caveat": historical_attribution_caveat,
         "recoveries": [dict(record) for record in recovery_records],
         "current_evidence": [dict(record) for record in current_records],
         "rest_boundary": dict(rest_boundary[1]) if rest_boundary is not None else None,
@@ -1238,6 +1248,9 @@ def audit_velocity_integral(
             ),
         },
     }
+    if historical_attribution_caveat:
+        result["projected_schema_six_recovery_outcome"] = "unknown"
+    return result
 
 
 def audit_integral_reproduction_pair(

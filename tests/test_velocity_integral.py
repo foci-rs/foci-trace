@@ -861,6 +861,32 @@ def test_committed_schema_four_q8_8_plan_remains_bit_exact() -> None:
     assert mismatches == []
 
 
+def test_schema_five_recovery_current_headroom_capture_remains_bit_exact() -> None:
+    from foci_trace.analyze import analyze_capture
+
+    capture = (
+        Path(__file__).resolve().parents[4]
+        / "docs/artifacts/trace-captures/2026-07-20-foc-183-velocity-integral-response"
+        / "foc-183-stepper-x-stagec5-ladder1-20260725-142151.bin"
+    )
+    with capture.open("rb") as source:
+        responses = analyze_capture(source).velocity_integral_audits
+
+    assert len(responses) == 1
+    response = responses[0]
+    assert response["matches_firmware"] is True
+    assert response["complete"] is False
+    assert response["terminal"]["outcome"] == 2
+    assert response["terminal"]["cause"] == 8
+    assert response["historical_attribution_caveat"] is True
+    assert response["projected_schema_six_recovery_outcome"] == "unknown"
+    recovery = response["recoveries"][-1]
+    assert recovery["outcome"] == 4
+    assert recovery["binding_source"] == 6
+    assert recovery["peak_torque_target_abs"] == 2_816
+    assert recovery["final_offset_counts"] == 998
+
+
 @pytest.mark.parametrize("build_revision", [None, 0xDEADBEEF])
 def test_unknown_build_refuses_to_guess_integral_representation(
     build_revision: int | None,
