@@ -1259,6 +1259,7 @@ def _reconstruct_observation(
     record: dict[str, object],
     plan: dict[str, object],
     terminal: dict[str, object],
+    current_record: dict[str, object] | None = None,
 ) -> dict[str, int]:
     stationarity = _stationary_suffix(raw[-256:])
     p = int(record["velocity_p"])
@@ -1266,6 +1267,7 @@ def _reconstruct_observation(
     predicted = max(
         (p * abs(target_velocity_rpm) + 255) // 256,
         max((item.peak_torque_target_abs or 0) for item in raw),
+        int(current_record["moving_pid_output_peak"]) if current_record is not None else 0,
     )
     if not stationarity["usable"]:
         classification = 4 + stationarity["exclusion"]
@@ -1899,7 +1901,10 @@ def _segment_directional_regions(
 
 
 def _joint_operable_regions(
-    rungs: list[dict[str, object]], *, terminal_closure: str = "end_of_ladder"
+    rungs: list[dict[str, object]],
+    *,
+    terminal_closure: str = "end_of_ladder",
+    terminal_boundary_rung: int | None = None,
 ) -> list[dict[str, object]]:
     """Find maximal contiguous rungs operable in both signed directions."""
     regions: list[dict[str, object]] = []
@@ -1937,6 +1942,7 @@ def _joint_operable_regions(
                 "last_rung": active[-1],
                 "member_count": len(active),
                 "closure": terminal_closure,
+                "causal_boundary_rung": terminal_boundary_rung,
             }
         )
     return regions
@@ -2548,7 +2554,13 @@ def _compare_stage_b_causal_order(
         if region["closure"] == "end_of_ladder":
             joint_at_end.append(token)
         elif region["closure"] == "current_headroom":
-            joint_after_rung.setdefault(int(region["last_rung"]) + 1, []).append(token)
+            causal_boundary = region.get("causal_boundary_rung")
+            boundary_rung = (
+                int(causal_boundary)
+                if causal_boundary is not None
+                else int(region["last_rung"]) + 1
+            )
+            joint_after_rung.setdefault(boundary_rung, []).append(token)
         else:
             joint_at_boundary.setdefault(int(region["last_rung"]) + 1, []).append(token)
 
@@ -3056,6 +3068,11 @@ def replay_stage_b_regions(
         for _raw, value in evidence_records
         if value["record_kind"] == "observation"
     }
+    current_by_slot = {
+        (int(value["rung_index"]), int(value["slot"])): value
+        for _raw, value in evidence_records
+        if value["record_kind"] == "velocity_primitive_current"
+    }
     observations_per_direction = int(plan["observations_per_direction"])
     slot_count = 2 * observations_per_direction
     if observations_per_direction not in (2, 4):
@@ -3065,7 +3082,13 @@ def replay_stage_b_regions(
         raw = by_stroke.get(key[0] * slot_count + key[1])
         if not raw:
             continue
-        reconstructed[key] = _reconstruct_observation(raw, record, plan, terminal)
+        reconstructed[key] = _reconstruct_observation(
+            raw,
+            record,
+            plan,
+            terminal,
+            current_by_slot.get(key),
+        )
     directional_inputs: list[list[dict[str, object]]] = [[], []]
     joint_inputs = []
     gains = []
@@ -3191,7 +3214,11 @@ def replay_stage_b_regions(
         )
         for items in directional_inputs
     ]
-    joint = _joint_operable_regions(joint_inputs, terminal_closure=terminal_closure)
+    joint = _joint_operable_regions(
+        joint_inputs,
+        terminal_closure=terminal_closure,
+        terminal_boundary_rung=terminal_boundary_rung,
+    )
     nomination = _nominate_joint_region(
         joint,
         gains,
@@ -3361,7 +3388,17 @@ def _audit_stage_b_velocity_sweep(
             and int(terminal["cause"]) == 17
             and recovery_rungs == list(range(fully_acquired_rungs - 1))
         )
-        expected_recovery_rungs = list(range(fully_acquired_rungs - int(historical_fault_prefix)))
+        complete_current_headroom_terminus = (
+            int(terminal.get("cause", 0)) == STAGE_B_CAUSE_CURRENT_HEADROOM
+            and int(terminal.get("emitted_rungs", 0)) == fully_acquired_rungs
+        )
+        expected_recovery_rungs = list(
+            range(
+                fully_acquired_rungs
+                - int(historical_fault_prefix)
+                - int(complete_current_headroom_terminus)
+            )
+        )
         if recovery_rungs != expected_recovery_rungs:
             mismatches.append(
                 "Stage B recovery rungs differ from fully acquired rung sequence: "
@@ -3422,6 +3459,9 @@ def _audit_stage_b_velocity_sweep(
         for _raw, value in evidence_records
         if value["record_kind"] == "observation"
     }
+    current_by_slot = {
+        (int(value["rung_index"]), int(value["slot"])): value for value in current_records
+    }
     reconstructed: dict[tuple[int, int], dict[str, int]] = {}
     exact_fields = (
         "classification",
@@ -3462,7 +3502,13 @@ def _audit_stage_b_velocity_sweep(
         if not raw:
             mismatches.append(f"observation {key[0]}/{key[1]} has no raw samples")
             continue
-        offline = _reconstruct_observation(raw, record, plan, terminal)
+        offline = _reconstruct_observation(
+            raw,
+            record,
+            plan,
+            terminal,
+            current_by_slot.get(key),
+        )
         for name in exact_fields:
             offline.setdefault(name, 0)
         _compare_fields(mismatches, f"observation {key[0]}/{key[1]}", record, offline, exact_fields)

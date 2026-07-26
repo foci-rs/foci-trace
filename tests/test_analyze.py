@@ -2254,6 +2254,25 @@ def test_retained_foc_182_captures_replay_expected_stage_b_regions() -> None:
             assert "18/1" not in replay["structured_boundaries"]
 
 
+def test_schema8_complete_current_headroom_rung_uses_primitive_current_evidence() -> None:
+    capture = (
+        Path(__file__).resolve().parents[4]
+        / "docs/artifacts/trace-captures/2026-07-20-foc-183-velocity-integral-response"
+        / "foc-183-stepper-x-schema8-stagec6-candidate-20260725-185130.bin"
+    )
+
+    with capture.open("rb") as source:
+        analysis = analyze_capture(source)
+
+    sweep = analysis.velocity_sweep_audits[0]
+    assert sweep["matches_firmware"] is True
+    assert sweep["observation_count"] == 168
+    assert len(sweep["recoveries"]) == 20
+    assert sweep["current_evidence"][-1]["contact"] == 1
+    assert sweep["current_evidence"][-1]["moving_pid_output_peak"] == 2_534
+    assert sweep["stage_b_replay"]["directional_rungs"][1][-1]["eligible_mask"] == 0b0111
+
+
 def test_velocity_frames_group_by_device_source_and_engine_run() -> None:
     output = io.BytesIO()
     writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
