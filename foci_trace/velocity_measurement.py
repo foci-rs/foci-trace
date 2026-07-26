@@ -324,6 +324,9 @@ def audit_rung_origin_recovery(
     historical_schema_five_contact = (
         int(plan.get("schema_revision", 0)) == 5 and outcome == 4 and binding == 6
     )
+    schema_six_contact = (
+        int(plan.get("schema_revision", 0)) >= 6 and outcome in (4, 5) and binding == 6
+    )
     moving_us = int(record["moving_duration_us"])
     settle_us = int(record["settle_duration_us"])
     total_us = int(record["total_duration_us"])
@@ -334,6 +337,7 @@ def audit_rung_origin_recovery(
     if (
         int(record["peak_torque_target_abs"]) >= int(plan["usable_torque_limit"])
         and not historical_schema_five_contact
+        and not schema_six_contact
     ):
         mismatches.append("recovery peak torque reached the usable limit")
     return_distance = recovery_return_distance_counts(start, origin_band)
@@ -352,16 +356,23 @@ def audit_rung_origin_recovery(
             expected = ((1, 1), (1, 5))
     if historical_schema_five_contact:
         expected = ((4, 6),)
+    elif schema_six_contact:
+        expected = ((outcome, 6),)
     if (outcome, binding) not in expected:
         mismatches.append(
             "recovery outcome/binding differs from reconstructed authority "
             f"(firmware={(outcome, binding)} offline={expected})"
         )
-    if outcome in (0, 1) and abs(final) > origin_band:
+    if outcome in (0, 1, 5) and abs(final) > origin_band:
         mismatches.append("successful recovery final offset is outside origin band")
     if outcome in (0, 2, 3) and (moving_us != 0 or settle_us != 0 or total_us != 0):
         mismatches.append("nonmoving recovery reports nonzero timing")
-    if outcome == 1:
+    if outcome in (4, 5) and schema_six_contact:
+        if total_us != moving_us + settle_us:
+            mismatches.append("recovery total duration differs from moving plus settle duration")
+        if runtime_us is not None and total_us > runtime_us:
+            mismatches.append("recovery total duration exceeds reconstructed deadline")
+    elif outcome == 1:
         if total_us != moving_us + settle_us:
             mismatches.append("recovery total duration differs from moving plus settle duration")
         if runtime_us is not None and total_us > runtime_us:

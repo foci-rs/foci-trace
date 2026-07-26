@@ -15,12 +15,13 @@ from foci_trace.velocity_integral import (
     derive_integral_ladder,
     integral_numerator_for_build,
     integral_plan_digest,
+    recovery_quantization_exposed,
     reconstruct_observation,
     stage_c_slot_transition,
     UnsupportedIntegralRepresentationError,
     velocity_i_tau_us,
 )
-from foci_trace.velocity_measurement import VelocityObservation
+from foci_trace.velocity_measurement import VelocityObservation, audit_rung_origin_recovery
 
 
 LEGACY_Q8_8_BUILD = 0x75536758
@@ -136,6 +137,8 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
                 "recovery_slot_count": 14,
             }
         )
+    if schema_revision >= 6:
+        plan["flags"] = 1
     return plan
 
 
@@ -276,20 +279,18 @@ def _plan_records(plan: dict[str, object]) -> list[tuple[bytes, dict[str, object
         ),
     ]
     if int(plan["schema_revision"]) >= 2:
-        records.append(
-            (
-                b"",
-                {
-                    **common,
-                    "recovery_origin_band_counts": plan["recovery_origin_band_counts"],
-                    "recovery_nominal_slot_us": plan["recovery_nominal_slot_us"],
-                    "recovery_maximum_slot_us": plan["recovery_maximum_slot_us"],
-                    "recovery_slot_count": plan["recovery_slot_count"],
-                    "record_kind": "integral_plan_recovery",
-                    "plan_fragment": 2,
-                },
-            )
-        )
+        recovery = {
+            **common,
+            "recovery_origin_band_counts": plan["recovery_origin_band_counts"],
+            "recovery_nominal_slot_us": plan["recovery_nominal_slot_us"],
+            "recovery_maximum_slot_us": plan["recovery_maximum_slot_us"],
+            "recovery_slot_count": plan["recovery_slot_count"],
+            "record_kind": "integral_plan_recovery",
+            "plan_fragment": 2,
+        }
+        if int(plan["schema_revision"]) >= 6:
+            recovery["flags"] = plan["flags"]
+        records.append((b"", recovery))
     if int(plan["schema_revision"]) >= 3:
         records[0][1]["limit_evidence_capability"] = plan["limit_evidence_capability"]
     if int(plan["schema_revision"]) >= 4:
@@ -564,7 +565,7 @@ def _synthetic_complete_capture(
                     (1 << int(plan["positive_rung_count"])) - 1,
                 ],
                 "current_terminus": None,
-                "recovery_unavailable": 0,
+                **({"recovery_flags": 4} if schema_revision >= 6 else {"recovery_unavailable": 0}),
                 "run_started_us": 1,
                 "run_completed_us": 2,
                 **(
@@ -887,6 +888,66 @@ def test_schema_five_recovery_current_headroom_capture_remains_bit_exact() -> No
     assert recovery["final_offset_counts"] == 998
 
 
+def test_schema_six_capture_reconstructs_plan_and_terminal_exposure() -> None:
+    raw, records = _synthetic_complete_capture(schema_revision=6)
+
+    response = audit_velocity_integral(raw, records)
+
+    assert response["matches_firmware"] is True
+    assert response["plan"]["flags"] == 1
+    assert response["terminal"]["recovery_unavailable"] == 0
+    assert response["terminal"]["recovered_with_current_headroom"] is False
+    assert response["terminal"]["recovery_quantization_exposed"] is True
+
+
+@pytest.mark.parametrize(
+    ("recovery_flags", "message"),
+    (
+        (8, "terminal recovery flags contain reserved bits"),
+        (6, "causal outcome-5 recovery evidence"),
+    ),
+)
+def test_schema_six_rejects_invalid_terminal_recovery_flags(
+    recovery_flags: int, message: str
+) -> None:
+    raw, records = _synthetic_complete_capture(schema_revision=6)
+    records[-1][1]["recovery_flags"] = recovery_flags
+
+    response = audit_velocity_integral(raw, records)
+
+    assert response["matches_firmware"] is False
+    assert any(message in item for item in response["mismatches"])
+
+
+@pytest.mark.parametrize(
+    ("outcome", "final_offset"),
+    ((5, 998), (4, 1_001)),
+)
+def test_schema_six_reconstructs_bounded_recovery_contact_lifecycle(
+    outcome: int, final_offset: int
+) -> None:
+    plan = _plan(schema_revision=6)
+    record = _recovery_record(12, 1)[1]
+    record.update(
+        {
+            "start_offset_counts": 1_834,
+            "closest_offset_counts": 998,
+            "final_offset_counts": final_offset,
+            "moving_duration_us": 100_000,
+            "settle_duration_us": 500_000,
+            "total_duration_us": 600_000,
+            "peak_torque_target_abs": 2_534,
+            "binding_source": 6,
+            "outcome": outcome,
+        }
+    )
+
+    audit = audit_rung_origin_recovery(record, plan)
+
+    assert audit["matches_firmware"] is True
+    assert audit["mismatches"] == []
+
+
 @pytest.mark.parametrize("build_revision", [None, 0xDEADBEEF])
 def test_unknown_build_refuses_to_guess_integral_representation(
     build_revision: int | None,
@@ -933,6 +994,51 @@ def test_schema_five_plan_reconstructs_exact_counts_and_cleanup_duration() -> No
     assert mismatches == []
 
 
+def test_schema_six_reconstructs_exact_recovery_quantization_exposure() -> None:
+    assert recovery_quantization_exposed(724, 264, 4_000, 25_000, 2_534) is False
+    assert recovery_quantization_exposed(1_024, 264, 4_000, 25_000, 2_534) is True
+    assert recovery_quantization_exposed(256, 0, 1, 1, 60) is False
+    with pytest.raises(ValueError, match="absolute i32"):
+        recovery_quantization_exposed(1_024, -(1 << 31), 4_000, 25_000, 2_534)
+
+    plan = _plan(schema_revision=6)
+    plan["plan_digest"] = integral_plan_digest(plan)
+    mismatches: list[str] = []
+
+    from foci_trace.velocity_integral import _validate_plan
+
+    _validate_plan(plan, mismatches)
+
+    assert plan["flags"] == 1
+    assert mismatches == []
+
+
+def test_schema_six_detects_recovery_exposure_flag_drift() -> None:
+    plan = _plan(schema_revision=6)
+    plan["flags"] = 0
+    plan["plan_digest"] = integral_plan_digest(plan)
+    mismatches: list[str] = []
+
+    from foci_trace.velocity_integral import _validate_plan
+
+    _validate_plan(plan, mismatches)
+
+    assert "plan recovery quantization exposure differs from exact reconstruction" in mismatches
+
+
+def test_schema_six_rejects_reserved_plan_recovery_flags() -> None:
+    plan = _plan(schema_revision=6)
+    plan["flags"] = 2
+    plan["plan_digest"] = integral_plan_digest(plan)
+    mismatches: list[str] = []
+
+    from foci_trace.velocity_integral import _validate_plan
+
+    _validate_plan(plan, mismatches)
+
+    assert "plan recovery flags contain reserved bits" in mismatches
+
+
 def test_schema_four_sufficiency_requires_both_closing_bookends() -> None:
     from foci_trace.velocity_integral import _stage_c_run_sufficient
 
@@ -944,7 +1050,7 @@ def test_schema_four_sufficiency_requires_both_closing_bookends() -> None:
     assert _stage_c_run_sufficient(3, opening, [None, None], masks) is True
 
 
-@pytest.mark.parametrize("schema_revision", [0, 6])
+@pytest.mark.parametrize("schema_revision", [0, 7])
 def test_integral_ladder_rejects_unsupported_schema(schema_revision: int) -> None:
     with pytest.raises(ValueError, match="unsupported Stage-C evidence schema"):
         derive_integral_ladder(

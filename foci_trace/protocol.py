@@ -548,6 +548,8 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                     ),
                 )
             )
+            if cursor.offset < len(payload):
+                decoded["flags"] = cursor.take("B")
             decoded["record_kind"] = "integral_plan_recovery"
         else:
             raise DecodeError(f"unknown velocity-integral plan fragment {fragment}")
@@ -879,8 +881,10 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             ("outcome", "B"),
             ("cause", "B"),
         ]
-        if len(payload) in (59, 61):
+        if len(payload) == 59:
             fields.append(("recovery_unavailable", "B"))
+        elif len(payload) == 61:
+            fields.append(("recovery_flags", "B"))
         fields.extend(
             (
                 ("expected_observations", "H"),
@@ -897,6 +901,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         if len(payload) == 61:
             decoded["opening_available_mask"] = cursor.take("B")
             decoded["bookend_available_mask"] = cursor.take("B")
+            decoded["recovery_unavailable"] = decoded["recovery_flags"] & 1
         current_terminus_plus_one = cursor.take("B")
         decoded["current_terminus"] = (
             None if current_terminus_plus_one == 0 else current_terminus_plus_one - 1

@@ -439,6 +439,18 @@ def test_decodes_velocity_integral_recovery_plan_fragment() -> None:
     assert frame.payload["recovery_slot_count"] == 7
 
 
+def test_decodes_schema_six_velocity_integral_recovery_flags() -> None:
+    payload = bytearray([0])
+    payload.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
+    payload.extend(struct.pack("<BIIIBB", 2, 1_000, 1_816_958, 3_000_000, 14, 1))
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert frame.payload["record_kind"] == "integral_plan_recovery"
+    assert frame.payload["recovery_slot_count"] == 14
+    assert frame.payload["flags"] == 1
+
+
 def test_decodes_rung_origin_recovery_record() -> None:
     payload = struct.pack(
         "<BIHBBHIiiiIQIIIHBB",
@@ -633,6 +645,36 @@ def test_decodes_schema_four_velocity_integral_bookend_masks() -> None:
     assert frame.payload["opening_available_mask"] == 0b11
     assert frame.payload["bookend_available_mask"] == 0b10
     assert frame.payload["current_terminus"] is None
+
+
+def test_decodes_schema_six_velocity_integral_terminal_flags() -> None:
+    payload = bytearray([4])
+    payload.extend(struct.pack("<IHII", 7, 15, 0x1122_3344, 0x5566_7788))
+    payload.extend(struct.pack("<II", 0x99AA_BBCC, 0xDDEE_FF00))
+    payload.extend(
+        struct.pack(
+            "<BBBHHHHIIBBB",
+            0,
+            0,
+            0b110,
+            112,
+            112,
+            14,
+            14,
+            0x0FFF,
+            0x0FFF,
+            0b11,
+            0b11,
+            0,
+        )
+    )
+    payload.extend(struct.pack("<IIII", 100, 0, 200, 0))
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert len(payload) == 61
+    assert frame.payload["recovery_flags"] == 0b110
+    assert frame.payload["recovery_unavailable"] == 0
 
 
 def test_decodes_schema_five_velocity_integral_rest_boundary() -> None:

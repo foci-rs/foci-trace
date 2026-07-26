@@ -29,6 +29,10 @@ _I32_MIN = -(1 << 31)
 _I32_MAX = (1 << 31) - 1
 _FNV1A64_OFFSET = 0xCBF29CE484222325
 _FNV1A64_PRIME = 0x100000001B3
+_PLAN_RECOVERY_QUANTIZATION_EXPOSED = 1 << 0
+_TERMINAL_RECOVERY_UNAVAILABLE = 1 << 0
+_TERMINAL_RECOVERED_WITH_CURRENT_HEADROOM = 1 << 1
+_TERMINAL_RECOVERY_QUANTIZATION_EXPOSED = 1 << 2
 
 
 class UnsupportedIntegralRepresentationError(ValueError):
@@ -110,6 +114,12 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     _append_integer(encoded, int(plan["usable_torque_limit"]), 2)
     if int(plan["schema_revision"]) >= 3:
         _append_integer(encoded, int(plan["limit_evidence_capability"]), 1)
+    if int(plan["schema_revision"]) >= 6:
+        _append_integer(
+            encoded,
+            int(bool(int(plan["flags"]) & _PLAN_RECOVERY_QUANTIZATION_EXPOSED)),
+            1,
+        )
     _append_integer(encoded, int(plan["requested_velocity_mrev_s"]), 4)
     _append_integer(encoded, int(plan["machine_velocity_ceiling_mrev_s"]), 4)
     _append_integer(encoded, int(plan["requested_velocity_source"]), 1)
@@ -161,7 +171,7 @@ def derive_integral_ladder(
     build_revision: int | None,
 ) -> dict[str, object]:
     """Reconstruct the cap-only whole-octave positive-I ladder."""
-    if schema_revision not in range(1, 6):
+    if schema_revision not in range(1, 7):
         raise ValueError("unsupported Stage-C evidence schema")
     if shortest_suffix_us < 2:
         raise ValueError("shortest suffix must contain at least two microseconds")
@@ -198,6 +208,26 @@ def derive_integral_ladder(
     if len(rungs) > _I_MAX_POSITIVE_RUNGS or family_size > _I_CONFIDENCE_FAMILY_MAX:
         raise ValueError("integral ladder exceeds the simultaneous-confidence family")
     return {"i_start": i_start, "i_top_cap": i_top_cap, "positive_i": rungs}
+
+
+def recovery_quantization_exposed(
+    p_raw: int,
+    target_rpm: int,
+    counts_per_rev: int,
+    pwm_hz: int,
+    probe_limit: int,
+) -> bool:
+    """Recompute whether one opposite-sign meter quantum can exceed the probe clamp."""
+    if not 0 <= p_raw <= 0xFFFF or not 0 <= probe_limit <= 0xFFFF:
+        raise ValueError("recovery exposure gain or clamp is outside u16")
+    if not 0 < counts_per_rev <= 0xFFFF_FFFF or not 0 < pwm_hz <= 0xFFFF_FFFF:
+        raise ValueError("recovery exposure geometry is outside u32")
+    if not _I32_MIN < target_rpm <= _I32_MAX:
+        raise ValueError("recovery exposure target cannot be represented as an absolute i32")
+    velocity_term = abs(target_rpm) * counts_per_rev + 60 * pwm_hz
+    demand = p_raw * velocity_term
+    clamp = 256 * probe_limit * counts_per_rev
+    return demand > clamp
 
 
 def depth_three_consensus(
@@ -642,6 +672,27 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
         + int(plan["analysis_budget_us"])
     )
     schema_revision = int(plan["schema_revision"])
+    if schema_revision >= 6:
+        flags = int(plan.get("flags", -1))
+        if flags < 0 or flags & ~_PLAN_RECOVERY_QUANTIZATION_EXPOSED:
+            mismatches.append("plan recovery flags contain reserved bits")
+        else:
+            try:
+                expected_exposure = recovery_quantization_exposed(
+                    int(plan["final_p"]),
+                    int(plan["target_velocity_rpm"]),
+                    int(plan["encoder_counts_per_rev"]),
+                    int(plan["pwm_hz"]),
+                    int(plan["usable_torque_limit"]),
+                )
+            except ValueError as error:
+                mismatches.append(f"plan recovery exposure reconstruction failed: {error}")
+            else:
+                reported_exposure = bool(flags & _PLAN_RECOVERY_QUANTIZATION_EXPOSED)
+                if reported_exposure != expected_exposure:
+                    mismatches.append(
+                        "plan recovery quantization exposure differs from exact reconstruction"
+                    )
     if schema_revision >= 4:
         validity = plan.get("directional_validity")
         if (
@@ -997,6 +1048,28 @@ def audit_velocity_integral(
     recovery_records = [
         value for _raw, value in nonterminal if value["record_kind"] == "rung_origin_recovery"
     ]
+    if schema_revision >= 6:
+        recovery_flags = int(terminal.get("recovery_flags", -1))
+        known_flags = (
+            _TERMINAL_RECOVERY_UNAVAILABLE
+            | _TERMINAL_RECOVERED_WITH_CURRENT_HEADROOM
+            | _TERMINAL_RECOVERY_QUANTIZATION_EXPOSED
+        )
+        if recovery_flags < 0 or recovery_flags & ~known_flags:
+            mismatches.append("terminal recovery flags contain reserved bits")
+        else:
+            terminal["recovery_unavailable"] = int(
+                bool(recovery_flags & _TERMINAL_RECOVERY_UNAVAILABLE)
+            )
+            terminal["recovered_with_current_headroom"] = bool(
+                recovery_flags & _TERMINAL_RECOVERED_WITH_CURRENT_HEADROOM
+            )
+            terminal["recovery_quantization_exposed"] = bool(
+                recovery_flags & _TERMINAL_RECOVERY_QUANTIZATION_EXPOSED
+            )
+            plan_exposure = bool(int(plan.get("flags", 0)) & _PLAN_RECOVERY_QUANTIZATION_EXPOSED)
+            if terminal["recovery_quantization_exposed"] != plan_exposure:
+                mismatches.append("terminal recovery exposure differs from the plan")
     for record in current_records:
         if int(record["stage"]) != 1:
             mismatches.append("Stage C current evidence carries the wrong stage")
@@ -1048,6 +1121,12 @@ def audit_velocity_integral(
                 f"recovery rung {record['rung_index']}: {item}"
                 for item in recovery_audit["mismatches"]
             )
+        if schema_revision >= 6 and "recovered_with_current_headroom" in terminal:
+            recovered = any(int(record["outcome"]) == 5 for record in recovery_records)
+            if bool(terminal["recovered_with_current_headroom"]) != recovered:
+                mismatches.append(
+                    "terminal recovered flag differs from causal outcome-5 recovery evidence"
+                )
         expected_order: list[tuple[str, int | None]] = []
         if marker_records:
             expected_order.append(("integral_plan_marker", None))

@@ -41,6 +41,9 @@ class DeviceSummary:
     stage_b_reduced_margin: bool = False
     velocity_integral_rungs: int = 0
     velocity_integral_outcome: int | None = None
+    velocity_integral_recovery_unavailable: bool = False
+    velocity_integral_recovered_with_current_headroom: bool = False
+    velocity_integral_recovery_quantization_exposed: bool = False
     velocity_integral_bookend_mask: int | None = None
     velocity_integral_rest_boundary: tuple[int, int] | None = None
     rung_origin_recoveries: int = 0
@@ -121,6 +124,15 @@ class LiveSummary:
                 device.velocity_integral_rungs += 1
             elif kind == "integral_terminal":
                 device.velocity_integral_outcome = int(frame.payload["outcome"])
+                if "recovery_flags" in frame.payload:
+                    recovery_flags = int(frame.payload["recovery_flags"])
+                    device.velocity_integral_recovery_unavailable = bool(recovery_flags & 1)
+                    device.velocity_integral_recovered_with_current_headroom = bool(
+                        recovery_flags & 2
+                    )
+                    device.velocity_integral_recovery_quantization_exposed = bool(
+                        recovery_flags & 4
+                    )
                 if "bookend_available_mask" in frame.payload:
                     device.velocity_integral_bookend_mask = int(
                         frame.payload["bookend_available_mask"]
@@ -161,6 +173,9 @@ class LiveSummary:
                 "stage_b_reduced_margin={stage_b_reduced_margin} "
                 "velocity_integral_rungs={integral_rungs} "
                 "velocity_integral_outcome={integral_outcome} "
+                "velocity_integral_recovery_unavailable={integral_recovery_unavailable} "
+                "velocity_integral_recovered_with_current_headroom={integral_recovered} "
+                "velocity_integral_recovery_quantization_exposed={integral_exposed} "
                 "velocity_integral_bookends={integral_bookends} "
                 "velocity_integral_rest_boundary={integral_rest_boundary} "
                 "recoveries={recoveries} contained_recoveries={contained_recoveries} "
@@ -198,6 +213,15 @@ class LiveSummary:
                         if item.velocity_integral_outcome is None
                         else item.velocity_integral_outcome
                     ),
+                    integral_recovery_unavailable=str(
+                        item.velocity_integral_recovery_unavailable
+                    ).lower(),
+                    integral_recovered=str(
+                        item.velocity_integral_recovered_with_current_headroom
+                    ).lower(),
+                    integral_exposed=str(
+                        item.velocity_integral_recovery_quantization_exposed
+                    ).lower(),
                     integral_bookends=(
                         "none"
                         if item.velocity_integral_bookend_mask is None
