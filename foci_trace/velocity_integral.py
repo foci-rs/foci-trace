@@ -965,6 +965,42 @@ def _audit_failed_stage_c_admission(
     }
 
 
+def _retained_stage_c_evidence(
+    rung_results: dict[int, list[dict[str, object]]],
+    positive_count: int,
+) -> tuple[
+    list[tuple[int, int] | None],
+    list[tuple[int, int] | None],
+    list[list[tuple[int, int] | None]],
+    list[int],
+]:
+    """Apply firmware's Stage-C retention rules to reconstructed rung results."""
+    positive: list[list[tuple[int, int] | None]] = [[None] * positive_count for _ in range(2)]
+    eligible_masks = [0, 0]
+    opening: list[tuple[int, int] | None] = [None, None]
+    bookend: list[tuple[int, int] | None] = [None, None]
+    for rung_index, directions in rung_results.items():
+        if rung_index == 0:
+            if len(directions) == 2 and all(
+                int(result["classification"]) == 0 for result in directions
+            ):
+                opening = [
+                    tuple(result["components"][0])  # type: ignore[index]
+                    for result in directions
+                ]
+            continue
+        for direction, result in enumerate(directions):
+            if int(result["classification"]) != 0:
+                continue
+            interval = tuple(result["components"][0])  # type: ignore[index]
+            if rung_index == positive_count + 1:
+                bookend[direction] = interval
+            else:
+                positive[direction][rung_index - 1] = interval
+                eligible_masks[direction] |= 1 << (rung_index - 1)
+    return opening, bookend, positive, eligible_masks
+
+
 def audit_velocity_integral(
     raw_observations: list[Any], evidence_records: list[tuple[bytes, dict[str, object]]]
 ) -> dict[str, object]:
@@ -1338,6 +1374,12 @@ def audit_velocity_integral(
         missing_final_allowed = missing_final_recovery and (
             int(terminal.get("recovery_unavailable", 0)) == 1
             or (int(terminal["outcome"]) == 3 and terminal_follows_rung)
+            or (
+                int(terminal["outcome"]) == 2
+                and int(terminal["cause"]) == 1
+                and emitted_recovery_rungs == [0]
+                and terminal_follows_rung
+            )
         )
         expected_recovery_rungs = (
             recovery_rungs if missing_final_allowed else emitted_recovery_rungs
@@ -1458,22 +1500,10 @@ def audit_velocity_integral(
     outcome = int(terminal["outcome"])
     cause = int(terminal["cause"])
     faulted = outcome == 3
-    positive: list[list[tuple[int, int] | None]] = [[None] * positive_count for _ in range(2)]
-    eligible_masks = [0, 0]
-    opening: list[tuple[int, int] | None] = [None, None]
-    bookend: list[tuple[int, int] | None] = [None, None]
-    for rung_index, directions in rung_results.items():
-        for direction, result in enumerate(directions):
-            if int(result["classification"]) != 0:
-                continue
-            interval = tuple(result["components"][0])  # type: ignore[index]
-            if rung_index == 0:
-                opening[direction] = interval
-            elif rung_index == positive_count + 1:
-                bookend[direction] = interval
-            else:
-                positive[direction][rung_index - 1] = interval
-                eligible_masks[direction] |= 1 << (rung_index - 1)
+    opening, bookend, positive, eligible_masks = _retained_stage_c_evidence(
+        rung_results,
+        positive_count,
+    )
     terminal_eligible_masks = list(terminal["eligible_masks"])
     if faulted and terminal_eligible_masks != [0, 0]:
         mismatches.append("fault terminal retained nonempty eligible masks")

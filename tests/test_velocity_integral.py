@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from foci_trace.velocity_integral import (
+    _retained_stage_c_evidence,
     audit_integral_reproduction_pair,
     audit_velocity_integral,
     classify_observation,
@@ -807,6 +808,21 @@ def test_recovery_capture_rejects_missing_causal_record_and_wrong_stage() -> Non
     assert audit["matches_firmware"] is False
     assert any("wrong stage" in item for item in audit["mismatches"])
     assert any("recovery rungs" in item for item in audit["mismatches"])
+
+
+def test_opening_anchor_retention_is_all_or_none() -> None:
+    eligible = {"classification": 0, "components": [(100, 110)]}
+    ineligible = {"classification": 4, "components": []}
+
+    opening, bookend, positive, masks = _retained_stage_c_evidence(
+        {0: [eligible, ineligible]},
+        positive_count=12,
+    )
+
+    assert opening == [None, None]
+    assert bookend == [None, None]
+    assert positive == [[None] * 12, [None] * 12]
+    assert masks == [0, 0]
 
 
 def test_capture_audit_reports_digest_and_observation_mismatch_paths() -> None:
