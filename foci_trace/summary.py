@@ -39,11 +39,13 @@ class DeviceSummary:
     stage_b_recovery_unavailable: bool = False
     stage_b_directional_validity: tuple[int, int] | None = None
     stage_b_reduced_margin: bool = False
+    velocity_integral_test_p: int = 0
     velocity_integral_rungs: int = 0
     velocity_integral_outcome: int | None = None
     velocity_integral_recovery_unavailable: bool = False
     velocity_integral_recovered_with_current_headroom: bool = False
     velocity_integral_recovery_quantization_exposed: bool = False
+    velocity_integral_probe_constrained_test_point: bool = False
     velocity_integral_bookend_mask: int | None = None
     velocity_integral_rest_boundary: tuple[int, int] | None = None
     rung_origin_recoveries: int = 0
@@ -113,13 +115,19 @@ class LiveSummary:
                     int(frame.payload["reverse_validity"]),
                 )
                 device.stage_b_reduced_margin = bool(frame.payload["reduced_margin"])
-            elif kind == "integral_plan_core" and "directional_validity" in frame.payload:
-                validity = frame.payload["directional_validity"]
-                device.stage_b_directional_validity = (
-                    int(validity[0]),
-                    int(validity[1]),
+            elif kind == "integral_plan_core":
+                device.velocity_integral_test_p = int(frame.payload["final_p"])
+                if "directional_validity" in frame.payload:
+                    validity = frame.payload["directional_validity"]
+                    device.stage_b_directional_validity = (
+                        int(validity[0]),
+                        int(validity[1]),
+                    )
+                    device.stage_b_reduced_margin = bool(frame.payload["reduced_margin"])
+            elif kind == "integral_plan_recovery" and "flags" in frame.payload:
+                device.velocity_integral_probe_constrained_test_point = bool(
+                    int(frame.payload["flags"]) & 2
                 )
-                device.stage_b_reduced_margin = bool(frame.payload["reduced_margin"])
             elif kind == "integral_rung":
                 device.velocity_integral_rungs += 1
             elif kind == "integral_terminal":
@@ -133,6 +141,7 @@ class LiveSummary:
                     device.velocity_integral_recovery_quantization_exposed = bool(
                         recovery_flags & 4
                     )
+                    device.velocity_integral_probe_constrained_test_point = bool(recovery_flags & 8)
                 if "bookend_available_mask" in frame.payload:
                     device.velocity_integral_bookend_mask = int(
                         frame.payload["bookend_available_mask"]
@@ -171,11 +180,13 @@ class LiveSummary:
                 "stage_b_recovery_unavailable={stage_b_recovery_unavailable} "
                 "stage_b_validity={stage_b_validity} "
                 "stage_b_reduced_margin={stage_b_reduced_margin} "
+                "velocity_integral_p={integral_p} "
                 "velocity_integral_rungs={integral_rungs} "
                 "velocity_integral_outcome={integral_outcome} "
                 "velocity_integral_recovery_unavailable={integral_recovery_unavailable} "
                 "velocity_integral_recovered_with_current_headroom={integral_recovered} "
                 "velocity_integral_recovery_quantization_exposed={integral_exposed} "
+                "velocity_integral_probe_constrained={integral_probe_constrained} "
                 "velocity_integral_bookends={integral_bookends} "
                 "velocity_integral_rest_boundary={integral_rest_boundary} "
                 "recoveries={recoveries} contained_recoveries={contained_recoveries} "
@@ -207,6 +218,7 @@ class LiveSummary:
                         else ",".join(str(value) for value in item.stage_b_directional_validity)
                     ),
                     stage_b_reduced_margin=str(item.stage_b_reduced_margin).lower(),
+                    integral_p=item.velocity_integral_test_p,
                     integral_rungs=item.velocity_integral_rungs,
                     integral_outcome=(
                         "none"
@@ -221,6 +233,9 @@ class LiveSummary:
                     ).lower(),
                     integral_exposed=str(
                         item.velocity_integral_recovery_quantization_exposed
+                    ).lower(),
+                    integral_probe_constrained=str(
+                        item.velocity_integral_probe_constrained_test_point
                     ).lower(),
                     integral_bookends=(
                         "none"

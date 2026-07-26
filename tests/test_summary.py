@@ -83,6 +83,13 @@ def test_summary_tracks_velocity_integral_rungs_and_terminal() -> None:
     summary = LiveSummary()
     for sequence, payload in enumerate(
         (
+            {
+                "record_kind": "integral_plan_core",
+                "final_p": 724,
+                "directional_validity": [3, 4],
+                "reduced_margin": True,
+            },
+            {"record_kind": "integral_plan_recovery", "flags": 0b10},
             {"record_kind": "integral_rung"},
             {"record_kind": "integral_rung"},
             {
@@ -90,7 +97,11 @@ def test_summary_tracks_velocity_integral_rungs_and_terminal() -> None:
                 "positive_rung_index": 3,
                 "slot": 5,
             },
-            {"record_kind": "integral_terminal", "outcome": 1},
+            {
+                "record_kind": "integral_terminal",
+                "outcome": 1,
+                "recovery_flags": 0b1000,
+            },
         ),
         1,
     ):
@@ -119,6 +130,8 @@ def test_summary_tracks_velocity_integral_rungs_and_terminal() -> None:
 
     assert "velocity_integral_rungs=2" in text
     assert "velocity_integral_outcome=1" in text
+    assert "velocity_integral_p=724" in text
+    assert "velocity_integral_probe_constrained=true" in text
     assert "velocity_integral_rest_boundary=3:5" in text
 
 

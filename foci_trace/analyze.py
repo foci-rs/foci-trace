@@ -2735,14 +2735,26 @@ def format_analysis(
     for integral in analysis.velocity_integral_audits:
         evidence = integral.get("run_evidence", {})
         masks = evidence.get("eligible_masks", []) if isinstance(evidence, dict) else []
+        plan = integral.get("plan", {})
+        terminal = integral.get("terminal", {})
         stage_b_lines.append(
-            "velocity_integral dev={device} source={source} run={run} eligible={eligible} "
+            "velocity_integral dev={device} source={source} run={run} "
+            "outcome={outcome} cause={cause} p={p} probe_constrained={probe} "
+            "eligible={eligible} "
             "stage_b_validity={validity} reduced_margin={margin} "
             "bookend_available={bookends} rest_boundary={boundary} "
             "matches_firmware={matches}".format(
                 device=integral.get("device_index", "?"),
                 source=integral.get("source_index", "?"),
                 run=integral.get("run_sequence", "?"),
+                outcome=terminal.get("outcome", "?") if isinstance(terminal, dict) else "?",
+                cause=terminal.get("cause", "?") if isinstance(terminal, dict) else "?",
+                p=plan.get("final_p", 0) if isinstance(plan, dict) else 0,
+                probe=str(
+                    bool(terminal.get("probe_constrained_test_point", False))
+                    if isinstance(terminal, dict)
+                    else False
+                ).lower(),
                 eligible=masks,
                 validity=evidence.get("directional_validity", [])
                 if isinstance(evidence, dict)
