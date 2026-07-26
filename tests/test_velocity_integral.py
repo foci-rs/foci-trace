@@ -720,6 +720,84 @@ def test_fault_terminal_keeps_empty_firmware_evidence_and_reports_prefix() -> No
     assert "pre-fault prefix" in audit["caveats"][0]
 
 
+def _synthetic_recovery_fault_prefix(
+    *, outcome: int = 3, missing_recoveries: tuple[int, ...] = (13,)
+) -> tuple[list[VelocityObservation], list[tuple[bytes, dict[str, object]]]]:
+    raw_observations, records = _synthetic_complete_capture(schema_revision=6)
+    terminal = records[-1][1]
+    retained = [
+        item
+        for item in records[:-1]
+        if not (
+            item[1]["record_kind"] == "rung_origin_recovery"
+            and int(item[1]["rung_index"]) in missing_recoveries
+        )
+    ]
+    if missing_recoveries == (13,):
+        terminal["evidence_sequence"] = int(terminal["evidence_sequence"]) - 1
+    terminal.update(
+        {
+            "outcome": outcome,
+            "cause": 11 if outcome == 3 else 0,
+            "eligible_masks": [0, 0] if outcome == 3 else terminal["eligible_masks"],
+            "opening_available_mask": 0 if outcome == 3 else terminal["opening_available_mask"],
+            "bookend_available_mask": 0 if outcome == 3 else terminal["bookend_available_mask"],
+        }
+    )
+    plan = _plan(schema_revision=6)
+    plan["plan_digest"] = integral_plan_digest(plan)
+    digest = 0xCBF29CE484222325
+    for byte in _plan_marker(plan, 1)[0]:
+        digest = ((digest ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    for encoded, value in retained:
+        if value["record_kind"] in ("integral_plan_core", "integral_plan_schedule"):
+            continue
+        for byte in encoded:
+            digest = ((digest ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    terminal["digest"] = digest
+    return raw_observations, [*retained, records[-1]]
+
+
+def test_stage_c_fault_accepts_one_missing_final_recovery() -> None:
+    raw, records = _synthetic_recovery_fault_prefix()
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["matches_firmware"] is True
+    assert audit["mismatches"] == []
+    assert audit["terminal"]["outcome"] == 3
+    assert audit["terminal"]["cause"] == 11
+    assert [int(item["rung_index"]) for item in audit["recoveries"]] == list(range(13))
+    assert "pre-fault prefix" in audit["caveats"][0]
+
+
+def test_stage_c_non_fault_rejects_one_missing_final_recovery() -> None:
+    raw, records = _synthetic_recovery_fault_prefix(outcome=2)
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["matches_firmware"] is False
+    assert any("recovery rungs" in item for item in audit["mismatches"])
+
+
+def test_stage_c_fault_rejects_two_missing_recovery_records() -> None:
+    raw, records = _synthetic_recovery_fault_prefix(missing_recoveries=(12, 13))
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["matches_firmware"] is False
+    assert any("recovery rungs" in item for item in audit["mismatches"])
+
+
+def test_stage_c_fault_rejects_missing_intermediate_recovery() -> None:
+    raw, records = _synthetic_recovery_fault_prefix(missing_recoveries=(12,))
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["matches_firmware"] is False
+    assert any("recovery rungs" in item for item in audit["mismatches"])
+
+
 def test_reproduction_pair_checks_anchor_relative_curve_and_terminal() -> None:
     raw, records = _synthetic_complete_capture()
     previous = audit_velocity_integral(raw, records)

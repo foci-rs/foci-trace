@@ -1093,18 +1093,30 @@ def audit_velocity_integral(
             mismatches.append("Stage C current evidence does not cover every observation")
     if schema_revision >= 2:
         recovery_rungs = [int(record["rung_index"]) for record in recovery_records]
+        emitted_recovery_rungs = sorted({int(record["rung_index"]) for record in rung_records})
         if schema_revision >= 5 and rest_boundary is not None:
-            expected_recovery_rungs = sorted(
-                {int(record["rung_index"]) for record in rung_records}
-                | (
-                    {int(rest_boundary[1]["positive_rung_index"]) + 1}
-                    if int(terminal["cause"]) == 10
-                    else set()
+            if int(terminal["cause"]) == 10:
+                emitted_recovery_rungs = sorted(
+                    {
+                        *emitted_recovery_rungs,
+                        int(rest_boundary[1]["positive_rung_index"]) + 1,
+                    }
                 )
-            )
-        else:
-            fully_acquired_rungs = int(terminal["emitted_observations"]) // 8
-            expected_recovery_rungs = list(range(fully_acquired_rungs))
+        missing_final_recovery = (
+            bool(emitted_recovery_rungs) and recovery_rungs == emitted_recovery_rungs[:-1]
+        )
+        terminal_rung = emitted_recovery_rungs[-1] if emitted_recovery_rungs else None
+        terminal_follows_rung = bool(nonterminal) and (
+            nonterminal[-1][1]["record_kind"] == "integral_rung"
+            and int(nonterminal[-1][1]["rung_index"]) == terminal_rung
+        )
+        missing_final_allowed = missing_final_recovery and (
+            int(terminal.get("recovery_unavailable", 0)) == 1
+            or (int(terminal["outcome"]) == 3 and terminal_follows_rung)
+        )
+        expected_recovery_rungs = (
+            recovery_rungs if missing_final_allowed else emitted_recovery_rungs
+        )
         if recovery_rungs != expected_recovery_rungs:
             mismatches.append(
                 "integral recovery rungs differ from fully acquired rung sequence: "
@@ -1130,34 +1142,34 @@ def audit_velocity_integral(
         expected_order: list[tuple[str, int | None]] = []
         if marker_records:
             expected_order.append(("integral_plan_marker", None))
+        observation_keys = {
+            (int(value["rung_index"]), int(value["slot"])) for value in observation_records
+        }
+        rung_indexes = {int(value["rung_index"]) for value in rung_records}
+        recovery_indexes = {int(value["rung_index"]) for value in recovery_records}
         if schema_revision >= 5 and rest_boundary is not None:
-            observation_keys = {
-                (int(value["rung_index"]), int(value["slot"])) for value in observation_records
-            }
-            rung_indexes = {int(value["rung_index"]) for value in rung_records}
-            recovery_indexes = {int(value["rung_index"]) for value in recovery_records}
             boundary_key = (
                 int(rest_boundary[1]["positive_rung_index"]) + 1,
                 int(rest_boundary[1]["slot"]),
             )
-            for rung_index in sorted(rung_indexes | recovery_indexes | {boundary_key[0]}):
-                for slot in range(8):
-                    if (rung_index, slot) in observation_keys:
-                        expected_order.append(("integral_observation", rung_index))
-                        expected_order.append(("velocity_primitive_current", rung_index))
-                    elif (rung_index, slot) == boundary_key:
-                        expected_order.append(("velocity_primitive_current", rung_index))
-                if rung_index in rung_indexes:
-                    expected_order.append(("integral_rung", rung_index))
-                if rung_index in recovery_indexes:
-                    expected_order.append(("rung_origin_recovery", rung_index))
         else:
-            for rung_index in expected_recovery_rungs:
-                for _slot in range(8):
+            boundary_key = None
+        all_rung_indexes = (
+            rung_indexes | recovery_indexes | {rung_index for rung_index, _slot in observation_keys}
+        )
+        if boundary_key is not None:
+            all_rung_indexes.add(boundary_key[0])
+        for rung_index in sorted(all_rung_indexes):
+            for slot in range(8):
+                if (rung_index, slot) in observation_keys:
                     expected_order.append(("integral_observation", rung_index))
                     if schema_revision >= 3:
                         expected_order.append(("velocity_primitive_current", rung_index))
+                elif boundary_key == (rung_index, slot):
+                    expected_order.append(("velocity_primitive_current", rung_index))
+            if rung_index in rung_indexes:
                 expected_order.append(("integral_rung", rung_index))
+            if rung_index in recovery_indexes:
                 expected_order.append(("rung_origin_recovery", rung_index))
         observed_order = [
             (str(value["record_kind"]), int(value["rung_index"]) if "rung_index" in value else None)

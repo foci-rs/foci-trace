@@ -2001,6 +2001,206 @@ def test_stage_b_audit_accepts_exact_zero_rung_fault_terminal() -> None:
     assert report["nominated_p"] == 0
 
 
+def _stage_b_recovery_prefix_report(
+    *, outcome: int = 3, rung_count: int = 2, recovered_rungs: tuple[int, ...] = (0,)
+) -> dict[str, object]:
+    from foci_trace.velocity_measurement import (
+        FNV1A64_OFFSET,
+        FNV1A64_PRIME,
+        _finish_band,
+        _new_band,
+        _observe_band,
+        _reconstruct_observation,
+        _rung_class,
+        audit_velocity_sweep,
+    )
+
+    plan = {
+        "record_kind": "plan",
+        "run_sequence": 12,
+        "evidence_sequence": 0,
+        "plan_digest_low": 1,
+        "plan_digest_high": 0,
+        "rung_count": rung_count,
+        "observations_per_direction": 2,
+        "planned_velocity_mrev_s": 4_394,
+        "target_velocity_rpm": 264,
+        "p_start": 100,
+        "p_top": 100,
+        "hard_torque_limit": 1_000,
+        "usable_torque_limit": 900,
+        "max_stroke_travel_mrev": 2_500,
+        "settle_travel_reserve_mrev": 250,
+        "recovery_origin_band_counts": 1_000,
+        "recovery_nominal_slot_us": 1_816_958,
+        "recovery_maximum_slot_us": 3_000_000,
+        "recovery_slot_count": rung_count,
+    }
+    terminal = {
+        "record_kind": "stage_b_terminal",
+        "run_sequence": 12,
+        "encoder_counts_per_rev": 4_000,
+        "f_pwm_hz": 25_000,
+        "model_direction_mask": 0,
+        "selected_memberships": [0, 0, 0],
+        "nominated_p": 0,
+        "selected_intervals": [[0, 0], [0, 0]],
+        "coverage_mask": 0,
+        "forward_region_count": 0,
+        "reverse_region_count": 0,
+        "forward_fragment_count": 0,
+        "reverse_fragment_count": 0,
+        "expected_observations": 4 * rung_count,
+        "emitted_observations": 4 * rung_count,
+        "expected_rungs": rung_count,
+        "emitted_rungs": rung_count,
+        "outcome": outcome,
+        "cause": 11 if outcome == 3 else 0,
+        "recovery_unavailable": 0,
+    }
+    raw_observations = []
+    plan_raw = b"stage-b-recovery-plan"
+    evidence = [(plan_raw, plan)]
+    pattern = (1, 0, 1, 1, 0)
+    sequence = 1
+    bands = [_new_band(), _new_band()]
+    for rung_index in range(rung_count):
+        reconstructed = {}
+        velocity_p = 100 + rung_index
+        for slot in range(4):
+            direction = 1 if slot % 2 == 0 else -1
+            stroke_index = rung_index * 4 + slot
+            stroke = [
+                _observation(
+                    direction * pattern[index % len(pattern)],
+                    direction=direction,
+                    stroke_index=stroke_index,
+                    target_cpms=direction * 18,
+                    peak_torque_target_abs=100,
+                )
+                for index in range(256)
+            ]
+            raw_observations.extend(stroke)
+            record = {
+                "record_kind": "observation",
+                "run_sequence": 12,
+                "evidence_sequence": sequence,
+                "rung_index": rung_index,
+                "slot": slot,
+                "velocity_p": velocity_p,
+                "target_velocity_rpm": direction * 264,
+                "flags": int(rung_index == 0 and slot == 0),
+            }
+            record.update(_reconstruct_observation(stroke, record, plan, terminal))
+            reconstructed[slot] = record
+            evidence.append((bytes((2, rung_index, slot)), record))
+            sequence += 1
+
+        forward = _rung_class(reconstructed[0], reconstructed[2])
+        reverse = _rung_class(reconstructed[1], reconstructed[3])
+        _observe_band(
+            bands[0],
+            rung_index,
+            velocity_p,
+            *forward,
+            (reconstructed[0], reconstructed[2]),
+        )
+        _observe_band(
+            bands[1],
+            rung_index,
+            velocity_p,
+            *reverse,
+            (reconstructed[1], reconstructed[3]),
+        )
+        finished = [_finish_band(band) for band in bands]
+        rung = {
+            "record_kind": "rung",
+            "run_sequence": 12,
+            "evidence_sequence": sequence,
+            "rung_index": rung_index,
+            "velocity_p": velocity_p,
+            "forward_class": forward[0],
+            "forward_low_q16": forward[1],
+            "forward_high_q16": forward[2],
+            "reverse_class": reverse[0],
+            "reverse_low_q16": reverse[1],
+            "reverse_high_q16": reverse[2],
+            "flags": int(forward[3]) | (int(reverse[3]) << 1) | (1 << 2),
+        }
+        for index, prefix in ((0, "forward"), (1, "reverse")):
+            rung[f"{prefix}_p_low"] = finished[index]["p_low"]
+            rung[f"{prefix}_p_high"] = finished[index]["p_high"]
+            rung[f"{prefix}_closure"] = finished[index]["closure"]
+            rung[f"{prefix}_eligible_rungs"] = finished[index]["eligible_rungs"]
+            rung[f"{prefix}_eligible_observations"] = finished[index]["eligible_observations"]
+        evidence.append((bytes((3, rung_index)), rung))
+        sequence += 1
+        if rung_index in recovered_rungs:
+            evidence.append(
+                (
+                    bytes((9, rung_index)),
+                    {
+                        "record_kind": "rung_origin_recovery",
+                        "run_sequence": 12,
+                        "evidence_sequence": sequence,
+                        "stage": 0,
+                        "rung_index": rung_index,
+                        "velocity_p": velocity_p,
+                        "planned_velocity_mrev_s": 4_394,
+                        "start_offset_counts": 900,
+                        "closest_offset_counts": 900,
+                        "final_offset_counts": 900,
+                        "origin_band_counts": 1_000,
+                        "lower_rate_q": 0,
+                        "moving_duration_us": 0,
+                        "settle_duration_us": 0,
+                        "total_duration_us": 0,
+                        "peak_torque_target_abs": 100,
+                        "binding_source": 0,
+                        "outcome": 0,
+                    },
+                )
+            )
+            sequence += 1
+    terminal["evidence_sequence"] = sequence
+    digest = FNV1A64_OFFSET
+    for encoded, _record in evidence:
+        for byte in encoded:
+            digest ^= byte
+            digest = (digest * FNV1A64_PRIME) & 0xFFFF_FFFF_FFFF_FFFF
+    terminal["digest_low"] = digest & 0xFFFF_FFFF
+    terminal["digest_high"] = digest >> 32
+    evidence.append((b"stage-b-terminal", terminal))
+    return audit_velocity_sweep(raw_observations, evidence)
+
+
+def test_stage_b_fault_accepts_one_missing_final_recovery() -> None:
+    report = _stage_b_recovery_prefix_report()
+
+    assert not any("recovery rungs" in item for item in report["mismatches"])
+
+
+def test_stage_b_non_fault_rejects_one_missing_final_recovery() -> None:
+    report = _stage_b_recovery_prefix_report(outcome=2)
+
+    assert any("recovery rungs" in item for item in report["mismatches"])
+
+
+def test_stage_b_fault_rejects_two_missing_recovery_records() -> None:
+    report = _stage_b_recovery_prefix_report(
+        rung_count=3,
+        recovered_rungs=(0,),
+    )
+
+    assert any("recovery rungs" in item for item in report["mismatches"])
+
+
+def test_stage_b_fault_rejects_missing_intermediate_recovery() -> None:
+    report = _stage_b_recovery_prefix_report(recovered_rungs=(1,))
+
+    assert any("recovery rungs" in item for item in report["mismatches"])
+
+
 def test_structured_boundary_reports_longer_tail_without_changing_binding() -> None:
     from foci_trace.velocity_measurement import analyze_structured_boundary
 

@@ -3380,24 +3380,33 @@ def _audit_stage_b_velocity_sweep(
             ):
                 if int(plan[name]) != expected:
                     mismatches.append(f"Stage B {name}: firmware={plan[name]} offline={expected}")
-        fully_acquired_rungs = int(terminal["emitted_observations"]) // slot_count
         recovery_rungs = [int(record["rung_index"]) for record in recovery_records]
-        historical_fault_prefix = (
-            fully_acquired_rungs > 0
+        emitted_recovery_rungs = sorted(
+            {
+                int(value["rung_index"])
+                for _raw, value in nonterminal
+                if value["record_kind"] == "rung"
+            }
+        )
+        missing_final_recovery = (
+            bool(emitted_recovery_rungs) and recovery_rungs == emitted_recovery_rungs[:-1]
+        )
+        terminal_rung = emitted_recovery_rungs[-1] if emitted_recovery_rungs else None
+        terminal_follows_rung = bool(nonterminal) and (
+            nonterminal[-1][1]["record_kind"] == "rung"
+            and int(nonterminal[-1][1]["rung_index"]) == terminal_rung
+        )
+        fault_prefix = (
+            missing_final_recovery
             and int(terminal["outcome"]) == STAGE_B_OUTCOME_FAULT
-            and int(terminal["cause"]) == 17
-            and recovery_rungs == list(range(fully_acquired_rungs - 1))
+            and terminal_follows_rung
         )
-        complete_current_headroom_terminus = (
-            int(terminal.get("cause", 0)) == STAGE_B_CAUSE_CURRENT_HEADROOM
-            and int(terminal.get("emitted_rungs", 0)) == fully_acquired_rungs
+        historical_current_headroom_fault = fault_prefix and int(terminal["cause"]) == 17
+        missing_final_allowed = missing_final_recovery and (
+            int(terminal.get("recovery_unavailable", 0)) == 1 or fault_prefix
         )
-        expected_recovery_rungs = list(
-            range(
-                fully_acquired_rungs
-                - int(historical_fault_prefix)
-                - int(complete_current_headroom_terminus)
-            )
+        expected_recovery_rungs = (
+            recovery_rungs if missing_final_allowed else emitted_recovery_rungs
         )
         if recovery_rungs != expected_recovery_rungs:
             mismatches.append(
@@ -3443,7 +3452,7 @@ def _audit_stage_b_velocity_sweep(
     projected_replay = replay_stage_b_regions(raw_observations, evidence_records)
     replay = (
         _stage_b_fault_prefix_replay(projected_replay)
-        if recovery_schema and historical_fault_prefix
+        if recovery_schema and fault_prefix
         else projected_replay
     )
     causal_mismatch = _compare_stage_b_causal_order(
@@ -4091,7 +4100,7 @@ def _audit_stage_b_velocity_sweep(
                     projected_replay,
                     terminal_rung=int(terminal["emitted_rungs"]) - 1,
                 )
-                if recovery_schema and historical_fault_prefix
+                if recovery_schema and historical_current_headroom_fault
                 else None
             ),
         },
