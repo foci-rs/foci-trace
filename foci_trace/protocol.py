@@ -478,6 +478,8 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 )
             )
             decoded["directional_memberships"] = [cursor.take("I") for _ in range(2)]
+            if decoded["schema_revision"] >= 7:
+                decoded["stage_b_joint_membership"] = cursor.take("I")
             decoded["joint_membership"] = cursor.take("I")
             if decoded["schema_revision"] >= 4:
                 decoded["directional_validity"] = [cursor.take("B") for _ in range(2)]

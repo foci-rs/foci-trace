@@ -451,6 +451,26 @@ def test_decodes_schema_six_velocity_integral_recovery_flags() -> None:
     assert frame.payload["flags"] == 1
 
 
+def test_decodes_schema_seven_velocity_integral_source_and_filtered_masks() -> None:
+    payload = bytearray([0])
+    payload.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
+    payload.extend(struct.pack("<BIHBIIH", 0, 0x05E2_1F75, 7, 0, 0x89AB_CDEF, 0x0123_4567, 724))
+    payload.extend(struct.pack("<IIII", 0x001C_0000, 0x001C_0000, 0x001C_0000, 0x0004_0000))
+    payload.extend(struct.pack("<BBB", 3, 3, 1))
+    payload.extend(struct.pack("<iiii", 10, 20, -20, -10))
+    payload.extend(
+        struct.pack("<IiIIBHBHHHB", 4_394, 264, 25_000, 4_000, 12, 56, 14, 112, 2_816, 2_534, 1)
+    )
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert frame.payload["record_kind"] == "integral_plan_core"
+    assert frame.payload["schema_revision"] == 7
+    assert frame.payload["stage_b_joint_membership"] == 0x001C_0000
+    assert frame.payload["joint_membership"] == 0x0004_0000
+    assert frame.payload["final_p"] == 724
+
+
 def test_decodes_rung_origin_recovery_record() -> None:
     payload = struct.pack(
         "<BIHBBHIiiiIQIIIHBB",
@@ -675,6 +695,39 @@ def test_decodes_schema_six_velocity_integral_terminal_flags() -> None:
     assert len(payload) == 61
     assert frame.payload["recovery_flags"] == 0b110
     assert frame.payload["recovery_unavailable"] == 0
+
+
+def test_decodes_schema_seven_zero_motion_failed_terminal() -> None:
+    payload = bytearray([4])
+    payload.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
+    payload.extend(struct.pack("<II", 0, 0))
+    payload.extend(
+        struct.pack(
+            "<BBBHHHHIIBBB",
+            5,
+            11,
+            0b1000,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+    )
+    payload.extend(struct.pack("<IIII", 0, 0, 0, 0))
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert frame.payload["record_kind"] == "integral_terminal"
+    assert frame.payload["outcome"] == 5
+    assert frame.payload["cause"] == 11
+    assert frame.payload["recovery_flags"] == 0b1000
+    assert frame.payload["expected_observations"] == 0
+    assert frame.payload["emitted_observations"] == 0
 
 
 def test_decodes_schema_five_velocity_integral_rest_boundary() -> None:

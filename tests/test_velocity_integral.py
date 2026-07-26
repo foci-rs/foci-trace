@@ -17,6 +17,7 @@ from foci_trace.velocity_integral import (
     integral_plan_digest,
     recovery_quantization_exposed,
     reconstruct_observation,
+    select_transition_capable_test_point,
     stage_c_slot_transition,
     UnsupportedIntegralRepresentationError,
     velocity_i_tau_us,
@@ -139,6 +140,20 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
         )
     if schema_revision >= 6:
         plan["flags"] = 1
+    if schema_revision >= 7:
+        plan.update(
+            {
+                "final_p": 724,
+                "stage_b_joint_membership": 0x001C_0000,
+                "joint_membership": 0x0004_0000,
+                "directional_memberships": [0x001C_0000, 0x001C_0000],
+                "directional_validity": [3, 3],
+                "reduced_margin": True,
+                "hard_torque_limit": 2_816,
+                "usable_torque_limit": 2_534,
+                "flags": 0b10,
+            }
+        )
     return plan
 
 
@@ -161,6 +176,98 @@ def test_schema_four_plan_digest_hashes_stage_b_validity_context() -> None:
 
     assert integral_plan_digest(full) != integral_plan_digest(transferred)
     assert integral_plan_digest(full) != integral_plan_digest(full_margin)
+
+
+def test_schema_seven_plan_digest_hashes_both_memberships_and_both_flags() -> None:
+    plan = _plan(schema_revision=7)
+    baseline = integral_plan_digest(plan)
+
+    assert baseline != integral_plan_digest({**plan, "stage_b_joint_membership": 0x0018_0000})
+    assert baseline != integral_plan_digest({**plan, "joint_membership": 0x000C_0000})
+    assert baseline != integral_plan_digest({**plan, "flags": 0b11})
+
+
+def test_schema_seven_selects_transition_capable_prefix_independently() -> None:
+    selection = select_transition_capable_test_point(
+        stage_b_joint_membership=0x001C_0000,
+        target_rpm=264,
+        counts_per_rev=4_000,
+        pwm_hz=25_000,
+        moving_stroke_us=512_000,
+        probe_limit=2_534,
+    )
+
+    assert selection == {
+        "stage_b_joint_membership": 0x001C_0000,
+        "joint_membership": 0x0004_0000,
+        "final_p": 724,
+        "transition_ceiling": 979,
+        "reduced_margin": True,
+        "probe_constrained_test_point": True,
+    }
+
+
+def test_schema_seven_rejects_upper_component_until_target_is_redeclared() -> None:
+    unavailable = select_transition_capable_test_point(
+        stage_b_joint_membership=0x0018_0000,
+        target_rpm=264,
+        counts_per_rev=4_000,
+        pwm_hz=25_000,
+        moving_stroke_us=512_000,
+        probe_limit=2_534,
+    )
+    reconfigured = select_transition_capable_test_point(
+        stage_b_joint_membership=0x000C_0000,
+        target_rpm=132,
+        counts_per_rev=4_000,
+        pwm_hz=25_000,
+        moving_stroke_us=512_000,
+        probe_limit=2_534,
+    )
+
+    assert unavailable["joint_membership"] == 0
+    assert unavailable["final_p"] == 0
+    assert unavailable["transition_ceiling"] == 979
+    assert reconfigured["joint_membership"] == 0x0004_0000
+    assert reconfigured["final_p"] == 1_024
+    assert reconfigured["transition_ceiling"] == 1_234
+
+
+def test_schema_seven_transition_boundary_and_overflow_fail_closed() -> None:
+    common = {
+        "target_rpm": 264,
+        "counts_per_rev": 4_000,
+        "pwm_hz": 25_000,
+        "moving_stroke_us": 512_000,
+        "probe_limit": 2_534,
+    }
+
+    below = select_transition_capable_test_point(
+        stage_b_joint_membership=1 << 0,
+        p_start=979,
+        p_top=980,
+        **common,
+    )
+    at_or_above = select_transition_capable_test_point(
+        stage_b_joint_membership=1 << 1,
+        p_start=979,
+        p_top=980,
+        **common,
+    )
+
+    assert below["final_p"] == 979
+    assert at_or_above["joint_membership"] == 0
+    with pytest.raises(ValueError, match="invalid Stage-C transition"):
+        select_transition_capable_test_point(
+            stage_b_joint_membership=1,
+            target_rpm=1 << 31,
+            counts_per_rev=4_000,
+            pwm_hz=25_000,
+            moving_stroke_us=512_000,
+            probe_limit=(1 << 16) - 1,
+            p_start=0x7FFF,
+            p_top=0x7FFF,
+        )
 
 
 def _plan_marker(plan: dict[str, object], sequence: int) -> tuple[bytes, dict[str, object]]:
@@ -223,7 +330,7 @@ def _plan_records(plan: dict[str, object]) -> list[tuple[bytes, dict[str, object
         "plan_digest": plan["plan_digest"],
         "positive_rung_count": plan["positive_rung_count"],
     }
-    core_names = (
+    core_names = [
         "build_revision",
         "schema_revision",
         "channel",
@@ -241,7 +348,9 @@ def _plan_records(plan: dict[str, object]) -> list[tuple[bytes, dict[str, object
         "expected_observations",
         "hard_torque_limit",
         "usable_torque_limit",
-    )
+    ]
+    if int(plan["schema_revision"]) >= 7:
+        core_names.insert(core_names.index("joint_membership"), "stage_b_joint_membership")
     schedule_names = (
         "positive_i",
         "moving_stroke_us",
@@ -299,13 +408,17 @@ def _plan_records(plan: dict[str, object]) -> list[tuple[bytes, dict[str, object
     return records
 
 
-def _recovery_record(rung_index: int, sequence: int) -> tuple[bytes, dict[str, object]]:
+def _recovery_record(
+    rung_index: int,
+    sequence: int,
+    velocity_p: int = 1_448,
+) -> tuple[bytes, dict[str, object]]:
     values = {
         "run_sequence": 7,
         "evidence_sequence": sequence,
         "stage": 1,
         "rung_index": rung_index,
-        "velocity_p": 1_448,
+        "velocity_p": velocity_p,
         "planned_velocity_mrev_s": 4_394,
         "start_offset_counts": 900,
         "closest_offset_counts": 900,
@@ -513,7 +626,13 @@ def _synthetic_complete_capture(
         )
         sequence += 1
         if schema_revision >= 2:
-            records.append(_recovery_record(rung_index, sequence))
+            records.append(
+                _recovery_record(
+                    rung_index,
+                    sequence,
+                    velocity_p=int(plan["final_p"]),
+                )
+            )
             sequence += 1
     if schema_revision >= 2:
         compact_marker = bytearray(_plan_marker(plan, 1)[0])
@@ -565,7 +684,11 @@ def _synthetic_complete_capture(
                     (1 << int(plan["positive_rung_count"])) - 1,
                 ],
                 "current_terminus": None,
-                **({"recovery_flags": 4} if schema_revision >= 6 else {"recovery_unavailable": 0}),
+                **(
+                    {"recovery_flags": (8 if schema_revision >= 7 else 4)}
+                    if schema_revision >= 6
+                    else {"recovery_unavailable": 0}
+                ),
                 "run_started_us": 1,
                 "run_completed_us": 2,
                 **(
@@ -978,6 +1101,78 @@ def test_schema_six_capture_reconstructs_plan_and_terminal_exposure() -> None:
     assert response["terminal"]["recovery_quantization_exposed"] is True
 
 
+def test_schema_seven_reconstructs_selected_test_point_and_qualifiers() -> None:
+    raw, records = _synthetic_complete_capture(schema_revision=7)
+
+    response = audit_velocity_integral(raw, records)
+
+    assert response["matches_firmware"] is True
+    assert response["plan"]["stage_b_joint_membership"] == 0x001C_0000
+    assert response["plan"]["joint_membership"] == 0x0004_0000
+    assert response["plan"]["final_p"] == 724
+    assert response["plan"]["reduced_margin"] is True
+    assert response["terminal"]["probe_constrained_test_point"] is True
+
+
+def test_schema_seven_audits_terminal_only_failed_admission_without_a_plan() -> None:
+    terminal = {
+        "record_kind": "integral_terminal",
+        "run_sequence": 7,
+        "evidence_sequence": 0,
+        "plan_digest": 0x0123_4567_89AB_CDEF,
+        "digest": 0,
+        "outcome": 5,
+        "cause": 11,
+        "recovery_flags": 0b1000,
+        "expected_observations": 0,
+        "emitted_observations": 0,
+        "expected_rungs": 0,
+        "emitted_rungs": 0,
+        "eligible_masks": [0, 0],
+        "opening_available_mask": 0,
+        "bookend_available_mask": 0,
+        "current_terminus": None,
+        "run_started_us": 0,
+        "run_completed_us": 0,
+    }
+
+    response = audit_velocity_integral([], [(b"", terminal)])
+
+    assert response["matches_firmware"]
+    assert response["complete"] is False
+    assert response["plan"] is None
+    assert response["terminal"]["probe_constrained_test_point"] is True
+    assert response["interpretation"] == "firmware-schema-7"
+
+
+def test_schema_seven_does_not_reinterpret_other_terminal_only_outcomes() -> None:
+    terminal = {
+        "record_kind": "integral_terminal",
+        "run_sequence": 7,
+        "evidence_sequence": 0,
+        "plan_digest": 0x0123_4567_89AB_CDEF,
+        "digest": 0,
+        "outcome": 4,
+        "cause": 11,
+        "recovery_flags": 0b1000,
+        "expected_observations": 0,
+        "emitted_observations": 0,
+        "expected_rungs": 0,
+        "emitted_rungs": 0,
+        "eligible_masks": [0, 0],
+        "opening_available_mask": 0,
+        "bookend_available_mask": 0,
+        "current_terminus": None,
+        "run_started_us": 0,
+        "run_completed_us": 0,
+    }
+
+    response = audit_velocity_integral([], [(b"", terminal)])
+
+    assert not response["matches_firmware"]
+    assert "partial integral-response capture" in response["mismatches"][0]
+
+
 @pytest.mark.parametrize(
     ("recovery_flags", "message"),
     (
@@ -1128,7 +1323,7 @@ def test_schema_four_sufficiency_requires_both_closing_bookends() -> None:
     assert _stage_c_run_sufficient(3, opening, [None, None], masks) is True
 
 
-@pytest.mark.parametrize("schema_revision", [0, 7])
+@pytest.mark.parametrize("schema_revision", [0, 8])
 def test_integral_ladder_rejects_unsupported_schema(schema_revision: int) -> None:
     with pytest.raises(ValueError, match="unsupported Stage-C evidence schema"):
         derive_integral_ladder(

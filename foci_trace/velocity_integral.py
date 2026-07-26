@@ -30,9 +30,12 @@ _I32_MAX = (1 << 31) - 1
 _FNV1A64_OFFSET = 0xCBF29CE484222325
 _FNV1A64_PRIME = 0x100000001B3
 _PLAN_RECOVERY_QUANTIZATION_EXPOSED = 1 << 0
+_PLAN_PROBE_CONSTRAINED_TEST_POINT = 1 << 1
 _TERMINAL_RECOVERY_UNAVAILABLE = 1 << 0
 _TERMINAL_RECOVERED_WITH_CURRENT_HEADROOM = 1 << 1
 _TERMINAL_RECOVERY_QUANTIZATION_EXPOSED = 1 << 2
+_TERMINAL_PROBE_CONSTRAINED_TEST_POINT = 1 << 3
+_U128_MAX = (1 << 128) - 1
 
 
 class UnsupportedIntegralRepresentationError(ValueError):
@@ -75,6 +78,8 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     _append_integer(encoded, int(plan["final_p"]), 2)
     for membership in plan["directional_memberships"]:  # type: ignore[union-attr]
         _append_integer(encoded, int(membership), 4)
+    if int(plan["schema_revision"]) >= 7:
+        _append_integer(encoded, int(plan["stage_b_joint_membership"]), 4)
     _append_integer(encoded, int(plan["joint_membership"]), 4)
     if int(plan["schema_revision"]) >= 4:
         for validity in plan["directional_validity"]:  # type: ignore[union-attr]
@@ -118,6 +123,12 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
         _append_integer(
             encoded,
             int(bool(int(plan["flags"]) & _PLAN_RECOVERY_QUANTIZATION_EXPOSED)),
+            1,
+        )
+    if int(plan["schema_revision"]) >= 7:
+        _append_integer(
+            encoded,
+            int(bool(int(plan["flags"]) & _PLAN_PROBE_CONSTRAINED_TEST_POINT)),
             1,
         )
     _append_integer(encoded, int(plan["requested_velocity_mrev_s"]), 4)
@@ -171,7 +182,7 @@ def derive_integral_ladder(
     build_revision: int | None,
 ) -> dict[str, object]:
     """Reconstruct the cap-only whole-octave positive-I ladder."""
-    if schema_revision not in range(1, 7):
+    if schema_revision not in range(1, 8):
         raise ValueError("unsupported Stage-C evidence schema")
     if shortest_suffix_us < 2:
         raise ValueError("shortest suffix must contain at least two microseconds")
@@ -208,6 +219,106 @@ def derive_integral_ladder(
     if len(rungs) > _I_MAX_POSITIVE_RUNGS or family_size > _I_CONFIDENCE_FAMILY_MAX:
         raise ValueError("integral ladder exceeds the simultaneous-confidence family")
     return {"i_start": i_start, "i_top_cap": i_top_cap, "positive_i": rungs}
+
+
+def _checked_u128(value: int) -> int:
+    if not 0 <= value <= _U128_MAX:
+        raise ValueError("Stage-C transition checked arithmetic overflow")
+    return value
+
+
+def _stage_b_ladder(p_start: int, p_top: int) -> list[int]:
+    if not 0 < p_start <= p_top <= 0x7FFF:
+        raise ValueError("invalid Stage-B ladder geometry")
+    gains: list[int] = []
+    previous = 0
+    for octave in range(16):
+        even = _checked_u128(p_start << octave)
+        odd = _checked_u128(((p_start * 181) << octave) + 127) >> 7
+        for candidate in (even, odd):
+            if candidate > p_top:
+                break
+            if candidate > previous:
+                gains.append(candidate)
+                previous = candidate
+    if previous != p_top:
+        gains.append(p_top)
+    return gains
+
+
+def select_transition_capable_test_point(
+    *,
+    stage_b_joint_membership: int,
+    target_rpm: int,
+    counts_per_rev: int,
+    pwm_hz: int,
+    moving_stroke_us: int,
+    probe_limit: int,
+    p_start: int | None = None,
+    p_top: int | None = None,
+) -> dict[str, int | bool]:
+    """Independently filter and nominate the Stage-C proportional test point."""
+    if (
+        not 0 <= stage_b_joint_membership <= 0xFFFF_FFFF
+        or target_rpm == -(1 << 31)
+        or not -(1 << 31) < target_rpm < (1 << 31)
+        or not 0 < counts_per_rev <= 0xFFFF_FFFF
+        or not 0 < pwm_hz <= 0xFFFF_FFFF
+        or not 0 < moving_stroke_us <= 0xFFFF_FFFF
+        or not 0 < probe_limit <= 0xFFFF
+    ):
+        raise ValueError("invalid Stage-C transition geometry")
+    target_magnitude = abs(target_rpm)
+    if target_magnitude == 0:
+        raise ValueError("invalid Stage-C transition target")
+    if p_start is None:
+        p_start = (256 + target_magnitude - 1) // target_magnitude
+    if p_top is None:
+        p_top = min(0x7FFF, (256 * probe_limit) // target_magnitude)
+    ladder = _stage_b_ladder(p_start, p_top)
+    valid_bits = (1 << len(ladder)) - 1
+    if stage_b_joint_membership & ~valid_bits:
+        raise ValueError("Stage-B joint membership exceeds its ladder")
+
+    stroke_cycles = _checked_u128(
+        (_checked_u128(pwm_hz * moving_stroke_us) + _MICROS_PER_SECOND - 1) // _MICROS_PER_SECOND
+    )
+    error_num = _checked_u128(_checked_u128(target_magnitude * counts_per_rev) + 60 * pwm_hz)
+    prefix_scale = _checked_u128(_CURRENT_Q4_12_I_NUMERATOR + _checked_u128(stroke_cycles * 3))
+    rhs = _checked_u128(
+        _checked_u128(_checked_u128(256 * counts_per_rev) * _CURRENT_Q4_12_I_NUMERATOR)
+        * probe_limit
+    )
+    divisor = _checked_u128(error_num * prefix_scale)
+    transition_ceiling = (rhs - 1) // divisor
+
+    filtered = 0
+    for rung_index, gain in enumerate(ladder):
+        if stage_b_joint_membership & (1 << rung_index) == 0:
+            continue
+        lhs = _checked_u128(_checked_u128(gain * error_num) * prefix_scale)
+        if lhs < rhs:
+            filtered |= 1 << rung_index
+    if filtered == 0:
+        return {
+            "stage_b_joint_membership": stage_b_joint_membership,
+            "joint_membership": 0,
+            "final_p": 0,
+            "transition_ceiling": transition_ceiling,
+            "reduced_margin": False,
+            "probe_constrained_test_point": bool(stage_b_joint_membership),
+        }
+    first_rung = (filtered & -filtered).bit_length() - 1
+    member_count = filtered.bit_count()
+    selected_rung = first_rung + (member_count - 1) // 2
+    return {
+        "stage_b_joint_membership": stage_b_joint_membership,
+        "joint_membership": filtered,
+        "final_p": ladder[selected_rung],
+        "transition_ceiling": transition_ceiling,
+        "reduced_margin": member_count <= 2,
+        "probe_constrained_test_point": filtered != stage_b_joint_membership,
+    }
 
 
 def recovery_quantization_exposed(
@@ -674,7 +785,10 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
     schema_revision = int(plan["schema_revision"])
     if schema_revision >= 6:
         flags = int(plan.get("flags", -1))
-        if flags < 0 or flags & ~_PLAN_RECOVERY_QUANTIZATION_EXPOSED:
+        known_flags = _PLAN_RECOVERY_QUANTIZATION_EXPOSED
+        if schema_revision >= 7:
+            known_flags |= _PLAN_PROBE_CONSTRAINED_TEST_POINT
+        if flags < 0 or flags & ~known_flags:
             mismatches.append("plan recovery flags contain reserved bits")
         else:
             try:
@@ -693,6 +807,42 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
                     mismatches.append(
                         "plan recovery quantization exposure differs from exact reconstruction"
                     )
+    if schema_revision >= 7:
+        try:
+            selection = select_transition_capable_test_point(
+                stage_b_joint_membership=int(plan["stage_b_joint_membership"]),
+                target_rpm=int(plan["target_velocity_rpm"]),
+                counts_per_rev=int(plan["encoder_counts_per_rev"]),
+                pwm_hz=int(plan["pwm_hz"]),
+                moving_stroke_us=int(plan["moving_stroke_us"]),
+                probe_limit=int(plan["usable_torque_limit"]),
+            )
+        except (KeyError, ValueError) as error:
+            mismatches.append(f"Stage-C test-point reconstruction failed: {error}")
+        else:
+            for field in ("joint_membership", "final_p", "reduced_margin"):
+                if plan[field] != selection[field]:
+                    mismatches.append(
+                        f"plan {field}: firmware={plan[field]} offline={selection[field]}"
+                    )
+            reported_constraint = bool(int(plan["flags"]) & _PLAN_PROBE_CONSTRAINED_TEST_POINT)
+            if reported_constraint != selection["probe_constrained_test_point"]:
+                mismatches.append(
+                    "plan probe-constrained test-point flag differs from exact reconstruction"
+                )
+            membership = int(plan["joint_membership"])
+            selected_rung = (membership & -membership).bit_length() - 1
+            selected_rung += (membership.bit_count() - 1) // 2
+            for direction, validity in enumerate(plan["directional_validity"]):
+                if int(validity) not in (3, 4):
+                    continue
+                expected = (
+                    3
+                    if int(plan["directional_memberships"][direction]) & (1 << selected_rung)
+                    else 4
+                )
+                if int(validity) != expected:
+                    mismatches.append(f"plan direction {direction} validity differs at selected P")
     if schema_revision >= 4:
         validity = plan.get("directional_validity")
         if (
@@ -763,6 +913,58 @@ def _stage_c_run_sufficient(
     return anchors_available and positive_floor and bookends_available
 
 
+def _audit_failed_stage_c_admission(
+    raw_observations: list[Any],
+    terminal: dict[str, object],
+    evidence_count: int,
+) -> dict[str, object]:
+    mismatches: list[str] = []
+    expected = {
+        "evidence_sequence": 0,
+        "outcome": 5,
+        "cause": 11,
+        "recovery_flags": _TERMINAL_PROBE_CONSTRAINED_TEST_POINT,
+        "expected_observations": 0,
+        "emitted_observations": 0,
+        "expected_rungs": 0,
+        "emitted_rungs": 0,
+        "opening_available_mask": 0,
+        "bookend_available_mask": 0,
+        "run_started_us": 0,
+        "run_completed_us": 0,
+    }
+    for field, value in expected.items():
+        if int(terminal.get(field, -1)) != value:
+            mismatches.append(
+                f"failed admission {field}: firmware={terminal.get(field)} expected={value}"
+            )
+    if int(terminal.get("plan_digest", 0)) == 0:
+        mismatches.append("failed admission plan digest is zero")
+    if int(terminal.get("digest", -1)) != 0:
+        mismatches.append("failed admission evidence digest is nonzero")
+    if list(terminal.get("eligible_masks", [])) != [0, 0]:
+        mismatches.append("failed admission retained eligible masks")
+    if terminal.get("current_terminus") is not None:
+        mismatches.append("failed admission retained a current terminus")
+    if raw_observations or evidence_count != 1:
+        mismatches.append("failed admission carried motion evidence")
+    decoded_terminal = dict(terminal)
+    decoded_terminal["recovery_unavailable"] = 0
+    decoded_terminal["recovered_with_current_headroom"] = False
+    decoded_terminal["recovery_quantization_exposed"] = False
+    decoded_terminal["probe_constrained_test_point"] = True
+    return {
+        "run_sequence": int(terminal.get("run_sequence", 0)),
+        "plan": None,
+        "terminal": decoded_terminal,
+        "complete": False,
+        "matches_firmware": not mismatches,
+        "mismatches": mismatches,
+        "caveats": ["zero-motion Stage-C admission failure; no plan or curve exists"],
+        "interpretation": "firmware-schema-7",
+    }
+
+
 def audit_velocity_integral(
     raw_observations: list[Any], evidence_records: list[tuple[bytes, dict[str, object]]]
 ) -> dict[str, object]:
@@ -791,6 +993,18 @@ def audit_velocity_integral(
     identities = (
         plan_cores or plan_schedules or terminals or [value for _raw, value in evidence_records]
     )
+    if (
+        not plan_cores
+        and not plan_schedules
+        and not plan_recoveries
+        and len(terminals) == 1
+        and int(terminals[0].get("outcome", -1)) == 5
+    ):
+        return _audit_failed_stage_c_admission(
+            raw_observations,
+            terminals[0],
+            len(evidence_records),
+        )
     schema_revision = int(plan_cores[0].get("schema_revision", 1)) if len(plan_cores) == 1 else 1
     recovery_fragment_count = 1 if schema_revision >= 2 else 0
     if (
@@ -1055,6 +1269,8 @@ def audit_velocity_integral(
             | _TERMINAL_RECOVERED_WITH_CURRENT_HEADROOM
             | _TERMINAL_RECOVERY_QUANTIZATION_EXPOSED
         )
+        if schema_revision >= 7:
+            known_flags |= _TERMINAL_PROBE_CONSTRAINED_TEST_POINT
         if recovery_flags < 0 or recovery_flags & ~known_flags:
             mismatches.append("terminal recovery flags contain reserved bits")
         else:
@@ -1067,9 +1283,18 @@ def audit_velocity_integral(
             terminal["recovery_quantization_exposed"] = bool(
                 recovery_flags & _TERMINAL_RECOVERY_QUANTIZATION_EXPOSED
             )
+            terminal["probe_constrained_test_point"] = bool(
+                recovery_flags & _TERMINAL_PROBE_CONSTRAINED_TEST_POINT
+            )
             plan_exposure = bool(int(plan.get("flags", 0)) & _PLAN_RECOVERY_QUANTIZATION_EXPOSED)
             if terminal["recovery_quantization_exposed"] != plan_exposure:
                 mismatches.append("terminal recovery exposure differs from the plan")
+            if schema_revision >= 7:
+                plan_constraint = bool(
+                    int(plan.get("flags", 0)) & _PLAN_PROBE_CONSTRAINED_TEST_POINT
+                )
+                if terminal["probe_constrained_test_point"] != plan_constraint:
+                    mismatches.append("terminal probe constraint differs from the plan")
     for record in current_records:
         if int(record["stage"]) != 1:
             mismatches.append("Stage C current evidence carries the wrong stage")
