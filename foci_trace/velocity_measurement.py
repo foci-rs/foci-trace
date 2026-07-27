@@ -16,6 +16,45 @@ RECOVERY_ZERO_SETTLE_US = 500_000
 RECOVERY_ANALYSIS_BUDGET_US = 236_000
 MIN_SELECTED_BLOCKS = 16
 CONFIDENCE_MULTIPLIER_95 = 2.131
+
+
+def project_combined_response_selection(
+    rungs: list[dict[str, object]],
+    *,
+    target_rpm: int,
+    encoder_counts_per_rev: int,
+) -> dict[str, object]:
+    """Project the combined selector over preserved Stage-B rung intervals."""
+    if target_rpm <= 0 or encoder_counts_per_rev <= 0:
+        raise ValueError("combined response target must be positive")
+    target_numerator = target_rpm * encoder_counts_per_rev * RATE_Q_SCALE
+    lower = target_numerator * 70
+    upper = target_numerator * 80
+    for rung in rungs:
+        eligible = list(rung["eligible"])  # type: ignore[arg-type]
+        if eligible != [True, True]:
+            continue
+        intervals = [list(rung["forward"]), list(rung["reverse"])]  # type: ignore[arg-type]
+        normalized = [
+            intervals[0],
+            [-intervals[1][1], -intervals[1][0]],
+        ]
+        if all(
+            interval[0] * 60 * 100 >= lower and interval[1] * 60 * 100 <= upper
+            for interval in normalized
+        ):
+            return {
+                "interpretation": "projected_result_under_combined_selector",
+                "selected_p": int(rung["p"]),
+                "selected_intervals": intervals,
+            }
+    return {
+        "interpretation": "projected_result_under_combined_selector",
+        "selected_p": None,
+        "selected_intervals": None,
+    }
+
+
 CONFIDENCE_MULTIPLIERS_95_DF15 = (
     2.131,
     2.48988,
@@ -3253,6 +3292,38 @@ def replay_stage_b_regions(
         boundary = analyze_structured_boundary(by_stroke.get(key[0] * slot_count + key[1], []))
         if boundary is not None:
             structured_boundaries[f"{key[0]}/{key[1]}"] = boundary
+    combined_rungs = []
+    for forward, reverse in zip(directional_inputs[0], directional_inputs[1], strict=True):
+        forward_wire = forward.get("wire_rate_bounds_q")
+        reverse_wire = reverse.get("wire_rate_bounds_q")
+        forward_interval = (
+            list(forward_wire[2:4])  # type: ignore[index]
+            if forward_wire is not None
+            else [min(forward["rate_lows"]), max(forward["rate_highs"])]  # type: ignore[arg-type]
+        )
+        reverse_interval = (
+            list(reverse_wire[2:4])  # type: ignore[index]
+            if reverse_wire is not None
+            else [min(reverse["rate_lows"]), max(reverse["rate_highs"])]  # type: ignore[arg-type]
+        )
+        combined_rungs.append(
+            {
+                "p": int(forward["velocity_p"]),
+                "forward": forward_interval,
+                "reverse": reverse_interval,
+                "eligible": [
+                    int(forward["class"]) == 0
+                    and int(forward.get("collected_mask", 0b1111)) == 0b1111,
+                    int(reverse["class"]) == 0
+                    and int(reverse.get("collected_mask", 0b1111)) == 0b1111,
+                ],
+            }
+        )
+    combined_projection = project_combined_response_selection(
+        combined_rungs,
+        target_rpm=abs(int(terminal.get("target_velocity_rpm", plan["target_velocity_rpm"]))),
+        encoder_counts_per_rev=int(terminal["encoder_counts_per_rev"]),
+    )
     return {
         "directions": directional,
         "directional_rungs": directional_inputs,
@@ -3267,6 +3338,7 @@ def replay_stage_b_regions(
         "structured_boundaries": structured_boundaries,
         "slot_count": slot_count,
         "schema_revision": schema_revision,
+        "combined_selection_projection": combined_projection,
     }
 
 

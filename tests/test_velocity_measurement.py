@@ -2216,3 +2216,98 @@ def test_structured_boundary_reports_longer_tail_without_changing_binding() -> N
     assert boundary is not None
     assert boundary["passing_suffix_mask"] & 0b010
     assert boundary["binding_lag_one_margin_q"] < 0
+
+
+def test_combined_selector_projects_first_bidirectional_band_rung() -> None:
+    from foci_trace.velocity_measurement import project_combined_response_selection
+
+    projection = project_combined_response_selection(
+        [
+            {
+                "p": 724,
+                "forward": [11_000_000, 11_600_000],
+                "reverse": [-11_500_000, -10_900_000],
+                "eligible": [True, True],
+            },
+            {
+                "p": 1_024,
+                "forward": [12_900_000, 13_200_000],
+                "reverse": [-13_100_000, -12_800_000],
+                "eligible": [True, True],
+            },
+            {
+                "p": 1_448,
+                "forward": [14_500_000, 15_000_000],
+                "reverse": [-14_900_000, -14_400_000],
+                "eligible": [True, True],
+            },
+        ],
+        target_rpm=264,
+        encoder_counts_per_rev=4_000,
+    )
+
+    assert projection == {
+        "interpretation": "projected_result_under_combined_selector",
+        "selected_p": 1_024,
+        "selected_intervals": [
+            [12_900_000, 13_200_000],
+            [-13_100_000, -12_800_000],
+        ],
+    }
+
+
+def test_combined_selector_uses_closed_exact_band_endpoints() -> None:
+    from foci_trace.velocity_measurement import project_combined_response_selection
+
+    exact = project_combined_response_selection(
+        [
+            {
+                "p": 1_024,
+                "forward": [12_320_000, 14_080_000],
+                "reverse": [-14_080_000, -12_320_000],
+                "eligible": [True, True],
+            }
+        ],
+        target_rpm=264,
+        encoder_counts_per_rev=4_000,
+    )
+    outside = project_combined_response_selection(
+        [
+            {
+                "p": 1_024,
+                "forward": [12_319_999, 14_080_000],
+                "reverse": [-14_080_000, -12_320_000],
+                "eligible": [True, True],
+            }
+        ],
+        target_rpm=264,
+        encoder_counts_per_rev=4_000,
+    )
+
+    assert exact["selected_p"] == 1_024
+    assert outside["selected_p"] is None
+
+
+@pytest.mark.parametrize(
+    "capture_name",
+    (
+        "foc-183-stepper-y-schema8-stagec7-candidate-abnfix-20260726-144157-20260726-144204.bin",
+        "foc-183-stepper-y-schema8-stagec7-reproduction-abnfix-20260726-145237-20260726-145244.bin",
+    ),
+)
+def test_corrected_y_capture_projects_combined_p_1024(capture_name: str) -> None:
+    from foci_trace.analyze import analyze_capture
+
+    capture = (
+        Path(__file__).resolve().parents[4]
+        / "docs/artifacts/trace-captures/2026-07-20-foc-183-velocity-integral-response"
+        / capture_name
+    )
+    with capture.open("rb") as source:
+        audit = analyze_capture(source).velocity_sweep_audits[0]
+
+    assert audit["matches_firmware"] is True
+    assert audit["stage_b_replay"]["combined_selection_projection"]["interpretation"] == (
+        "projected_result_under_combined_selector"
+    )
+    assert audit["stage_b_replay"]["combined_selection_projection"]["selected_p"] == 1_024
