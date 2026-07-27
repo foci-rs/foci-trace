@@ -210,6 +210,222 @@ def reconstruct_amplitude(
     }
 
 
+def _signed_i32(value: int) -> int:
+    return value - (1 << 32) if value & (1 << 31) else value
+
+
+def _compact_execution_marker(plan: dict[str, Any]) -> bytes:
+    marker = bytearray((0,))
+    _append(marker, int(plan["run_sequence"]), 4)
+    _append(marker, int(plan["plan_digest"]), 8)
+    _append(marker, int(plan["selected_p"]), 2)
+    top_target = max(int(value) for value in plan["target_rpm"])
+    _append(marker, top_target * 1_000 // 60, 4)
+    _append(marker, top_target, 4, signed=True)
+    _append(marker, int(plan["pwm_hz"]), 4)
+    _append(marker, int(plan["selected_i"]), 2)
+    _append(marker, int(plan["amplitude_count"]), 1)
+    _append(marker, int(plan["family_size"]), 2)
+    for name in (
+        "moving_stroke_us",
+        "zero_settle_us",
+        "analysis_budget_us",
+        "maximum_workflow_ms",
+        "recovery_origin_band_counts",
+        "recovery_nominal_slot_us",
+        "recovery_maximum_slot_us",
+    ):
+        _append(marker, int(plan[name]), 4)
+    _append(marker, int(plan["recovery_slot_count"]), 1)
+    _append(marker, int(plan["hard_torque_limit"]), 2)
+    _append(marker, int(plan["usable_torque_limit"]), 2)
+    _append(marker, 1, 1)
+    identity = int(plan["acceptance_plan_digest"])
+    for value in (
+        _signed_i32(identity & 0xFFFF_FFFF),
+        _signed_i32(identity >> 32),
+        int(plan["qualifier_bits"]),
+        0,
+    ):
+        _append(marker, value, 4, signed=True)
+    return bytes(marker)
+
+
+def _compare_fields(
+    expected: dict[str, Any],
+    reported: dict[str, Any],
+    names: tuple[str, ...],
+    mismatches: list[str],
+    prefix: str,
+) -> None:
+    for name in names:
+        if expected.get(name) != reported.get(name):
+            mismatches.append(
+                f"{prefix} {name}: firmware={reported.get(name)!r} offline={expected.get(name)!r}"
+            )
+
+
+def audit_acceptance_matrix(
+    evidence_records: list[tuple[bytes, dict[str, Any]]],
+) -> dict[str, Any]:
+    """Replay one matrix run from canonical records and verify its terminal."""
+    plans = [
+        value
+        for _raw, value in evidence_records
+        if value.get("record_kind") == "acceptance_matrix_plan"
+    ]
+    terminals = [
+        value
+        for _raw, value in evidence_records
+        if value.get("record_kind") == "acceptance_matrix_terminal"
+    ]
+    identities = plans or terminals or [value for _raw, value in evidence_records]
+    if len(plans) != 3 or len(terminals) != 1:
+        return {
+            "run_sequence": int(identities[0].get("run_sequence", 0)) if identities else 0,
+            "plan": None,
+            "terminal": dict(terminals[0]) if len(terminals) == 1 else None,
+            "amplitudes": [],
+            "complete": False,
+            "matches_firmware": False,
+            "mismatches": [
+                "partial acceptance-matrix capture: three plan fragments and one "
+                "terminal are required"
+            ],
+            "caveats": ["partial velocity confidence matrix capture"],
+        }
+    mismatches: list[str] = []
+    plan = assemble_matrix_plan(plans)
+    terminal = terminals[0]
+    recomputed_plan_digest = matrix_plan_digest(plan)
+    if recomputed_plan_digest != int(plan["plan_digest"]):
+        mismatches.append(
+            f"matrix plan digest: firmware=0x{int(plan['plan_digest']):016x} "
+            f"offline=0x{recomputed_plan_digest:016x}"
+        )
+    nonterminal = [
+        (raw, value)
+        for raw, value in evidence_records
+        if value.get("record_kind") not in ("acceptance_matrix_plan", "acceptance_matrix_terminal")
+    ]
+    digest = _fnv1a64(_compact_execution_marker(plan))
+    for raw, _value in nonterminal:
+        digest = _fnv1a64(raw, digest)
+    if digest != int(terminal["digest"]):
+        mismatches.append(
+            f"matrix terminal digest: firmware=0x{int(terminal['digest']):016x} "
+            f"offline=0x{digest:016x}"
+        )
+    observation_records = [
+        value for _raw, value in nonterminal if value.get("record_kind") == "integral_observation"
+    ]
+    amplitude_records = [
+        value
+        for _raw, value in nonterminal
+        if value.get("record_kind") == "acceptance_matrix_amplitude"
+    ]
+    amplitudes: list[dict[str, Any]] = []
+    attempted = [0, 0]
+    eligible = [0, 0]
+    current = [0, 0]
+    for reported in amplitude_records:
+        index = int(reported["amplitude_index"])
+        observations = [value for value in observation_records if int(value["rung_index"]) == index]
+        expected = reconstruct_amplitude(observations, reported, plan)
+        amplitudes.append(expected)
+        bit = 1 << index
+        for direction in range(2):
+            expected_direction = expected["directions"][direction]
+            reported_direction = reported["directions"][direction]
+            _compare_fields(
+                expected_direction,
+                reported_direction,
+                (
+                    "availability",
+                    "classification",
+                    "components",
+                    "component_count",
+                    "collected_mask",
+                    "eligible_mask",
+                    "included_mask",
+                    "signed_target_rate_q",
+                    "response_interval_q",
+                    "robust_location_q",
+                    "deficit_interval_q",
+                    "excluded_mask",
+                    "blocking_levels",
+                ),
+                mismatches,
+                f"amplitude {index} direction {direction}",
+            )
+            attempted[direction] |= bit
+            if int(expected_direction["availability"]) == 0:
+                eligible[direction] |= bit
+            if int(expected_direction["availability"]) == 4:
+                current[direction] |= bit
+    unattempted = [_FULL_AMPLITUDE_MASK & ~mask for mask in attempted]
+    expected_masks = {
+        "attempted_masks": attempted,
+        "eligible_masks": eligible,
+        "current_terminus_masks": current,
+        "unattempted_masks": unattempted,
+    }
+    _compare_fields(
+        expected_masks,
+        terminal,
+        tuple(expected_masks),
+        mismatches,
+        "matrix terminal",
+    )
+    sufficient = all(mask.bit_count() >= 3 for mask in eligible)
+    expected_outcome = 0 if sufficient else 1
+    expected_cause = 0 if sufficient else 1
+    if int(terminal["cause"]) not in (2, 7):
+        _compare_fields(
+            {"outcome": expected_outcome, "cause": expected_cause},
+            terminal,
+            ("outcome", "cause"),
+            mismatches,
+            "matrix terminal",
+        )
+    _compare_fields(
+        {
+            "expected_observations": int(plan["expected_observations"]),
+            "emitted_observations": len(observation_records),
+            "expected_amplitudes": int(plan["amplitude_count"]),
+            "emitted_amplitudes": len(amplitude_records),
+            "acceptance_plan_digest": int(plan["acceptance_plan_digest"]),
+            "plan_digest": int(plan["plan_digest"]),
+            "qualifier_bits": int(plan["qualifier_bits"]),
+        },
+        terminal,
+        (
+            "expected_observations",
+            "emitted_observations",
+            "expected_amplitudes",
+            "emitted_amplitudes",
+            "acceptance_plan_digest",
+            "plan_digest",
+            "qualifier_bits",
+        ),
+        mismatches,
+        "matrix terminal",
+    )
+    return {
+        "run_sequence": int(plan["run_sequence"]),
+        "plan": plan,
+        "terminal": dict(terminal),
+        "amplitudes": amplitudes,
+        "complete": int(terminal["outcome"]) == 0,
+        "matches_firmware": not mismatches,
+        "mismatches": mismatches,
+        "caveats": [
+            "foci-trace matrix replay is a decode-integrity replica, not independent "
+            "selection authority"
+        ],
+    }
+
+
 def _closed_interval_relation(previous: list[int], current: list[int]) -> tuple[bool, int]:
     if previous[1] < current[0]:
         return False, current[0] - previous[1]

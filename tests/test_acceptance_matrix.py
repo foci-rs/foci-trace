@@ -3,7 +3,10 @@ from copy import deepcopy
 import pytest
 
 from foci_trace.acceptance_matrix import (
+    _compact_execution_marker,
+    _fnv1a64,
     assemble_matrix_plan,
+    audit_acceptance_matrix,
     compare_matrix_runs,
     matrix_plan_digest,
     reconstruct_amplitude,
@@ -192,6 +195,94 @@ def test_amplitude_preserves_reverse_sign_and_frozen_target() -> None:
     assert amplitude["directions"][1]["signed_target_rate_q"] == -1_066_666
     assert amplitude["directions"][1]["response_interval_q"] == [-1_000, -900]
     assert amplitude["directions"][1]["deficit_interval_q"] == [-1_065_766, -1_065_666]
+
+
+def test_complete_matrix_audit_reproduces_masks_counts_and_digest() -> None:
+    plan = _plan()
+    plan.update({"run_sequence": 7, "plan_digest": 0})
+    plan["plan_digest"] = matrix_plan_digest(plan)
+    plan_fragments = [
+        (
+            bytes([fragment]),
+            {
+                **plan,
+                "fragment": fragment,
+                "record_kind": "acceptance_matrix_plan",
+            },
+        )
+        for fragment in range(3)
+    ]
+    evidence: list[tuple[bytes, dict[str, object]]] = list(plan_fragments)
+    evidence_sequence = 1
+    for amplitude_index, target_rpm in enumerate(plan["target_rpm"]):
+        observations: list[dict[str, object]] = []
+        for direction in range(2):
+            sign = 1 if direction == 0 else -1
+            for observation_index in range(4):
+                mean = sign * (1_000 + 10 * amplitude_index + observation_index)
+                low, high = sorted((mean - 5, mean + 5))
+                observation = {
+                    "record_kind": "integral_observation",
+                    "run_sequence": 7,
+                    "evidence_sequence": evidence_sequence,
+                    "plan_digest": plan["plan_digest"],
+                    "rung_index": amplitude_index,
+                    "slot": observation_index * 2 + direction,
+                    "direction": direction,
+                    "classification": 0,
+                    "rate_low": low,
+                    "rate_mean": mean,
+                    "rate_high": high,
+                    "selected_level": 4,
+                }
+                raw = bytes((2, evidence_sequence & 0xFF, amplitude_index, direction))
+                evidence.append((raw, observation))
+                observations.append(observation)
+                evidence_sequence += 1
+        reported = {
+            **reconstruct_amplitude(
+                observations,
+                {"amplitude_index": amplitude_index, "target_rpm": target_rpm},
+                plan,
+            ),
+            "record_kind": "acceptance_matrix_amplitude",
+            "run_sequence": 7,
+            "evidence_sequence": evidence_sequence,
+            "plan_digest": plan["plan_digest"],
+        }
+        evidence.append((bytes((2, evidence_sequence & 0xFF, amplitude_index)), reported))
+        evidence_sequence += 1
+    digest = _fnv1a64(_compact_execution_marker(plan))
+    for raw, _record in evidence[3:]:
+        digest = _fnv1a64(raw, digest)
+    terminal = {
+        "record_kind": "acceptance_matrix_terminal",
+        "run_sequence": 7,
+        "evidence_sequence": evidence_sequence,
+        "schema_revision": 1,
+        "acceptance_plan_digest": plan["acceptance_plan_digest"],
+        "plan_digest": plan["plan_digest"],
+        "digest": digest,
+        "outcome": 0,
+        "cause": 0,
+        "attempted_masks": [0b11111, 0b11111],
+        "eligible_masks": [0b11111, 0b11111],
+        "current_terminus_masks": [0, 0],
+        "unattempted_masks": [0, 0],
+        "expected_observations": 40,
+        "emitted_observations": 40,
+        "expected_amplitudes": 5,
+        "emitted_amplitudes": 5,
+        "qualifier_bits": plan["qualifier_bits"],
+    }
+    evidence.append((b"terminal", terminal))
+
+    audit = audit_acceptance_matrix(evidence)
+
+    assert audit["matches_firmware"] is True
+    assert audit["complete"] is True
+    assert audit["mismatches"] == []
+    assert len(audit["amplitudes"]) == 5
 
 
 def _audit(interval: list[int], robust: int, *, attempted: int = 0b11111) -> dict[str, object]:
