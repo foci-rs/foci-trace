@@ -1,0 +1,289 @@
+"""Bit-exact replay and derived comparison for velocity confidence matrices."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from .velocity_integral import depth_three_consensus
+
+_FNV1A64_OFFSET = 0xCBF29CE484222325
+_FNV1A64_PRIME = 0x100000001B3
+_FULL_AMPLITUDE_MASK = 0b1_1111
+_SLOT_TRANSITION_ALLOWANCE_US = 20_000
+
+
+def _fnv1a64(data: bytes, initial: int = _FNV1A64_OFFSET) -> int:
+    value = initial
+    for byte in data:
+        value = ((value ^ byte) * _FNV1A64_PRIME) & 0xFFFF_FFFF_FFFF_FFFF
+    return value
+
+
+def _append(buffer: bytearray, value: int, size: int, *, signed: bool = False) -> None:
+    buffer.extend(value.to_bytes(size, "little", signed=signed))
+
+
+def robust_rate_location(means: list[int | None]) -> int | None:
+    """Return firmware's signed median or inner-pair midpoint."""
+    values = sorted(value for value in means if value is not None)
+    if len(values) == 3:
+        return values[1]
+    if len(values) == 4:
+        difference = values[2] - values[1]
+        half = abs(difference) // 2
+        return values[1] + (-half if difference < 0 else half)
+    return None
+
+
+def matrix_plan_digest(plan: dict[str, Any]) -> int:
+    """Recompute the immutable matrix-plan digest in firmware field order."""
+    encoded = bytearray()
+    fields = (
+        ("schema_revision", 2, False),
+        ("channel", 1, False),
+        ("build_revision", 4, False),
+        ("acceptance_schema_revision", 2, False),
+        ("acceptance_plan_digest", 8, False),
+        ("order", 1, False),
+    )
+    for name, size, signed in fields:
+        _append(encoded, int(plan[name]), size, signed=signed)
+    for target in plan["target_rpm"]:
+        _append(encoded, int(target), 2, signed=True)
+    for name, size in (
+        ("selected_p", 2),
+        ("selected_i", 2),
+        ("qualifier_bits", 2),
+        ("pwm_hz", 4),
+        ("encoder_counts_per_rev", 4),
+        ("amplitude_count", 1),
+        ("expected_observations", 2),
+        ("family_size", 2),
+        ("moving_stroke_us", 4),
+        ("zero_settle_us", 4),
+        ("analysis_budget_us", 4),
+    ):
+        _append(encoded, int(plan[name]), size)
+    _append(encoded, _SLOT_TRANSITION_ALLOWANCE_US, 4)
+    for name, size in (
+        ("nominal_workflow_ms", 4),
+        ("maximum_workflow_ms", 4),
+        ("recovery_origin_band_counts", 4),
+        ("recovery_nominal_slot_us", 4),
+        ("recovery_maximum_slot_us", 4),
+        ("recovery_slot_count", 1),
+        ("hard_torque_limit", 2),
+        ("usable_torque_limit", 2),
+        ("limit_evidence_capability", 1),
+        ("recovery_quantization_exposed", 1),
+        ("probe_constrained_test_point", 1),
+        ("requested_velocity_mrev_s", 4),
+        ("machine_velocity_ceiling_mrev_s", 4),
+        ("requested_velocity_source", 1),
+        ("max_stroke_travel_mrev", 4),
+        ("settle_travel_reserve_mrev", 4),
+        ("negative_position_headroom_mrev", 4),
+        ("positive_position_headroom_mrev", 4),
+        ("max_duration_ms", 2),
+    ):
+        _append(encoded, int(plan[name]), size)
+    return _fnv1a64(bytes(encoded))
+
+
+def assemble_matrix_plan(fragments: list[dict[str, Any]]) -> dict[str, Any]:
+    """Join the three exact plan fragments and reject identity disagreement."""
+    if sorted(int(fragment["fragment"]) for fragment in fragments) != [0, 1, 2]:
+        raise ValueError("matrix plan requires fragments 0, 1, and 2 exactly once")
+    ordered = sorted(fragments, key=lambda fragment: int(fragment["fragment"]))
+    identity = ("run_sequence", "plan_digest")
+    if any(
+        any(fragment[name] != ordered[0][name] for name in identity) for fragment in ordered[1:]
+    ):
+        raise ValueError("matrix plan fragments disagree on identity")
+    plan: dict[str, Any] = {}
+    for fragment in ordered:
+        plan.update(fragment)
+    plan["record_kind"] = "acceptance_matrix_plan"
+    plan["fragment"] = None
+    return plan
+
+
+def reconstruct_direction(
+    observations: list[dict[str, Any]],
+    *,
+    signed_target_rate_q: int,
+    precision_floor_candidate: bool,
+) -> dict[str, Any]:
+    """Fold one direction's four intrinsic observation records."""
+    by_index: dict[int, dict[str, Any]] = {}
+    for observation in observations:
+        index = int(observation["slot"]) // 2
+        if index in by_index or not 0 <= index < 4:
+            raise ValueError("matrix direction has duplicate or invalid observation slot")
+        by_index[index] = observation
+    collected_mask = sum(1 << index for index in by_index)
+    classes = [
+        int(by_index[index]["classification"]) if index in by_index else None for index in range(4)
+    ]
+    intervals = [
+        (
+            int(by_index[index]["rate_low"]),
+            int(by_index[index]["rate_high"]),
+        )
+        if index in by_index and classes[index] == 0
+        else None
+        for index in range(4)
+    ]
+    consensus = depth_three_consensus(intervals, collected_mask=collected_mask)
+    fault = any(value in (9, 10, 11) for value in classes if value is not None)
+    current = 3 in classes
+    classification = int(consensus["classification"])
+    availability = (
+        5
+        if fault
+        else 4
+        if current
+        else 0
+        if classification == 0
+        else 2
+        if classification == 1
+        else 1
+        if precision_floor_candidate
+        else 3
+    )
+    response = list(consensus["components"][0]) if availability == 0 else None
+    means = [
+        int(by_index[index]["rate_mean"]) if index in by_index and classes[index] == 0 else None
+        for index in range(4)
+    ]
+    deficit = (
+        [signed_target_rate_q - response[1], signed_target_rate_q - response[0]]
+        if response is not None
+        else None
+    )
+    eligible_mask = int(consensus["usable_mask"])
+    included_mask = int(consensus["included_mask"])
+    return {
+        "availability": availability,
+        "classification": classification,
+        "components": [list(component) for component in consensus["components"]],
+        "component_count": len(consensus["components"]),
+        "collected_mask": collected_mask,
+        "eligible_mask": eligible_mask,
+        "included_mask": included_mask,
+        "signed_target_rate_q": signed_target_rate_q,
+        "response_interval_q": response,
+        "robust_location_q": robust_rate_location(means),
+        "deficit_interval_q": deficit,
+        "excluded_mask": eligible_mask & ~included_mask,
+        "blocking_levels": [
+            int(by_index[index].get("selected_level", 0)) if index in by_index else 0
+            for index in range(4)
+        ],
+    }
+
+
+def reconstruct_amplitude(
+    observations: list[dict[str, Any]],
+    report: dict[str, Any],
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    """Reconstruct both directional folds for one emitted amplitude."""
+    amplitude_index = int(report["amplitude_index"])
+    target_rpm = int(report["target_rpm"])
+    expected_target = int(plan["target_rpm"][amplitude_index])
+    if target_rpm != expected_target:
+        raise ValueError("matrix amplitude target differs from immutable plan")
+    target_rate_q = target_rpm * int(plan["encoder_counts_per_rev"]) * 1_000 // 60
+    precision_floor = target_rpm == min(int(value) for value in plan["target_rpm"])
+    return {
+        "amplitude_index": amplitude_index,
+        "target_rpm": target_rpm,
+        "directions": [
+            reconstruct_direction(
+                [value for value in observations if int(value["direction"]) == direction],
+                signed_target_rate_q=target_rate_q if direction == 0 else -target_rate_q,
+                precision_floor_candidate=precision_floor,
+            )
+            for direction in range(2)
+        ],
+    }
+
+
+def _closed_interval_relation(previous: list[int], current: list[int]) -> tuple[bool, int]:
+    if previous[1] < current[0]:
+        return False, current[0] - previous[1]
+    if current[1] < previous[0]:
+        return False, current[1] - previous[0]
+    return True, 0
+
+
+def compare_matrix_runs(previous: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+    """Compare two fixed plans without converting observed spread into tolerance."""
+    comparisons = []
+    observed_bound = 0
+    previous_by_index = {
+        int(amplitude["amplitude_index"]): amplitude for amplitude in previous["amplitudes"]
+    }
+    current_by_index = {
+        int(amplitude["amplitude_index"]): amplitude for amplitude in current["amplitudes"]
+    }
+    for amplitude_index in range(5):
+        for direction in range(2):
+            previous_attempted = bool(
+                int(previous["terminal"]["attempted_masks"][direction]) & (1 << amplitude_index)
+            )
+            current_attempted = bool(
+                int(current["terminal"]["attempted_masks"][direction]) & (1 << amplitude_index)
+            )
+            left = previous_by_index.get(amplitude_index)
+            right = current_by_index.get(amplitude_index)
+            left_direction = left["directions"][direction] if left is not None else None
+            right_direction = right["directions"][direction] if right is not None else None
+            if previous_attempted != current_attempted:
+                comparison = {"kind": "AttemptCoverageMismatch"}
+            elif (
+                left_direction is None
+                or right_direction is None
+                or int(left_direction["availability"]) != 0
+                or int(right_direction["availability"]) != 0
+            ):
+                comparison = {"kind": "EligibilityMismatch"}
+            else:
+                left_interval = list(left_direction["response_interval_q"])
+                right_interval = list(right_direction["response_interval_q"])
+                overlap, gap = _closed_interval_relation(left_interval, right_interval)
+                displacement = int(right_direction["robust_location_q"]) - int(
+                    left_direction["robust_location_q"]
+                )
+                observed_bound = max(observed_bound, abs(displacement))
+                comparison = {
+                    "kind": "PairedPrecision",
+                    "previous_interval_q": left_interval,
+                    "current_interval_q": right_interval,
+                    "widths_q": [
+                        left_interval[1] - left_interval[0],
+                        right_interval[1] - right_interval[0],
+                    ],
+                    "overlap": overlap,
+                    "signed_gap_q": gap,
+                    "robust_displacement_q": displacement,
+                    "response_ratios": [
+                        int(left_direction["robust_location_q"])
+                        / int(left_direction["signed_target_rate_q"]),
+                        int(right_direction["robust_location_q"])
+                        / int(right_direction["signed_target_rate_q"]),
+                    ],
+                }
+            comparisons.append(
+                {
+                    "amplitude_index": amplitude_index,
+                    "direction": direction,
+                    **comparison,
+                }
+            )
+    return {
+        "comparisons": comparisons,
+        "maximum_observed_displacement_q": observed_bound,
+        "maximum_displacement_kind": "observed_bound",
+    }
