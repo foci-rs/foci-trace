@@ -23,6 +23,7 @@ from .commissioning import (
     commissioning_report_to_json,
     format_commissioning_report,
 )
+from .acceptance_matrix import audit_acceptance_matrix, compare_matrix_runs
 from .contour import (
     ContourSegmentReport,
     MotorSample,
@@ -333,6 +334,7 @@ class CaptureAnalysis:
     velocity_reports: list[VelocityCaptureGroup] = field(default_factory=list)
     velocity_sweep_audits: list[dict[str, object]] = field(default_factory=list)
     velocity_integral_audits: list[dict[str, object]] = field(default_factory=list)
+    acceptance_matrix_audits: list[dict[str, object]] = field(default_factory=list)
     outer_safety_timing_audits: list[dict[str, object]] = field(default_factory=list)
     corexy_plus: str | None = None
     corexy_minus: str | None = None
@@ -1931,6 +1933,7 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                 int(item.payload["run_sequence"])
                 for item in state.velocity_sweep_evidence
                 if "run_sequence" in item.payload
+                and item.payload.get("namespace") != "acceptance_matrix"
                 and item.payload.get("record_kind") != "outer_safety_timing"
                 and (
                     item.payload.get("record_kind") != "rung_origin_recovery"
@@ -1947,6 +1950,7 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                 item
                 for item in state.velocity_sweep_evidence
                 if int(item.payload.get("run_sequence", -1)) == run_sequence
+                and item.payload.get("namespace") != "acceptance_matrix"
                 and item.payload.get("record_kind") != "outer_safety_timing"
                 and (
                     not str(item.payload.get("record_kind", "")).startswith("integral_")
@@ -2008,6 +2012,12 @@ def _velocity_integral_audits(states: dict[int, _DeviceState]) -> list[dict[str,
     audits: list[dict[str, object]] = []
     retained_candidates: dict[tuple[int, int], dict[str, object]] = {}
     for device_index, state in sorted(states.items()):
+        matrix_runs = {
+            int(item.payload["run_sequence"])
+            for item in state.velocity_sweep_evidence
+            if item.payload.get("namespace") == "acceptance_matrix"
+            and "run_sequence" in item.payload
+        }
         run_sequences = sorted(
             {
                 int(item.payload["run_sequence"])
@@ -2024,6 +2034,7 @@ def _velocity_integral_audits(states: dict[int, _DeviceState]) -> list[dict[str,
                     )
                 )
                 and "run_sequence" in item.payload
+                and int(item.payload["run_sequence"]) not in matrix_runs
             }
         )
         for run_sequence in run_sequences:
@@ -2079,6 +2090,74 @@ def _velocity_integral_audits(states: dict[int, _DeviceState]) -> list[dict[str,
                     retained_candidates[candidate_key] = report
                 elif outcome != 4:
                     retained_candidates.pop(candidate_key, None)
+            audits.append(report)
+    return audits
+
+
+def _acceptance_matrix_audits(states: dict[int, _DeviceState]) -> list[dict[str, object]]:
+    audits: list[dict[str, object]] = []
+    ascending: dict[tuple[int, int], dict[str, object]] = {}
+    for device_index, state in sorted(states.items()):
+        run_sequences = sorted(
+            {
+                int(item.payload["run_sequence"])
+                for item in state.velocity_sweep_evidence
+                if item.payload.get("record_kind") == "acceptance_matrix_plan"
+            }
+        )
+        for run_sequence in run_sequences:
+            matrix_records = [
+                item
+                for item in state.velocity_sweep_evidence
+                if int(item.payload.get("run_sequence", -1)) == run_sequence
+                and item.payload.get("namespace") == "acceptance_matrix"
+            ]
+            if not matrix_records:
+                continue
+            source_indexes = {item.source_index for item in matrix_records}
+            if len(source_indexes) != 1:
+                raise ValueError("acceptance-matrix evidence changed source index")
+            source_index = next(iter(source_indexes))
+            start = min(item.timestamp_ticks for item in matrix_records)
+            end = max(item.timestamp_ticks for item in matrix_records)
+            evidence = [
+                item
+                for item in state.velocity_sweep_evidence
+                if item.source_index == source_index
+                and start <= item.timestamp_ticks <= end
+                and int(item.payload.get("run_sequence", -1)) == run_sequence
+                and item.payload.get("record_kind") != "outer_safety_timing"
+            ]
+            report = audit_acceptance_matrix(
+                [(item.raw_payload, item.payload) for item in evidence]
+            )
+            report["device_index"] = device_index
+            report["source_index"] = source_index
+            report["serial"] = state.report.serial or state.report.metadata_serial
+            plan = report.get("plan")
+            terminal = report.get("terminal")
+            key = (device_index, source_index)
+            if isinstance(plan, dict) and isinstance(terminal, dict):
+                order = int(plan.get("order", 0))
+                outcome = int(terminal.get("outcome", -1))
+                if order == 1 and outcome == 0:
+                    ascending[key] = report
+                elif order == 2 and outcome == 0:
+                    previous = ascending.pop(key, None)
+                    if previous is not None:
+                        previous_plan = previous.get("plan")
+                        if (
+                            isinstance(previous_plan, dict)
+                            and previous_plan.get("acceptance_plan_digest")
+                            == plan.get("acceptance_plan_digest")
+                            and previous_plan.get("selected_p") == plan.get("selected_p")
+                            and previous_plan.get("selected_i") == plan.get("selected_i")
+                        ):
+                            report["cross_run_comparison"] = compare_matrix_runs(previous, report)
+                        else:
+                            report["cross_run_comparison"] = {
+                                "error": "matrix runs do not share retained authority"
+                            }
             audits.append(report)
     return audits
 
@@ -2326,6 +2405,7 @@ def analyze_capture(
         velocity_reports=_velocity_capture_groups(states, commissioning_report),
         velocity_sweep_audits=_velocity_sweep_audits(states),
         velocity_integral_audits=_velocity_integral_audits(states),
+        acceptance_matrix_audits=_acceptance_matrix_audits(states),
         outer_safety_timing_audits=_outer_safety_timing_audits(states),
         corexy_plus=corexy_plus,
         corexy_minus=corexy_minus,
@@ -2771,6 +2851,28 @@ def format_analysis(
                 matches=str(bool(integral.get("matches_firmware"))).lower(),
             )
         )
+    for matrix in analysis.acceptance_matrix_audits:
+        plan = matrix.get("plan", {})
+        terminal = matrix.get("terminal", {})
+        comparison = matrix.get("cross_run_comparison", {})
+        stage_b_lines.append(
+            "acceptance_matrix dev={device} source={source} run={run} namespace=matrix "
+            "order={order} outcome={outcome} cause={cause} p={p} i={i} "
+            "matches_firmware={matches} observed_bound_q={bound}".format(
+                device=matrix.get("device_index", "?"),
+                source=matrix.get("source_index", "?"),
+                run=matrix.get("run_sequence", "?"),
+                order=plan.get("order", "?") if isinstance(plan, dict) else "?",
+                outcome=terminal.get("outcome_name", "?") if isinstance(terminal, dict) else "?",
+                cause=terminal.get("cause_name", "?") if isinstance(terminal, dict) else "?",
+                p=plan.get("selected_p", 0) if isinstance(plan, dict) else 0,
+                i=plan.get("selected_i", 0) if isinstance(plan, dict) else 0,
+                matches=str(bool(matrix.get("matches_firmware"))).lower(),
+                bound=comparison.get("maximum_observed_displacement_q", "unpaired")
+                if isinstance(comparison, dict)
+                else "unpaired",
+            )
+        )
     for timing in analysis.outer_safety_timing_audits:
         stage_b_lines.append(
             "outer_safety_timing dev={device} source={source} engine={engine} "
@@ -2917,6 +3019,8 @@ def velocity_analysis_to_json(analysis: CaptureAnalysis) -> dict[str, object]:
     }
     if analysis.velocity_integral_audits:
         result["integral_responses"] = analysis.velocity_integral_audits
+    if analysis.acceptance_matrix_audits:
+        result["acceptance_matrices"] = analysis.acceptance_matrix_audits
     return result
 
 

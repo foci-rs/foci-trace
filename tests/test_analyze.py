@@ -2558,6 +2558,37 @@ def test_velocity_integral_audit_is_added_only_when_present() -> None:
     assert "rest_boundary={'positive_rung_index': 3, 'slot': 5}" in format_analysis(analysis)
 
 
+def test_acceptance_matrix_audit_keeps_its_namespace_in_output() -> None:
+    empty = velocity_analysis_to_json(CaptureAnalysis(devices=[]))
+    audit = {
+        "device_index": 0,
+        "source_index": 1,
+        "run_sequence": 9,
+        "matches_firmware": True,
+        "plan": {"order": 2, "selected_p": 1_024, "selected_i": 1_024},
+        "terminal": {
+            "outcome": 0,
+            "cause": 0,
+            "outcome_name": "Complete",
+            "cause_name": "None",
+        },
+        "cross_run_comparison": {
+            "maximum_observed_displacement_q": 35,
+            "maximum_displacement_kind": "observed_bound",
+        },
+    }
+    analysis = CaptureAnalysis(devices=[], acceptance_matrix_audits=[audit])
+
+    encoded = velocity_analysis_to_json(analysis)
+    rendered = format_analysis(analysis)
+
+    assert "acceptance_matrices" not in empty
+    assert encoded["acceptance_matrices"] == [audit]
+    assert "namespace=matrix" in rendered
+    assert "outcome=Complete cause=None" in rendered
+    assert "observed_bound_q=35" in rendered
+
+
 def test_recovery_records_route_to_their_owning_stage(monkeypatch) -> None:
     import foci_trace.analyze as analyze
 
@@ -2604,3 +2635,62 @@ def test_recovery_records_route_to_their_owning_stage(monkeypatch) -> None:
         "integral_rest_boundary",
         "integral_terminal",
     ]
+
+
+def test_matrix_records_bypass_stage_b_and_stage_c_replay(monkeypatch) -> None:
+    import foci_trace.analyze as analyze
+
+    state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
+    payloads = (
+        {
+            "namespace": "acceptance_matrix",
+            "record_kind": "acceptance_matrix_plan",
+            "run_sequence": 9,
+            "fragment": 0,
+        },
+        {"record_kind": "integral_observation", "run_sequence": 9},
+        {
+            "namespace": "acceptance_matrix",
+            "record_kind": "acceptance_matrix_amplitude",
+            "run_sequence": 9,
+        },
+        {
+            "namespace": "acceptance_matrix",
+            "record_kind": "acceptance_matrix_terminal",
+            "run_sequence": 9,
+        },
+    )
+    state.velocity_sweep_evidence = [
+        analyze._VelocitySweepEvidenceFrame(index, 0, bytes((index,)), payload)
+        for index, payload in enumerate(payloads, 1)
+    ]
+    called = {"stage_b": False, "stage_c": False, "matrix": False}
+
+    monkeypatch.setattr(
+        analyze,
+        "audit_velocity_sweep",
+        lambda *_args: called.update(stage_b=True),
+    )
+    monkeypatch.setattr(
+        analyze,
+        "audit_velocity_integral",
+        lambda *_args: called.update(stage_c=True),
+    )
+
+    def matrix(records):
+        called["matrix"] = True
+        assert [value["record_kind"] for _raw, value in records] == [
+            "acceptance_matrix_plan",
+            "integral_observation",
+            "acceptance_matrix_amplitude",
+            "acceptance_matrix_terminal",
+        ]
+        return {"plan": None, "terminal": None}
+
+    monkeypatch.setattr(analyze, "audit_acceptance_matrix", matrix)
+
+    analyze._velocity_sweep_audits({0: state})
+    analyze._velocity_integral_audits({0: state})
+    analyze._acceptance_matrix_audits({0: state})
+
+    assert called == {"stage_b": False, "stage_c": False, "matrix": True}
