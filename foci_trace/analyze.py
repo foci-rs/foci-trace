@@ -1981,6 +1981,23 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                 raw,
                 [(item.raw_payload, item.payload) for item in evidence],
             )
+            companion_stage_c = next(
+                (
+                    item.payload
+                    for item in state.velocity_sweep_evidence
+                    if item.source_index == source_index
+                    and int(item.payload.get("run_sequence", -1)) == run_sequence
+                    and item.payload.get("record_kind") == "integral_plan_core"
+                ),
+                None,
+            )
+            replay = report.get("stage_b_replay")
+            if (
+                isinstance(companion_stage_c, dict)
+                and int(companion_stage_c.get("schema_revision", 0)) == 10
+                and isinstance(replay, dict)
+            ):
+                replay["schema_revision"] = 10
             report["device_index"] = device_index
             report["source_index"] = source_index
             report["serial"] = state.report.serial or state.report.metadata_serial

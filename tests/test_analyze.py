@@ -2694,3 +2694,34 @@ def test_matrix_records_bypass_stage_b_and_stage_c_replay(monkeypatch) -> None:
     analyze._acceptance_matrix_audits({0: state})
 
     assert called == {"stage_b": False, "stage_c": False, "matrix": True}
+
+
+def test_stage_b_schema_ten_is_bound_by_its_companion_stage_c_plan(monkeypatch) -> None:
+    import foci_trace.analyze as analyze
+
+    state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
+    payloads = (
+        {"record_kind": "plan", "run_sequence": 9},
+        {"record_kind": "stage_b_terminal", "run_sequence": 9},
+        {
+            "record_kind": "integral_plan_core",
+            "run_sequence": 9,
+            "schema_revision": 10,
+        },
+    )
+    state.velocity_sweep_evidence = [
+        analyze._VelocitySweepEvidenceFrame(index, 0, bytes((index,)), payload)
+        for index, payload in enumerate(payloads, 1)
+    ]
+    monkeypatch.setattr(
+        analyze,
+        "audit_velocity_sweep",
+        lambda *_args: {
+            "stage_b_replay": {"schema_revision": 9},
+            "terminal": {"outcome": 3, "cause": 0},
+        },
+    )
+
+    audit = analyze._velocity_sweep_audits({0: state})[0]
+
+    assert audit["stage_b_replay"]["schema_revision"] == 10

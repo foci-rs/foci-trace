@@ -913,8 +913,11 @@ def test_schema_eight_combined_run_completes_without_reproduction() -> None:
     assert audit["terminal"]["target_status"] == 3
 
 
-def test_schema_nine_replays_response_horizons_and_transition_allowance() -> None:
-    raw, records = _synthetic_complete_capture(schema_revision=9)
+@pytest.mark.parametrize("schema_revision", [9, 10])
+def test_current_combined_schemas_replay_response_horizons_and_transition_allowance(
+    schema_revision: int,
+) -> None:
+    raw, records = _synthetic_complete_capture(schema_revision=schema_revision)
 
     audit = audit_velocity_integral(raw, records)
 
@@ -1578,7 +1581,7 @@ def test_schema_four_sufficiency_requires_both_closing_bookends() -> None:
     assert _stage_c_run_sufficient(3, opening, [None, None], masks) is True
 
 
-@pytest.mark.parametrize("schema_revision", [0, 10])
+@pytest.mark.parametrize("schema_revision", [0, 11])
 def test_integral_ladder_rejects_unsupported_schema(schema_revision: int) -> None:
     with pytest.raises(ValueError, match="unsupported Stage-C evidence schema"):
         derive_integral_ladder(
