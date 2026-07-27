@@ -48,6 +48,11 @@ class DeviceSummary:
     velocity_integral_probe_constrained_test_point: bool = False
     velocity_integral_bookend_mask: int | None = None
     velocity_integral_rest_boundary: tuple[int, int] | None = None
+    acceptance_matrix_p: int = 0
+    acceptance_matrix_i: int = 0
+    acceptance_matrix_amplitudes: int = 0
+    acceptance_matrix_outcome: int | None = None
+    acceptance_matrix_cause: int | None = None
     rung_origin_recoveries: int = 0
     contained_recoveries: int = 0
     outer_gap_max_us: int | None = None
@@ -151,6 +156,14 @@ class LiveSummary:
                     int(frame.payload["positive_rung_index"]),
                     int(frame.payload["slot"]),
                 )
+            elif kind == "acceptance_matrix_plan" and int(frame.payload["fragment"]) == 0:
+                device.acceptance_matrix_p = int(frame.payload["selected_p"])
+                device.acceptance_matrix_i = int(frame.payload["selected_i"])
+            elif kind == "acceptance_matrix_amplitude":
+                device.acceptance_matrix_amplitudes += 1
+            elif kind == "acceptance_matrix_terminal":
+                device.acceptance_matrix_outcome = int(frame.payload["outcome"])
+                device.acceptance_matrix_cause = int(frame.payload["cause"])
             elif kind == "rung_origin_recovery":
                 device.rung_origin_recoveries += 1
                 if int(frame.payload["outcome"]) >= 2:
@@ -189,6 +202,10 @@ class LiveSummary:
                 "velocity_integral_probe_constrained={integral_probe_constrained} "
                 "velocity_integral_bookends={integral_bookends} "
                 "velocity_integral_rest_boundary={integral_rest_boundary} "
+                "acceptance_matrix_p={matrix_p} acceptance_matrix_i={matrix_i} "
+                "acceptance_matrix_amplitudes={matrix_amplitudes} "
+                "acceptance_matrix_outcome={matrix_outcome} "
+                "acceptance_matrix_cause={matrix_cause} "
                 "recoveries={recoveries} contained_recoveries={contained_recoveries} "
                 "current_records={current_records} current_contacts={current_contacts} "
                 "clip_uncertain={clip_uncertain}".format(
@@ -246,6 +263,19 @@ class LiveSummary:
                         "none"
                         if item.velocity_integral_rest_boundary is None
                         else ":".join(str(value) for value in item.velocity_integral_rest_boundary)
+                    ),
+                    matrix_p=item.acceptance_matrix_p,
+                    matrix_i=item.acceptance_matrix_i,
+                    matrix_amplitudes=item.acceptance_matrix_amplitudes,
+                    matrix_outcome=(
+                        "none"
+                        if item.acceptance_matrix_outcome is None
+                        else item.acceptance_matrix_outcome
+                    ),
+                    matrix_cause=(
+                        "none"
+                        if item.acceptance_matrix_cause is None
+                        else item.acceptance_matrix_cause
                     ),
                     recoveries=item.rung_origin_recoveries,
                     contained_recoveries=item.contained_recoveries,

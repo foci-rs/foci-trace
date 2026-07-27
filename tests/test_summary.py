@@ -135,6 +135,50 @@ def test_summary_tracks_velocity_integral_rungs_and_terminal() -> None:
     assert "velocity_integral_rest_boundary=3:5" in text
 
 
+def test_summary_namespaces_velocity_confidence_matrix_status() -> None:
+    summary = LiveSummary()
+    payloads = (
+        {
+            "record_kind": "acceptance_matrix_plan",
+            "fragment": 0,
+            "selected_p": 1_024,
+            "selected_i": 1_024,
+        },
+        {"record_kind": "acceptance_matrix_amplitude"},
+        {"record_kind": "acceptance_matrix_amplitude"},
+        {"record_kind": "acceptance_matrix_terminal", "outcome": 1, "cause": 2},
+    )
+    for sequence, payload in enumerate(payloads, 1):
+        summary.observe(
+            0,
+            sequence,
+            Frame(
+                header=FrameHeader(
+                    9,
+                    32,
+                    FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
+                    0,
+                    0,
+                    1,
+                    0,
+                    sequence,
+                    sequence,
+                    1,
+                ),
+                payload=payload,
+                raw_payload=b"",
+            ),
+        )
+
+    text = summary.render()
+
+    assert "acceptance_matrix_p=1024" in text
+    assert "acceptance_matrix_i=1024" in text
+    assert "acceptance_matrix_amplitudes=2" in text
+    assert "acceptance_matrix_outcome=1" in text
+    assert "acceptance_matrix_cause=2" in text
+
+
 def test_summary_tracks_successful_and_contained_recoveries() -> None:
     summary = LiveSummary()
     for sequence, outcome in enumerate((0, 1, 2, 3), 1):
