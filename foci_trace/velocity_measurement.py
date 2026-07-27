@@ -2554,6 +2554,8 @@ def _stage_b_record_identity(value: dict[str, object]) -> tuple[object, ...]:
 
 def _stage_b_replay_expects_handoff(replay: dict[str, object]) -> bool:
     """Return whether the schema emits the full directional handoff record."""
+    if bool(replay.get("combined_response_selected", False)):
+        return False
     sufficient = bool(replay.get("sufficient", replay.get("nomination")))
     return sufficient and (
         int(replay.get("schema_revision", 7)) < 8
@@ -2590,7 +2592,7 @@ def _compare_stage_b_causal_order(
     joint_at_end: list[tuple[object, ...]] = []
     for region in replay["joint_regions"]:
         token = ("joint_region", int(region["member_mask"]))
-        if region["closure"] == "end_of_ladder":
+        if region["closure"] in ("end_of_ladder", "response_selected"):
             joint_at_end.append(token)
         elif region["closure"] == "current_headroom":
             causal_boundary = region.get("causal_boundary_rung")
@@ -3086,8 +3088,21 @@ def replay_stage_b_regions(
     if len(plans) != 1 or len(terminals) != 1:
         raise ValueError("one plan and one terminal are required for Stage B replay")
     plan, terminal = plans[0], terminals[0]
+    combined_response_selected = (
+        int(terminal.get("outcome", STAGE_B_OUTCOME_INCONCLUSIVE)) == STAGE_B_OUTCOME_COMPLETE
+        and any(
+            value["record_kind"] == "directional_region" and int(value["closure"]) == 5
+            for _raw, value in evidence_records
+        )
+        and any(
+            value["record_kind"] == "joint_region" and int(value["closure"]) == 4
+            for _raw, value in evidence_records
+        )
+    )
     schema_revision = (
-        8
+        9
+        if combined_response_selected
+        else 8
         if any(
             value["record_kind"] == "reproduction_v4"
             or value["record_kind"] == "handoff"
@@ -3209,6 +3224,8 @@ def replay_stage_b_regions(
         current_records=current_records,
         completed_rungs=completed_rungs,
     )
+    if combined_response_selected and terminal_closure == "end_of_ladder":
+        terminal_closure = "response_selected"
     partial_current_rungs = sorted(
         {
             *observation_current_rungs,
@@ -3338,6 +3355,7 @@ def replay_stage_b_regions(
         "structured_boundaries": structured_boundaries,
         "slot_count": slot_count,
         "schema_revision": schema_revision,
+        "combined_response_selected": combined_response_selected,
         "combined_selection_projection": combined_projection,
     }
 
@@ -3777,6 +3795,7 @@ def _audit_stage_b_velocity_sweep(
         "current_headroom": 2,
         "safety_terminus": 3,
         "end_of_ladder": 4,
+        "response_selected": 5,
     }
     expected_regions = {
         (direction, int(region["member_mask"])): region
@@ -3832,6 +3851,7 @@ def _audit_stage_b_velocity_sweep(
         "current_headroom": 1,
         "safety_terminus": 2,
         "end_of_ladder": 3,
+        "response_selected": 4,
     }
     expected_joint = {int(region["member_mask"]): region for region in replay["joint_regions"]}
     for record in (
@@ -3916,7 +3936,27 @@ def _audit_stage_b_velocity_sweep(
         if any(region["kind"] == "valid" for region in regions)
     )
     candidate_schema_revision = int(replay["schema_revision"])
-    if replay["sufficient"]:
+    combined_response_selected = bool(replay["combined_response_selected"])
+    if combined_response_selected:
+        projection = replay["combined_selection_projection"]
+        if projection["selected_p"] is None:
+            mismatches.append("response-selected terminal has no independent selected response")
+            expected_memberships = [0, 0, 0]
+            expected_intervals = [[0, 0], [0, 0]]
+            expected_nominated_p = 0
+        else:
+            expected_memberships = _candidate_terminal_memberships(
+                replay,
+                candidate_schema_revision,
+            )
+            expected_intervals = [list(interval) for interval in projection["selected_intervals"]]
+            expected_nominated_p = int(projection["selected_p"])
+        expected_coverage_mask = sum(
+            (1 << index)
+            for index, item in enumerate(replay["selected"])
+            if item.get("coverage") == "full"
+        )
+    elif replay["sufficient"]:
         expected_memberships = _candidate_terminal_memberships(
             replay,
             candidate_schema_revision,
@@ -4013,7 +4053,11 @@ def _audit_stage_b_velocity_sweep(
         for _raw, value in logical_nonterminal
         if value["record_kind"] in ("reproduction", "reproduction_v3", "reproduction_v4")
     ]
-    if int(terminal["outcome"]) == 1 and len(reproduction) != 1:
+    if (
+        int(terminal["outcome"]) == STAGE_B_OUTCOME_COMPLETE
+        and not combined_response_selected
+        and len(reproduction) != 1
+    ):
         mismatches.append("complete Stage B terminal lacks one reproduction record")
     if len(reproduction) > 1:
         mismatches.append(f"expected at most one reproduction record, found {len(reproduction)}")

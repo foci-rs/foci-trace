@@ -2311,3 +2311,25 @@ def test_corrected_y_capture_projects_combined_p_1024(capture_name: str) -> None
         "projected_result_under_combined_selector"
     )
     assert audit["stage_b_replay"]["combined_selection_projection"]["selected_p"] == 1_024
+
+
+def test_schema_nine_combined_capture_replays_response_selected_stage_b() -> None:
+    from foci_trace.analyze import analyze_capture
+
+    capture = (
+        Path(__file__).resolve().parents[4]
+        / "docs/artifacts/trace-captures/2026-07-26-foc-183-an053-combined"
+        / "foc183-y-combined-schema9-stagec8-20260726-200611.complete.bin"
+    )
+    with capture.open("rb") as source:
+        result = analyze_capture(source)
+
+    stage_b = result.velocity_sweep_audits[0]
+    stage_c = result.velocity_integral_audits[0]
+    assert stage_b["matches_firmware"] is True
+    assert stage_b["stage_b_replay"]["schema_revision"] == 9
+    assert stage_b["stage_b_replay"]["combined_response_selected"] is True
+    assert stage_b["nominated_p"] == 1_024
+    assert stage_c["matches_firmware"] is True
+    assert stage_c["plan"]["combined_selected_response"] is True
+    assert stage_c["terminal"]["cause"] == 47

@@ -455,6 +455,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         if len(payload) == 82:
             if cursor.take("B") != 1:
                 raise DecodeError("combined integral plan marker is invalid")
+            decoded["combined_selected_response"] = True
             decoded["selected_response_intervals_q"] = [
                 [cursor.take("i"), cursor.take("i")] for _ in range(2)
             ]
@@ -518,6 +519,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             if decoded["schema_revision"] >= 8:
                 if cursor.take("B") != 1:
                     raise DecodeError("combined integral plan core is invalid")
+                decoded["combined_selected_response"] = True
                 decoded["selected_response_intervals_q"] = [
                     [cursor.take("i"), cursor.take("i")] for _ in range(2)
                 ]

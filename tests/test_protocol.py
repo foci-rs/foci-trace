@@ -1390,6 +1390,7 @@ def test_decodes_schema_eight_compact_plan_response_intervals() -> None:
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
 
     assert frame.payload["record_kind"] == "integral_plan_marker"
+    assert frame.payload["combined_selected_response"] is True
     assert frame.payload["selected_response_intervals_q"] == [
         [12_900_000, 13_200_000],
         [-13_100_000, -12_800_000],
