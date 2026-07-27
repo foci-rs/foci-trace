@@ -347,7 +347,10 @@ def audit_rung_origin_recovery(
 ) -> dict[str, object]:
     """Audit one emitted recovery summary against its authoritative plan geometry."""
     mismatches: list[str] = []
-    planned_velocity = int(plan["planned_velocity_mrev_s"])
+    if int(plan.get("schema_revision", 0)) >= 10:
+        planned_velocity = abs(int(plan["target_velocity_rpm"])) * 1_000 // 60
+    else:
+        planned_velocity = int(plan["planned_velocity_mrev_s"])
     origin_band = int(plan["recovery_origin_band_counts"])
     maximum_slot_us = int(plan["recovery_maximum_slot_us"])
     if int(record["planned_velocity_mrev_s"]) != planned_velocity:

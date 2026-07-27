@@ -809,9 +809,13 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
             f"plan digest: firmware=0x{int(plan['plan_digest']):016x} "
             f"offline=0x{calculated_digest:016x}"
         )
-    expected_target = (int(plan["planned_velocity_mrev_s"]) * 60 + 500) // 1_000
+    planned_velocity_mrev_s = int(plan["planned_velocity_mrev_s"])
+    if int(plan["schema_revision"]) >= 10:
+        expected_target = planned_velocity_mrev_s * 60 // 1_000
+    else:
+        expected_target = (planned_velocity_mrev_s * 60 + 500) // 1_000
     if expected_target != int(plan["target_velocity_rpm"]):
-        mismatches.append("plan target RPM differs from nearest encoder-domain conversion")
+        mismatches.append("plan target RPM differs from schema conversion")
     try:
         ladder = derive_integral_ladder(
             int(plan["pwm_hz"]),

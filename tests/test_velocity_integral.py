@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from foci_trace.velocity_integral import (
+    _validate_plan,
     _retained_stage_c_evidence,
     audit_integral_reproduction_pair,
     audit_velocity_integral,
@@ -200,7 +201,23 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
                 "maximum_workflow_ms": 197_896,
             }
         )
+    if schema_revision >= 10:
+        plan["target_velocity_rpm"] = 263
     return plan
+
+
+def test_schema_ten_replays_toward_zero_target_and_recovery_velocity() -> None:
+    plan = _plan(schema_revision=10)
+    plan["plan_digest"] = integral_plan_digest(plan)
+    plan_mismatches: list[str] = []
+    _validate_plan(plan, plan_mismatches)
+
+    _, recovery = _recovery_record(0, 1)
+    recovery["planned_velocity_mrev_s"] = 4_383
+    recovery_audit = audit_rung_origin_recovery(recovery, plan)
+
+    assert plan_mismatches == []
+    assert recovery_audit["mismatches"] == []
 
 
 def test_integral_plan_digest_hashes_every_immutable_input_in_firmware_order() -> None:
@@ -567,6 +584,7 @@ def _recovery_record(
     rung_index: int,
     sequence: int,
     velocity_p: int = 1_448,
+    planned_velocity_mrev_s: int = 4_394,
 ) -> tuple[bytes, dict[str, object]]:
     values = {
         "run_sequence": 7,
@@ -574,7 +592,7 @@ def _recovery_record(
         "stage": 1,
         "rung_index": rung_index,
         "velocity_p": velocity_p,
-        "planned_velocity_mrev_s": 4_394,
+        "planned_velocity_mrev_s": planned_velocity_mrev_s,
         "start_offset_counts": 900,
         "closest_offset_counts": 900,
         "final_offset_counts": 900,
@@ -815,6 +833,7 @@ def _synthetic_complete_capture(
                     rung_index,
                     sequence,
                     velocity_p=int(plan["final_p"]),
+                    planned_velocity_mrev_s=(4_383 if schema_revision >= 10 else 4_394),
                 )
             )
             sequence += 1
