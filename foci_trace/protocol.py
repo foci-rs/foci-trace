@@ -60,6 +60,10 @@ EVENT_COMMISSION_RESTORE_DISPOSITION = 142
 EVENT_COMMISSION_RUNG_ORIGIN_RECOVERY = 143
 EVENT_COMMISSION_OUTER_SAFETY_TIMING = 144
 EVENT_COMMISSION_VELOCITY_LIMIT_LATCH_TEST = 145
+EVENT_COMMISSION_ACCEPTANCE_MATRIX_PLAN = 146
+EVENT_COMMISSION_ACCEPTANCE_MATRIX_OBSERVATION = 147
+EVENT_COMMISSION_ACCEPTANCE_MATRIX_AMPLITUDE = 148
+EVENT_COMMISSION_ACCEPTANCE_MATRIX_TERMINAL = 149
 EVENT_COMMISSION_DIAGNOSTIC_WARNING = 200
 
 _LEVEL_NAMES = {
@@ -107,6 +111,10 @@ _COMMISSIONING_EVENT_NAMES = {
     EVENT_COMMISSION_RUNG_ORIGIN_RECOVERY: "commission_rung_origin_recovery",
     EVENT_COMMISSION_OUTER_SAFETY_TIMING: "commission_outer_safety_timing",
     EVENT_COMMISSION_VELOCITY_LIMIT_LATCH_TEST: "commission_velocity_limit_latch_test",
+    EVENT_COMMISSION_ACCEPTANCE_MATRIX_PLAN: "commission_acceptance_matrix_plan",
+    EVENT_COMMISSION_ACCEPTANCE_MATRIX_OBSERVATION: "commission_acceptance_matrix_observation",
+    EVENT_COMMISSION_ACCEPTANCE_MATRIX_AMPLITUDE: "commission_acceptance_matrix_amplitude",
+    EVENT_COMMISSION_ACCEPTANCE_MATRIX_TERMINAL: "commission_acceptance_matrix_terminal",
     EVENT_COMMISSION_DIAGNOSTIC_WARNING: "commission_diagnostic_warning",
 }
 
@@ -421,11 +429,169 @@ def _take_fields(cursor: _EvidenceCursor, fields: tuple[tuple[str, str], ...]) -
     return {name: cursor.take(fmt) for name, fmt in fields}
 
 
+def _take_optional_interval(cursor: _EvidenceCursor) -> list[int] | None:
+    present = cursor.take("B")
+    if present not in (0, 1):
+        raise DecodeError("matrix optional interval marker is invalid")
+    return [cursor.take("i"), cursor.take("i")] if present else None
+
+
+def _take_optional_i32(cursor: _EvidenceCursor) -> int | None:
+    present = cursor.take("B")
+    if present not in (0, 1):
+        raise DecodeError("matrix optional value marker is invalid")
+    return cursor.take("i") if present else None
+
+
+def _take_acceptance_direction(cursor: _EvidenceCursor) -> dict[str, Any]:
+    direction = {
+        "availability": cursor.take("B"),
+        "classification": cursor.take("B"),
+        "components": [[cursor.take("i"), cursor.take("i")] for _ in range(2)],
+        "component_count": cursor.take("B"),
+        "collected_mask": cursor.take("B"),
+        "eligible_mask": cursor.take("B"),
+        "included_mask": cursor.take("B"),
+        "signed_target_rate_q": cursor.take("i"),
+    }
+    if direction["availability"] > 6 or direction["classification"] > 3:
+        raise DecodeError("matrix direction taxonomy is invalid")
+    if direction["component_count"] > 2:
+        raise DecodeError("matrix direction has too many components")
+    for name in ("collected_mask", "eligible_mask", "included_mask"):
+        if direction[name] & ~0xF:
+            raise DecodeError("matrix observation mask exceeds four slots")
+    direction["components"] = direction["components"][: direction["component_count"]]
+    direction["response_interval_q"] = _take_optional_interval(cursor)
+    direction["robust_location_q"] = _take_optional_i32(cursor)
+    direction["deficit_interval_q"] = _take_optional_interval(cursor)
+    direction["excluded_mask"] = cursor.take("B")
+    packed_blocking_levels = cursor.take("H")
+    direction["blocking_levels"] = [
+        (packed_blocking_levels >> (index * 4)) & 0xF for index in range(4)
+    ]
+    return direction
+
+
+def _try_decode_acceptance_amplitude(payload: bytes) -> dict[str, Any] | None:
+    if not 84 <= len(payload) <= 124:
+        return None
+    try:
+        cursor = _EvidenceCursor(payload)
+        if cursor.take("B") != 2:
+            return None
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest", "Q"),
+                ("amplitude_index", "B"),
+                ("target_rpm", "i"),
+            ),
+        )
+        if decoded["amplitude_index"] >= 5 or decoded["target_rpm"] <= 0:
+            return None
+        decoded["directions"] = [
+            _take_acceptance_direction(cursor),
+            _take_acceptance_direction(cursor),
+        ]
+        cursor.finish()
+    except DecodeError:
+        return None
+    decoded["namespace"] = "acceptance_matrix"
+    decoded["record_kind"] = "acceptance_matrix_amplitude"
+    return decoded
+
+
 def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
     _require(payload, 1, "velocity-sweep evidence")
     cursor = _EvidenceCursor(payload)
     kind = cursor.take("B")
-    if kind == 0 and len(payload) in (65, 82):
+    if kind == 0 and len(payload) in (43, 56, 73):
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest", "Q"),
+                ("fragment", "B"),
+            ),
+        )
+        fragment = decoded["fragment"]
+        if (fragment, len(payload)) == (0, 73):
+            decoded.update(
+                _take_fields(
+                    cursor,
+                    (
+                        ("schema_revision", "H"),
+                        ("channel", "B"),
+                        ("build_revision", "I"),
+                        ("acceptance_schema_revision", "H"),
+                        ("acceptance_plan_digest", "Q"),
+                        ("order", "B"),
+                        ("selected_p", "H"),
+                        ("selected_i", "H"),
+                        ("qualifier_bits", "H"),
+                        ("pwm_hz", "I"),
+                        ("encoder_counts_per_rev", "I"),
+                    ),
+                )
+            )
+            decoded["target_rpm"] = [cursor.take("i") for _ in range(5)]
+            decoded.update(
+                _take_fields(
+                    cursor,
+                    (
+                        ("amplitude_count", "B"),
+                        ("expected_observations", "H"),
+                        ("family_size", "H"),
+                    ),
+                )
+            )
+        elif (fragment, len(payload)) == (1, 56):
+            decoded.update(
+                _take_fields(
+                    cursor,
+                    (
+                        ("moving_stroke_us", "I"),
+                        ("zero_settle_us", "I"),
+                        ("analysis_budget_us", "I"),
+                        ("nominal_workflow_ms", "I"),
+                        ("maximum_workflow_ms", "I"),
+                        ("recovery_origin_band_counts", "I"),
+                        ("recovery_nominal_slot_us", "I"),
+                        ("recovery_maximum_slot_us", "I"),
+                        ("recovery_slot_count", "B"),
+                        ("hard_torque_limit", "H"),
+                        ("usable_torque_limit", "H"),
+                        ("limit_evidence_capability", "B"),
+                        ("recovery_quantization_exposed", "B"),
+                        ("probe_constrained_test_point", "B"),
+                    ),
+                )
+            )
+        elif (fragment, len(payload)) == (2, 43):
+            decoded.update(
+                _take_fields(
+                    cursor,
+                    (
+                        ("requested_velocity_mrev_s", "I"),
+                        ("machine_velocity_ceiling_mrev_s", "I"),
+                        ("requested_velocity_source", "B"),
+                        ("max_stroke_travel_mrev", "I"),
+                        ("settle_travel_reserve_mrev", "I"),
+                        ("negative_position_headroom_mrev", "I"),
+                        ("positive_position_headroom_mrev", "I"),
+                        ("max_duration_ms", "H"),
+                    ),
+                )
+            )
+        else:
+            raise DecodeError("matrix plan fragment shape is invalid")
+        decoded["namespace"] = "acceptance_matrix"
+        decoded["record_kind"] = "acceptance_matrix_plan"
+    elif kind == 0 and len(payload) in (65, 82):
         decoded = _take_fields(
             cursor,
             (
@@ -651,6 +817,8 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 decoded["plan_digest_high"] << 32
             )
         decoded["record_kind"] = "plan"
+    elif kind == 2 and (matrix := _try_decode_acceptance_amplitude(payload)) is not None:
+        return matrix
     elif kind == 2 and len(payload) in (46, 77):
         decoded = _take_fields(
             cursor,
@@ -753,6 +921,56 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             ),
         )
         decoded["record_kind"] = "observation"
+    elif kind == 3 and len(payload) == 67:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("schema_revision", "H"),
+                ("acceptance_plan_digest", "Q"),
+                ("plan_digest", "Q"),
+                ("digest", "Q"),
+                ("outcome", "B"),
+                ("cause", "B"),
+            ),
+        )
+        decoded["attempted_masks"] = [cursor.take("B") for _ in range(2)]
+        decoded["eligible_masks"] = [cursor.take("B") for _ in range(2)]
+        decoded["current_terminus_masks"] = [cursor.take("B") for _ in range(2)]
+        decoded["unattempted_masks"] = [cursor.take("B") for _ in range(2)]
+        decoded.update(
+            _take_fields(
+                cursor,
+                (
+                    ("expected_observations", "H"),
+                    ("emitted_observations", "H"),
+                    ("expected_amplitudes", "B"),
+                    ("emitted_amplitudes", "B"),
+                    ("qualifier_bits", "H"),
+                    ("run_started_us", "Q"),
+                    ("run_completed_us", "Q"),
+                ),
+            )
+        )
+        decoded["outcome_name"] = {
+            0: "Complete",
+            1: "Inconclusive",
+            2: "Fault",
+            3: "Failed",
+        }.get(decoded["outcome"], "Unknown")
+        decoded["cause_name"] = {
+            0: "None",
+            1: "InsufficientSharedFloor",
+            2: "RecoveryUnavailable",
+            3: "MissingAcceptancePoint",
+            4: "AcceptancePointIdentityMismatch",
+            5: "MatrixOrderMismatch",
+            6: "EvidenceCapacity",
+            7: "EvidenceIntegrity",
+        }.get(decoded["cause"], "Unknown")
+        decoded["namespace"] = "acceptance_matrix"
+        decoded["record_kind"] = "acceptance_matrix_terminal"
     elif kind == 3 and len(payload) in (70, 83):
         decoded = _take_fields(
             cursor,

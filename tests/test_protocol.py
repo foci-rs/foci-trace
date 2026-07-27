@@ -457,6 +457,184 @@ def test_decodes_schema_nine_slot_transition_allowance() -> None:
     assert frame.payload["maximum_workflow_ms"] == 197_896
 
 
+def test_decodes_acceptance_matrix_plan_fragments() -> None:
+    core = bytearray([0])
+    core.extend(struct.pack("<IHQB", 7, 1, 0x0123_4567_89AB_CDEF, 0))
+    core.extend(
+        struct.pack(
+            "<HBIHQBHHHII5iBHH",
+            1,
+            0,
+            0x1122_3344,
+            10,
+            0xAABB_CCDD_EEFF_0011,
+            1,
+            1_024,
+            1_024,
+            3,
+            25_000,
+            4_000,
+            16,
+            33,
+            66,
+            132,
+            263,
+            5,
+            40,
+            20,
+        )
+    )
+    timing = bytearray([0])
+    timing.extend(struct.pack("<IHQB", 7, 2, 0x0123_4567_89AB_CDEF, 1))
+    timing.extend(
+        struct.pack(
+            "<8IBHHBBB",
+            512_000,
+            500_000,
+            236_000,
+            61_234,
+            65_678,
+            1_000,
+            1_816_958,
+            3_000_000,
+            5,
+            2_816,
+            2_816,
+            1,
+            0,
+            1,
+        )
+    )
+    motion = bytearray([0])
+    motion.extend(struct.pack("<IHQB", 7, 3, 0x0123_4567_89AB_CDEF, 2))
+    motion.extend(
+        struct.pack(
+            "<IIBIIIIH",
+            4_383,
+            10_000,
+            1,
+            2_500,
+            250,
+            28_100,
+            28_100,
+            60_000,
+        )
+    )
+
+    decoded = [
+        decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload).payload
+        for payload in (core, timing, motion)
+    ]
+
+    assert [len(core), len(timing), len(motion)] == [73, 56, 43]
+    assert [fragment["fragment"] for fragment in decoded] == [0, 1, 2]
+    assert all(fragment["namespace"] == "acceptance_matrix" for fragment in decoded)
+    assert decoded[0]["target_rpm"] == [16, 33, 66, 132, 263]
+    assert decoded[0]["acceptance_plan_digest"] == 0xAABB_CCDD_EEFF_0011
+    assert decoded[1]["recovery_maximum_slot_us"] == 3_000_000
+    assert decoded[2]["requested_velocity_mrev_s"] == 4_383
+
+
+def _acceptance_direction(
+    *,
+    response: tuple[int, int] | None,
+    robust: int | None,
+    deficit: tuple[int, int] | None,
+    excluded_mask: int,
+    blocking_levels: int,
+) -> bytes:
+    payload = bytearray(
+        struct.pack(
+            "<BB4iBBBBi",
+            0,
+            0,
+            100,
+            120,
+            0,
+            0,
+            1,
+            0b1111,
+            0b0111,
+            0b0111,
+            1_000,
+        )
+    )
+    payload.extend(bytes([response is not None]))
+    if response is not None:
+        payload.extend(struct.pack("<ii", *response))
+    payload.extend(bytes([robust is not None]))
+    if robust is not None:
+        payload.extend(struct.pack("<i", robust))
+    payload.extend(bytes([deficit is not None]))
+    if deficit is not None:
+        payload.extend(struct.pack("<ii", *deficit))
+    payload.extend(struct.pack("<BH", excluded_mask, blocking_levels))
+    return bytes(payload)
+
+
+def test_decodes_acceptance_matrix_amplitude_with_signed_evidence() -> None:
+    payload = bytearray([2])
+    payload.extend(struct.pack("<IHQBi", 7, 4, 0x0123_4567_89AB_CDEF, 2, 66))
+    payload.extend(
+        _acceptance_direction(
+            response=(700, 900),
+            robust=800,
+            deficit=(100, 300),
+            excluded_mask=0b1000,
+            blocking_levels=0x4321,
+        )
+    )
+    payload.extend(
+        _acceptance_direction(
+            response=(-900, -700),
+            robust=-800,
+            deficit=(-300, -100),
+            excluded_mask=0b1000,
+            blocking_levels=0x1234,
+        )
+    )
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert len(payload) == 124
+    assert frame.payload["record_kind"] == "acceptance_matrix_amplitude"
+    assert frame.payload["amplitude_index"] == 2
+    assert frame.payload["directions"][0]["response_interval_q"] == [700, 900]
+    assert frame.payload["directions"][1]["robust_location_q"] == -800
+    assert frame.payload["directions"][1]["deficit_interval_q"] == [-300, -100]
+    assert frame.payload["directions"][0]["blocking_levels"] == [1, 2, 3, 4]
+
+
+def test_decodes_acceptance_matrix_terminal_namespace_and_masks() -> None:
+    payload = bytearray([3])
+    payload.extend(
+        struct.pack(
+            "<IHHQQQBB",
+            7,
+            5,
+            1,
+            0x1111_2222_3333_4444,
+            0x5555_6666_7777_8888,
+            0x9999_AAAA_BBBB_CCCC,
+            1,
+            1,
+        )
+    )
+    payload.extend(bytes([0b11111, 0b11110, 0b01111, 0b01110]))
+    payload.extend(bytes([0b10000, 0, 0, 1]))
+    payload.extend(struct.pack("<HHBBHQQ", 40, 32, 5, 4, 3, 100, 200))
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert len(payload) == 67
+    assert frame.payload["namespace"] == "acceptance_matrix"
+    assert frame.payload["outcome_name"] == "Inconclusive"
+    assert frame.payload["cause_name"] == "InsufficientSharedFloor"
+    assert frame.payload["attempted_masks"] == [0b11111, 0b11110]
+    assert frame.payload["unattempted_masks"] == [0, 1]
+    assert frame.payload["digest"] == 0x9999_AAAA_BBBB_CCCC
+
+
 def test_decodes_velocity_integral_recovery_plan_fragment() -> None:
     payload = bytearray([0])
     payload.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
@@ -1421,6 +1599,10 @@ def test_decode_commissioning_event_names() -> None:
         (143, "commission_rung_origin_recovery"),
         (144, "commission_outer_safety_timing"),
         (145, "commission_velocity_limit_latch_test"),
+        (146, "commission_acceptance_matrix_plan"),
+        (147, "commission_acceptance_matrix_observation"),
+        (148, "commission_acceptance_matrix_amplitude"),
+        (149, "commission_acceptance_matrix_terminal"),
     ),
 )
 def test_decode_velocity_integral_response_event_names(event_id: int, event_name: str) -> None:
