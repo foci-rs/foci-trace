@@ -424,6 +424,39 @@ def test_decodes_schema_four_minimum_positive_schedule() -> None:
     assert frame.payload["maximum_workflow_ms"] == 116_856
 
 
+def test_decodes_schema_nine_slot_transition_allowance() -> None:
+    schedule = bytearray([0])
+    schedule.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
+    schedule.extend(struct.pack("<BB", 1, 13))
+    schedule.extend(struct.pack("<13H", 1, 2, 3, 4, 8, 16, 32, 64, 128, 256, 512, 1_024, 1_310))
+    schedule.extend(
+        struct.pack(
+            "<IIIIIIIIBIIIIH",
+            512_000,
+            500_000,
+            236_000,
+            20_000,
+            180_151,
+            197_896,
+            4_394,
+            10_000,
+            1,
+            2_500,
+            250,
+            28_100,
+            28_100,
+            3_000,
+        )
+    )
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, schedule) + schedule)
+
+    assert frame.payload["record_kind"] == "integral_plan_schedule"
+    assert frame.payload["slot_transition_allowance_us"] == 20_000
+    assert frame.payload["nominal_workflow_ms"] == 180_151
+    assert frame.payload["maximum_workflow_ms"] == 197_896
+
+
 def test_decodes_velocity_integral_recovery_plan_fragment() -> None:
     payload = bytearray([0])
     payload.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
@@ -611,6 +644,40 @@ def test_decodes_velocity_integral_response_rung() -> None:
     assert frame.payload["directions"][0]["included_mask"] == 0b0111
     assert frame.payload["directions"][1]["classification"] == 1
     assert frame.payload["directions"][1]["components"] == [[-30, -20], [-10, -5]]
+
+
+def test_decodes_schema_nine_velocity_integral_response_horizon() -> None:
+    payload = bytearray([3])
+    payload.extend(struct.pack("<IHII", 7, 9, 0x1122_3344, 0x5566_7788))
+    payload.extend(struct.pack("<BHQIB", 9, 64, 655_360, 512_000, 1))
+    for direction in range(2):
+        payload.extend(
+            struct.pack(
+                "<BBBBBBBBBBiiii",
+                direction,
+                1,
+                0,
+                1,
+                0b1111,
+                0b1111,
+                0,
+                0,
+                0,
+                0,
+                10,
+                20,
+                0,
+                0,
+            )
+        )
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert len(payload) == 83
+    assert frame.payload["record_kind"] == "integral_rung"
+    assert frame.payload["tau_us"] == 655_360
+    assert frame.payload["moving_horizon_us"] == 512_000
+    assert frame.payload["horizon_class"] == 1
 
 
 def test_decodes_velocity_integral_response_terminal() -> None:

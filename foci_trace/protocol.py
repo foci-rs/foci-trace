@@ -538,6 +538,15 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                         ("moving_stroke_us", "I"),
                         ("zero_settle_us", "I"),
                         ("analysis_budget_us", "I"),
+                    ),
+                )
+            )
+            if len(payload) - cursor.offset == 39:
+                decoded["slot_transition_allowance_us"] = cursor.take("I")
+            decoded.update(
+                _take_fields(
+                    cursor,
+                    (
                         ("nominal_workflow_ms", "I"),
                         ("maximum_workflow_ms", "I"),
                         ("requested_velocity_mrev_s", "I"),
@@ -744,7 +753,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             ),
         )
         decoded["record_kind"] = "observation"
-    elif kind == 3 and len(payload) == 70:
+    elif kind == 3 and len(payload) in (70, 83):
         decoded = _take_fields(
             cursor,
             (
@@ -756,6 +765,17 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ("i_raw", "H"),
             ),
         )
+        if len(payload) == 83:
+            decoded.update(
+                _take_fields(
+                    cursor,
+                    (
+                        ("tau_us", "Q"),
+                        ("moving_horizon_us", "I"),
+                        ("horizon_class", "B"),
+                    ),
+                )
+            )
         directions = []
         for _ in range(2):
             direction = _take_fields(

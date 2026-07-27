@@ -37,6 +37,7 @@ _TERMINAL_RECOVERY_QUANTIZATION_EXPOSED = 1 << 2
 _TERMINAL_PROBE_CONSTRAINED_TEST_POINT = 1 << 3
 _TERMINAL_COMBINED_TARGET_MASK = 0b111 << 4
 _TERMINAL_COMBINED_WORKFLOW = 1 << 7
+_SLOT_TRANSITION_ALLOWANCE_US = 20_000
 _U128_MAX = (1 << 128) - 1
 
 
@@ -90,7 +91,7 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     for interval in plan["directional_pooled_intervals"]:  # type: ignore[union-attr]
         _append_integer(encoded, int(interval[0]), 4, signed=True)
         _append_integer(encoded, int(interval[1]), 4, signed=True)
-    if int(plan["schema_revision"]) == 8:
+    if int(plan["schema_revision"]) >= 8:
         selected = bool(plan["combined_selected_response"])
         _append_integer(encoded, int(selected), 1)
         if selected:
@@ -109,13 +110,11 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     _append_integer(encoded, int(plan["family_size"]), 2)
     _append_integer(encoded, int(plan["total_rung_count"]), 1)
     _append_integer(encoded, int(plan["expected_observations"]), 2)
-    for name in (
-        "moving_stroke_us",
-        "zero_settle_us",
-        "analysis_budget_us",
-        "nominal_workflow_ms",
-        "maximum_workflow_ms",
-    ):
+    for name in ("moving_stroke_us", "zero_settle_us", "analysis_budget_us"):
+        _append_integer(encoded, int(plan[name]), 4)
+    if int(plan["schema_revision"]) >= 9:
+        _append_integer(encoded, int(plan["slot_transition_allowance_us"]), 4)
+    for name in ("nominal_workflow_ms", "maximum_workflow_ms"):
         _append_integer(encoded, int(plan[name]), 4)
     if int(plan["schema_revision"]) >= 2:
         for name in (
@@ -192,7 +191,7 @@ def derive_integral_ladder(
     build_revision: int | None,
 ) -> dict[str, object]:
     """Reconstruct the cap-only whole-octave positive-I ladder."""
-    if schema_revision not in range(1, 9):
+    if schema_revision not in range(1, 10):
         raise ValueError("unsupported Stage-C evidence schema")
     if shortest_suffix_us < 2:
         raise ValueError("shortest suffix must contain at least two microseconds")
@@ -749,7 +748,7 @@ def _compact_plan_marker(plan: dict[str, object], run_sequence: int) -> bytes:
         _append_integer(record, int(plan["recovery_slot_count"]), 1)
     _append_integer(record, int(plan["hard_torque_limit"]), 2)
     _append_integer(record, int(plan["usable_torque_limit"]), 2)
-    if int(plan["schema_revision"]) == 8:
+    if int(plan["schema_revision"]) >= 8:
         _append_integer(record, 1, 1)
         for interval in plan["selected_response_intervals_q"]:  # type: ignore[union-attr]
             _append_integer(record, int(interval[0]), 4, signed=True)
@@ -897,7 +896,7 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
                 )
                 if int(validity) != expected:
                     mismatches.append(f"plan direction {direction} validity differs at selected P")
-    if schema_revision == 8:
+    if schema_revision >= 8:
         if not bool(plan.get("combined_selected_response", False)):
             mismatches.append("combined plan lacks one selected Stage-B response")
         intervals = plan.get("selected_response_intervals_q")
@@ -912,6 +911,9 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
             )
         ):
             mismatches.append("combined plan selected response intervals are invalid")
+    if schema_revision >= 9:
+        if int(plan.get("slot_transition_allowance_us", -1)) != _SLOT_TRANSITION_ALLOWANCE_US:
+            mismatches.append("combined plan slot-transition allowance differs from schema 9")
     if schema_revision >= 4:
         validity = plan.get("directional_validity")
         if (
@@ -952,6 +954,10 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
             cleanup_duration_us = int(plan["zero_settle_us"]) + int(plan["analysis_budget_us"])
             nominal_duration_us += cleanup_duration_us
             maximum_duration_us += cleanup_duration_us
+        if schema_revision >= 9:
+            transition_duration_us = expected_observations * _SLOT_TRANSITION_ALLOWANCE_US
+            nominal_duration_us += transition_duration_us
+            maximum_duration_us += transition_duration_us
         expected_nominal_ms = (nominal_duration_us + 999) // 1_000
         expected_maximum_ms = (maximum_duration_us + 999) // 1_000
     else:
@@ -1265,7 +1271,7 @@ def audit_velocity_integral(
                 mismatches,
                 "plan marker",
             )
-        if schema_revision == 8:
+        if schema_revision >= 8:
             _compare_fields(
                 plan,
                 marker_records[0],
@@ -1532,6 +1538,31 @@ def audit_velocity_integral(
         if not 0 <= rung_index < len(expected_gains):
             mismatches.append(f"integral rung is out of range: {rung_index}")
             continue
+        if schema_revision >= 9:
+            i_raw = int(expected_gains[rung_index])
+            expected_tau_us = (
+                0
+                if i_raw == 0
+                else velocity_i_tau_us(
+                    i_raw,
+                    int(plan["pwm_hz"]),
+                    plan.get("build_revision"),
+                )
+            )
+            expected_horizon_class = (
+                0 if i_raw == 0 else 1 if expected_tau_us > int(plan["moving_stroke_us"]) else 2
+            )
+            _compare_fields(
+                {
+                    "tau_us": expected_tau_us,
+                    "moving_horizon_us": int(plan["moving_stroke_us"]),
+                    "horizon_class": expected_horizon_class,
+                },
+                record,
+                ("tau_us", "moving_horizon_us", "horizon_class"),
+                mismatches,
+                f"rung {rung_index} response horizon",
+            )
         expected_directions: list[dict[str, object]] = []
         for direction in range(2):
             keys = [(rung_index, direction + 2 * repeat) for repeat in range(4)]
@@ -1615,7 +1646,7 @@ def audit_velocity_integral(
         bookend,
         eligible_masks,
     )
-    if schema_revision == 8:
+    if schema_revision >= 8:
         target_terminus = terminal.get("target_terminus")
         expected_status = combined_target_status(
             target_terminus=int(target_terminus) if target_terminus is not None else None,

@@ -192,6 +192,14 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
                 "flags": 0,
             }
         )
+    if schema_revision >= 9:
+        plan.update(
+            {
+                "slot_transition_allowance_us": 20_000,
+                "nominal_workflow_ms": 180_151,
+                "maximum_workflow_ms": 197_896,
+            }
+        )
     return plan
 
 
@@ -493,7 +501,7 @@ def _plan_records(plan: dict[str, object]) -> list[tuple[bytes, dict[str, object
     ]
     if int(plan["schema_revision"]) >= 7:
         core_names.insert(core_names.index("joint_membership"), "stage_b_joint_membership")
-    schedule_names = (
+    schedule_names = [
         "positive_i",
         "moving_stroke_us",
         "zero_settle_us",
@@ -508,7 +516,9 @@ def _plan_records(plan: dict[str, object]) -> list[tuple[bytes, dict[str, object
         "negative_position_headroom_mrev",
         "positive_position_headroom_mrev",
         "max_duration_ms",
-    )
+    ]
+    if int(plan["schema_revision"]) >= 9:
+        schedule_names.insert(4, "slot_transition_allowance_us")
     records = [
         (
             b"",
@@ -683,9 +693,30 @@ def _rung_record(
     sequence: int,
     plan_digest: int,
     directions: list[dict[str, object]],
+    plan: dict[str, object] | None = None,
 ) -> tuple[bytes, dict[str, object]]:
     raw = bytearray((3,))
     raw += struct.pack("<IHQBH", 7, sequence, plan_digest, rung_index, i_raw)
+    horizon: dict[str, int] = {}
+    if plan is not None and int(plan["schema_revision"]) >= 9:
+        tau_us = (
+            0
+            if i_raw == 0
+            else velocity_i_tau_us(i_raw, int(plan["pwm_hz"]), plan.get("build_revision"))
+        )
+        horizon = {
+            "tau_us": tau_us,
+            "moving_horizon_us": int(plan["moving_stroke_us"]),
+            "horizon_class": (
+                0 if i_raw == 0 else 1 if tau_us > int(plan["moving_stroke_us"]) else 2
+            ),
+        }
+        raw += struct.pack(
+            "<QIB",
+            horizon["tau_us"],
+            horizon["moving_horizon_us"],
+            horizon["horizon_class"],
+        )
     for direction in directions:
         components = list(direction["components"])
         raw += struct.pack(
@@ -709,6 +740,7 @@ def _rung_record(
         "plan_digest": plan_digest,
         "rung_index": rung_index,
         "i_raw": i_raw,
+        **horizon,
         "directions": directions,
     }
 
@@ -767,7 +799,14 @@ def _synthetic_complete_capture(
                 }
             )
         records.append(
-            _rung_record(rung_index, gain, sequence, int(plan["plan_digest"]), directions)
+            _rung_record(
+                rung_index,
+                gain,
+                sequence,
+                int(plan["plan_digest"]),
+                directions,
+                plan,
+            )
         )
         sequence += 1
         if schema_revision >= 2:
@@ -872,6 +911,38 @@ def test_schema_eight_combined_run_completes_without_reproduction() -> None:
     assert audit["matches_firmware"] is True
     assert audit["terminal"]["outcome"] == 1
     assert audit["terminal"]["target_status"] == 3
+
+
+def test_schema_nine_replays_response_horizons_and_transition_allowance() -> None:
+    raw, records = _synthetic_complete_capture(schema_revision=9)
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["matches_firmware"] is True
+    assert audit["plan"]["slot_transition_allowance_us"] == 20_000
+    rung = next(
+        value
+        for _raw, value in records
+        if value["record_kind"] == "integral_rung" and value["i_raw"] == 64
+    )
+    assert rung["tau_us"] == 655_360
+    assert rung["moving_horizon_us"] == 512_000
+    assert rung["horizon_class"] == 1
+
+
+def test_schema_nine_reports_firmware_response_horizon_mismatch() -> None:
+    raw, records = _synthetic_complete_capture(schema_revision=9)
+    rung = next(
+        value
+        for _raw, value in records
+        if value["record_kind"] == "integral_rung" and value["i_raw"] == 64
+    )
+    rung["tau_us"] = 655_359
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["matches_firmware"] is False
+    assert any("response horizon tau_us" in mismatch for mismatch in audit["mismatches"])
 
 
 def _synthetic_schema_five_boundary_capture() -> tuple[
@@ -1507,7 +1578,7 @@ def test_schema_four_sufficiency_requires_both_closing_bookends() -> None:
     assert _stage_c_run_sufficient(3, opening, [None, None], masks) is True
 
 
-@pytest.mark.parametrize("schema_revision", [0, 9])
+@pytest.mark.parametrize("schema_revision", [0, 10])
 def test_integral_ladder_rejects_unsupported_schema(schema_revision: int) -> None:
     with pytest.raises(ValueError, match="unsupported Stage-C evidence schema"):
         derive_integral_ladder(
