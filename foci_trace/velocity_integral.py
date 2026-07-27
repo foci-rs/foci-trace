@@ -35,6 +35,8 @@ _TERMINAL_RECOVERY_UNAVAILABLE = 1 << 0
 _TERMINAL_RECOVERED_WITH_CURRENT_HEADROOM = 1 << 1
 _TERMINAL_RECOVERY_QUANTIZATION_EXPOSED = 1 << 2
 _TERMINAL_PROBE_CONSTRAINED_TEST_POINT = 1 << 3
+_TERMINAL_COMBINED_TARGET_MASK = 0b111 << 4
+_TERMINAL_COMBINED_WORKFLOW = 1 << 7
 _U128_MAX = (1 << 128) - 1
 
 
@@ -88,6 +90,14 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     for interval in plan["directional_pooled_intervals"]:  # type: ignore[union-attr]
         _append_integer(encoded, int(interval[0]), 4, signed=True)
         _append_integer(encoded, int(interval[1]), 4, signed=True)
+    if int(plan["schema_revision"]) == 8:
+        selected = bool(plan["combined_selected_response"])
+        _append_integer(encoded, int(selected), 1)
+        if selected:
+            _append_integer(encoded, int(plan["final_p"]), 2)
+            for interval in plan["selected_response_intervals_q"]:  # type: ignore[union-attr]
+                _append_integer(encoded, int(interval[0]), 8, signed=True)
+                _append_integer(encoded, int(interval[1]), 8, signed=True)
     _append_integer(encoded, int(plan["planned_velocity_mrev_s"]), 4)
     _append_integer(encoded, int(plan["target_velocity_rpm"]), 4, signed=True)
     _append_integer(encoded, int(plan["pwm_hz"]), 4)
@@ -182,7 +192,7 @@ def derive_integral_ladder(
     build_revision: int | None,
 ) -> dict[str, object]:
     """Reconstruct the cap-only whole-octave positive-I ladder."""
-    if schema_revision not in range(1, 8):
+    if schema_revision not in range(1, 9):
         raise ValueError("unsupported Stage-C evidence schema")
     if shortest_suffix_us < 2:
         raise ValueError("shortest suffix must contain at least two microseconds")
@@ -213,12 +223,51 @@ def derive_integral_ladder(
     while candidate <= i_top_cap:
         rungs.append(candidate)
         candidate <<= 1
+    if schema_revision >= 8 and rungs[-1] != i_top_cap:
+        rungs.append(i_top_cap)
     family_size = (len(rungs) + 2) * _I_OBSERVATIONS_PER_DIRECTION
     if len(rungs) < 3:
         raise ValueError("integral ladder requires at least three positive rungs")
     if len(rungs) > _I_MAX_POSITIVE_RUNGS or family_size > _I_CONFIDENCE_FAMILY_MAX:
         raise ValueError("integral ladder exceeds the simultaneous-confidence family")
     return {"i_start": i_start, "i_top_cap": i_top_cap, "positive_i": rungs}
+
+
+def integral_deficit_reaches_target(
+    target_rpm: int,
+    encoder_counts_per_rev: int,
+    deficits: list[list[int]],
+) -> bool:
+    """Reconstruct the firmware's signed 98-percent integral target test."""
+    if target_rpm <= 0 or encoder_counts_per_rev <= 0 or len(deficits) != 2:
+        raise ValueError("invalid combined integral target")
+    if any(len(interval) != 2 or interval[0] > interval[1] for interval in deficits):
+        raise ValueError("invalid combined deficit interval")
+    target_numerator = target_rpm * encoder_counts_per_rev * 1_000
+    target_floor = target_numerator * 98
+    forward_response = (target_numerator - deficits[0][1] * 60) * 100
+    reverse_response = (target_numerator + deficits[1][0] * 60) * 100
+    return forward_response >= target_floor and reverse_response >= target_floor
+
+
+def combined_target_status(
+    *,
+    target_terminus: int | None,
+    eligible_masks: list[int],
+    current_terminus: int | None,
+    emitted_rungs: int,
+    expected_rungs: int,
+) -> int | None:
+    """Classify the combined ladder's report-only target outcome."""
+    if len(eligible_masks) != 2:
+        raise ValueError("combined target status requires two directional masks")
+    if target_terminus is not None:
+        return 0 if all(mask.bit_count() >= 3 for mask in eligible_masks) else 1
+    if current_terminus is not None:
+        return 2
+    if emitted_rungs < expected_rungs:
+        return None
+    return 3
 
 
 def _checked_u128(value: int) -> int:
@@ -700,6 +749,11 @@ def _compact_plan_marker(plan: dict[str, object], run_sequence: int) -> bytes:
         _append_integer(record, int(plan["recovery_slot_count"]), 1)
     _append_integer(record, int(plan["hard_torque_limit"]), 2)
     _append_integer(record, int(plan["usable_torque_limit"]), 2)
+    if int(plan["schema_revision"]) == 8:
+        _append_integer(record, 1, 1)
+        for interval in plan["selected_response_intervals_q"]:  # type: ignore[union-attr]
+            _append_integer(record, int(interval[0]), 4, signed=True)
+            _append_integer(record, int(interval[1]), 4, signed=True)
     return bytes(record)
 
 
@@ -807,7 +861,7 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
                     mismatches.append(
                         "plan recovery quantization exposure differs from exact reconstruction"
                     )
-    if schema_revision >= 7:
+    if schema_revision == 7:
         try:
             selection = select_transition_capable_test_point(
                 stage_b_joint_membership=int(plan["stage_b_joint_membership"]),
@@ -843,6 +897,21 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
                 )
                 if int(validity) != expected:
                     mismatches.append(f"plan direction {direction} validity differs at selected P")
+    if schema_revision == 8:
+        if not bool(plan.get("combined_selected_response", False)):
+            mismatches.append("combined plan lacks one selected Stage-B response")
+        intervals = plan.get("selected_response_intervals_q")
+        if (
+            not isinstance(intervals, list)
+            or len(intervals) != 2
+            or any(
+                not isinstance(interval, list)
+                or len(interval) != 2
+                or int(interval[0]) > int(interval[1])
+                for interval in intervals
+            )
+        ):
+            mismatches.append("combined plan selected response intervals are invalid")
     if schema_revision >= 4:
         validity = plan.get("directional_validity")
         if (
@@ -1196,6 +1265,14 @@ def audit_velocity_integral(
                 mismatches,
                 "plan marker",
             )
+        if schema_revision == 8:
+            _compare_fields(
+                plan,
+                marker_records[0],
+                ("selected_response_intervals_q",),
+                mismatches,
+                "plan marker",
+            )
     digest = _fnv1a64(_compact_plan_marker(plan, run_sequence))
     for raw, _value in nonterminal:
         digest = _fnv1a64(raw, digest)
@@ -1307,6 +1384,8 @@ def audit_velocity_integral(
         )
         if schema_revision >= 7:
             known_flags |= _TERMINAL_PROBE_CONSTRAINED_TEST_POINT
+        if schema_revision >= 8:
+            known_flags |= _TERMINAL_COMBINED_TARGET_MASK | _TERMINAL_COMBINED_WORKFLOW
         if recovery_flags < 0 or recovery_flags & ~known_flags:
             mismatches.append("terminal recovery flags contain reserved bits")
         else:
@@ -1536,6 +1615,33 @@ def audit_velocity_integral(
         bookend,
         eligible_masks,
     )
+    if schema_revision == 8:
+        target_terminus = terminal.get("target_terminus")
+        expected_status = combined_target_status(
+            target_terminus=int(target_terminus) if target_terminus is not None else None,
+            eligible_masks=eligible_masks,
+            current_terminus=(
+                int(terminal["current_terminus"])
+                if terminal["current_terminus"] is not None
+                else None
+            ),
+            emitted_rungs=int(terminal["emitted_rungs"]),
+            expected_rungs=int(terminal["expected_rungs"]),
+        )
+        expected_target_status = 0xFF if expected_status is None else expected_status
+        if int(terminal.get("target_status", -1)) != expected_target_status:
+            mismatches.append("combined target status differs from causal ladder evidence")
+        recovery_flags = int(terminal.get("recovery_flags", 0))
+        encoded_status = (recovery_flags & _TERMINAL_COMBINED_TARGET_MASK) >> 4
+        expected_encoded_status = (
+            0 if expected_target_status == 0xFF else expected_target_status + 1
+        )
+        if not recovery_flags & _TERMINAL_COMBINED_WORKFLOW:
+            mismatches.append("combined terminal lacks its workflow flag")
+        if encoded_status != expected_encoded_status:
+            mismatches.append("combined terminal target flags differ from canonical status")
+        if sufficient and outcome != 1:
+            mismatches.append("combined sufficient run did not complete without retention")
     if cause in (9, 10) and rest_boundary is None:
         mismatches.append("rest-boundary terminal cause lacks its canonical boundary record")
     if rest_boundary is not None and not faulted:

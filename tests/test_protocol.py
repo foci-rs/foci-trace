@@ -1376,3 +1376,37 @@ def test_assembler_reconstructs_frame_from_usb_packets() -> None:
 
     assert assembler.feed(frame[:64]) == []
     assert assembler.feed(frame[64:]) == [frame]
+
+
+def test_decodes_schema_eight_compact_plan_response_intervals() -> None:
+    payload = bytearray([0])
+    payload.extend(struct.pack("<IQH", 7, 0x1122_3344_5566_7788, 1_024))
+    payload.extend(struct.pack("<IiIHBH", 4_394, 264, 25_000, 1, 13, 60))
+    payload.extend(struct.pack("<IIII", 512_000, 500_000, 236_000, 195_496))
+    payload.extend(struct.pack("<III", 1_000, 1_816_958, 3_000_000))
+    payload.extend(struct.pack("<BHH", 15, 2_816, 2_816))
+    payload.extend(struct.pack("<Biiii", 1, 12_900_000, 13_200_000, -13_100_000, -12_800_000))
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert frame.payload["record_kind"] == "integral_plan_marker"
+    assert frame.payload["selected_response_intervals_q"] == [
+        [12_900_000, 13_200_000],
+        [-13_100_000, -12_800_000],
+    ]
+
+
+def test_decodes_schema_eight_integral_terminal_target() -> None:
+    payload = bytearray([4])
+    payload.extend(struct.pack("<IHQQBBB", 7, 99, 0x11, 0x22, 4, 0, 0xA0))
+    payload.extend(struct.pack("<HHHHII", 120, 120, 15, 15, 0x1FFF, 0x1FFF))
+    payload.extend(struct.pack("<BBBQQ", 3, 3, 0, 10, 20))
+    payload.extend(struct.pack("<BHBB", 1, 1_024, 2, 7))
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert frame.payload["record_kind"] == "integral_terminal"
+    assert frame.payload["combined_workflow"] is True
+    assert frame.payload["final_p"] == 1_024
+    assert frame.payload["target_status"] == 2
+    assert frame.payload["target_terminus"] == 6

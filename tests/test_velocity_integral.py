@@ -10,10 +10,12 @@ from foci_trace.velocity_integral import (
     audit_integral_reproduction_pair,
     audit_velocity_integral,
     classify_observation,
+    combined_target_status,
     compare_integral_runs,
     delta_e,
     depth_three_consensus,
     derive_integral_ladder,
+    integral_deficit_reaches_target,
     integral_numerator_for_build,
     integral_plan_digest,
     recovery_quantization_exposed,
@@ -155,11 +157,136 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
                 "flags": 0b10,
             }
         )
+    if schema_revision >= 8:
+        plan.update(
+            {
+                "final_p": 1_024,
+                "combined_selected_response": True,
+                "selected_response_intervals_q": [
+                    [12_900_000, 13_200_000],
+                    [-13_100_000, -12_800_000],
+                ],
+                "positive_rung_count": 13,
+                "positive_i": [
+                    1,
+                    2,
+                    3,
+                    4,
+                    8,
+                    16,
+                    32,
+                    64,
+                    128,
+                    256,
+                    512,
+                    1_024,
+                    1_310,
+                ],
+                "family_size": 60,
+                "total_rung_count": 15,
+                "expected_observations": 120,
+                "nominal_workflow_ms": 177_751,
+                "maximum_workflow_ms": 195_496,
+                "recovery_slot_count": 15,
+                "usable_torque_limit": 2_816,
+                "flags": 0,
+            }
+        )
     return plan
 
 
 def test_integral_plan_digest_hashes_every_immutable_input_in_firmware_order() -> None:
     assert integral_plan_digest(_plan()) == 0x8E228108A8F0E004
+
+
+def test_schema_eight_plan_hashes_selected_response_and_appends_exact_cap() -> None:
+    plan = _plan(schema_revision=8)
+    baseline = integral_plan_digest(plan)
+    changed = {
+        **plan,
+        "selected_response_intervals_q": [
+            [12_900_001, 13_200_000],
+            [-13_100_000, -12_800_000],
+        ],
+    }
+
+    assert baseline != integral_plan_digest(changed)
+    assert derive_integral_ladder(
+        25_000,
+        512_000,
+        64_000,
+        32_767,
+        schema_revision=8,
+        build_revision=CURRENT_Q4_12_BUILD,
+    ) == {
+        "i_start": 1,
+        "i_top_cap": 1_310,
+        "positive_i": [1, 2, 3, 4, 8, 16, 32, 64, 128, 256, 512, 1_024, 1_310],
+    }
+
+
+def test_combined_integral_target_uses_signed_directional_deficits() -> None:
+    assert integral_deficit_reaches_target(
+        264,
+        4_000,
+        [[300_000, 350_000], [-350_000, -300_000]],
+    )
+    assert not integral_deficit_reaches_target(
+        264,
+        4_000,
+        [[360_000, 370_000], [-350_000, -300_000]],
+    )
+
+
+def test_combined_target_status_distinguishes_all_ladder_termini() -> None:
+    common = {"eligible_masks": [0b111, 0b111], "expected_rungs": 15}
+
+    assert (
+        combined_target_status(target_terminus=6, current_terminus=None, emitted_rungs=7, **common)
+        == 0
+    )
+    assert (
+        combined_target_status(
+            target_terminus=2,
+            eligible_masks=[0b11, 0b111],
+            current_terminus=None,
+            emitted_rungs=3,
+            expected_rungs=15,
+        )
+        == 1
+    )
+    assert (
+        combined_target_status(
+            target_terminus=None, current_terminus=10, emitted_rungs=12, **common
+        )
+        == 2
+    )
+    assert (
+        combined_target_status(
+            target_terminus=None, current_terminus=None, emitted_rungs=15, **common
+        )
+        == 3
+    )
+
+
+def test_operational_clamp_transition_ceiling_admits_p1024_not_p1448() -> None:
+    common = {
+        "target_rpm": 264,
+        "counts_per_rev": 4_000,
+        "pwm_hz": 25_000,
+        "moving_stroke_us": 512_000,
+        "probe_limit": 2_816,
+    }
+    selection = select_transition_capable_test_point(
+        stage_b_joint_membership=0b11,
+        p_start=1_024,
+        p_top=1_448,
+        **common,
+    )
+
+    assert selection["transition_ceiling"] == 1_088
+    assert selection["joint_membership"] == 0b01
+    assert selection["final_p"] == 1_024
 
 
 def test_schema_three_plan_digest_hashes_limit_evidence_capability() -> None:
@@ -273,30 +400,44 @@ def test_schema_seven_transition_boundary_and_overflow_fail_closed() -> None:
 
 def _plan_marker(plan: dict[str, object], sequence: int) -> tuple[bytes, dict[str, object]]:
     if int(plan["schema_revision"]) >= 2:
-        raw = struct.pack(
-            "<BIQHIiIHBHIIIIIIIBHH",
-            0,
-            7,
-            int(plan["plan_digest"]),
-            int(plan["final_p"]),
-            int(plan["planned_velocity_mrev_s"]),
-            int(plan["target_velocity_rpm"]),
-            int(plan["pwm_hz"]),
-            int(plan["positive_i"][0]),
-            int(plan["positive_rung_count"]),
-            int(plan["family_size"]),
-            int(plan["moving_stroke_us"]),
-            int(plan["zero_settle_us"]),
-            int(plan["analysis_budget_us"]),
-            int(plan["maximum_workflow_ms"]),
-            int(plan["recovery_origin_band_counts"]),
-            int(plan["recovery_nominal_slot_us"]),
-            int(plan["recovery_maximum_slot_us"]),
-            int(plan["recovery_slot_count"]),
-            int(plan["hard_torque_limit"]),
-            int(plan["usable_torque_limit"]),
+        raw = bytearray(
+            struct.pack(
+                "<BIQHIiIHBHIIIIIIIBHH",
+                0,
+                7,
+                int(plan["plan_digest"]),
+                int(plan["final_p"]),
+                int(plan["planned_velocity_mrev_s"]),
+                int(plan["target_velocity_rpm"]),
+                int(plan["pwm_hz"]),
+                int(plan["positive_i"][0]),
+                int(plan["positive_rung_count"]),
+                int(plan["family_size"]),
+                int(plan["moving_stroke_us"]),
+                int(plan["zero_settle_us"]),
+                int(plan["analysis_budget_us"]),
+                int(plan["maximum_workflow_ms"]),
+                int(plan["recovery_origin_band_counts"]),
+                int(plan["recovery_nominal_slot_us"]),
+                int(plan["recovery_maximum_slot_us"]),
+                int(plan["recovery_slot_count"]),
+                int(plan["hard_torque_limit"]),
+                int(plan["usable_torque_limit"]),
+            )
         )
-        return raw, {
+        if int(plan["schema_revision"]) >= 8:
+            raw.extend(
+                struct.pack(
+                    "<Biiii",
+                    1,
+                    *(
+                        endpoint
+                        for interval in plan["selected_response_intervals_q"]
+                        for endpoint in interval
+                    ),
+                )
+            )
+        return bytes(raw), {
             **plan,
             "record_kind": "integral_plan_marker",
             "run_sequence": 7,
@@ -406,6 +547,9 @@ def _plan_records(plan: dict[str, object]) -> list[tuple[bytes, dict[str, object
     if int(plan["schema_revision"]) >= 4:
         records[0][1]["directional_validity"] = plan["directional_validity"]
         records[0][1]["reduced_margin"] = plan["reduced_margin"]
+    if int(plan["schema_revision"]) >= 8:
+        records[0][1]["combined_selected_response"] = plan["combined_selected_response"]
+        records[0][1]["selected_response_intervals_q"] = plan["selected_response_intervals_q"]
     return records
 
 
@@ -674,7 +818,7 @@ def _synthetic_complete_capture(
                 "evidence_sequence": sequence,
                 "plan_digest": plan["plan_digest"],
                 "digest": digest,
-                "outcome": 0,
+                "outcome": 1 if schema_revision >= 8 else 0,
                 "cause": 0,
                 "expected_observations": 8 * len(gains),
                 "emitted_observations": 8 * len(gains),
@@ -686,7 +830,11 @@ def _synthetic_complete_capture(
                 ],
                 "current_terminus": None,
                 **(
-                    {"recovery_flags": (8 if schema_revision >= 7 else 4)}
+                    {
+                        "recovery_flags": (
+                            0xC0 if schema_revision >= 8 else 8 if schema_revision >= 7 else 4
+                        )
+                    }
                     if schema_revision >= 6
                     else {"recovery_unavailable": 0}
                 ),
@@ -700,10 +848,30 @@ def _synthetic_complete_capture(
                     if schema_revision >= 4
                     else {}
                 ),
+                **(
+                    {
+                        "combined_workflow": True,
+                        "final_p": plan["final_p"],
+                        "target_status": 3,
+                        "target_terminus": None,
+                    }
+                    if schema_revision >= 8
+                    else {}
+                ),
             },
         )
     )
     return raw_observations, records
+
+
+def test_schema_eight_combined_run_completes_without_reproduction() -> None:
+    raw, records = _synthetic_complete_capture(schema_revision=8)
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["matches_firmware"] is True
+    assert audit["terminal"]["outcome"] == 1
+    assert audit["terminal"]["target_status"] == 3
 
 
 def _synthetic_schema_five_boundary_capture() -> tuple[
@@ -1339,7 +1507,7 @@ def test_schema_four_sufficiency_requires_both_closing_bookends() -> None:
     assert _stage_c_run_sufficient(3, opening, [None, None], masks) is True
 
 
-@pytest.mark.parametrize("schema_revision", [0, 8])
+@pytest.mark.parametrize("schema_revision", [0, 9])
 def test_integral_ladder_rejects_unsupported_schema(schema_revision: int) -> None:
     with pytest.raises(ValueError, match="unsupported Stage-C evidence schema"):
         derive_integral_ladder(
