@@ -227,6 +227,10 @@ def test_integral_plan_digest_hashes_every_immutable_input_in_firmware_order() -
     assert integral_plan_digest(_plan()) == 0x8E228108A8F0E004
 
 
+def test_schema_eleven_plan_digest_hashes_stabilized_recovery_schedule() -> None:
+    assert integral_plan_digest(_plan(schema_revision=11)) == 0x83E8FE6A458FE303
+
+
 def test_schema_eight_plan_hashes_selected_response_and_appends_exact_cap() -> None:
     plan = _plan(schema_revision=8)
     baseline = integral_plan_digest(plan)
@@ -953,6 +957,35 @@ def test_current_combined_schemas_replay_response_horizons_and_transition_allowa
     assert rung["tau_us"] == 655_360
     assert rung["moving_horizon_us"] == 512_000
     assert rung["horizon_class"] == 1
+
+
+def test_fault_after_completed_observation_allows_missing_current_record() -> None:
+    raw, records = _synthetic_complete_capture(schema_revision=11)
+    observation_index = next(
+        index
+        for index, (_raw, value) in enumerate(records)
+        if value["record_kind"] == "integral_observation"
+        and value["rung_index"] == 3
+        and value["slot"] == 3
+    )
+    terminal = {
+        **records[-1][1],
+        "evidence_sequence": int(records[observation_index][1]["evidence_sequence"]) + 1,
+        "outcome": 3,
+        "cause": 11,
+        "emitted_observations": 28,
+        "emitted_rungs": 3,
+        "opening_available_mask": 0,
+        "bookend_available_mask": 0,
+        "target_status": 255,
+    }
+    partial = [*records[: observation_index + 1], (b"", terminal)]
+
+    audit = audit_velocity_integral(raw, partial)
+
+    assert (
+        "integral recovery causal order differs from the fixed schedule" not in audit["mismatches"]
+    )
 
 
 def test_schema_nine_reports_firmware_response_horizon_mismatch() -> None:

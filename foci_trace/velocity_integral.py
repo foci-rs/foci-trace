@@ -41,6 +41,7 @@ _TERMINAL_COMBINED_TARGET_MASK = 0b111 << 4
 _TERMINAL_COMBINED_WORKFLOW = 1 << 7
 _SLOT_TRANSITION_ALLOWANCE_US = 20_000
 _RECOVERY_STABILIZATION_US = 500_000
+_STABILIZED_RECOVERY_SCHEDULE_CODE = 1
 _U128_MAX = (1 << 128) - 1
 
 
@@ -117,6 +118,8 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
         _append_integer(encoded, int(plan[name]), 4)
     if int(plan["schema_revision"]) >= 9:
         _append_integer(encoded, int(plan["slot_transition_allowance_us"]), 4)
+        if int(plan["schema_revision"]) == 11 and bool(plan["combined_selected_response"]):
+            _append_integer(encoded, _STABILIZED_RECOVERY_SCHEDULE_CODE, 1)
     for name in ("nominal_workflow_ms", "maximum_workflow_ms"):
         _append_integer(encoded, int(plan[name]), 4)
     if int(plan["schema_revision"]) >= 2:
@@ -1457,6 +1460,16 @@ def audit_velocity_integral(
         if int(record["clamp_readback"]) != int(record["clamp_limit"]):
             mismatches.append("Stage C current evidence clamp readback differs")
     historical_attribution_caveat = False
+    terminal_observation_without_current = (
+        (
+            int(nonterminal[-1][1]["rung_index"]),
+            int(nonterminal[-1][1]["slot"]),
+        )
+        if nonterminal
+        and nonterminal[-1][1]["record_kind"] == "integral_observation"
+        and int(terminal["outcome"]) == 3
+        else None
+    )
     if schema_revision >= 3 and int(terminal["outcome"]) != 3:
         observation_keys = {
             (int(value["rung_index"]), int(value["slot"])) for value in observation_records
@@ -1559,7 +1572,10 @@ def audit_velocity_integral(
             for slot in range(8):
                 if (rung_index, slot) in observation_keys:
                     expected_order.append(("integral_observation", rung_index))
-                    if schema_revision >= 3:
+                    if (
+                        schema_revision >= 3
+                        and (rung_index, slot) != terminal_observation_without_current
+                    ):
                         expected_order.append(("velocity_primitive_current", rung_index))
                 elif boundary_key == (rung_index, slot):
                     expected_order.append(("velocity_primitive_current", rung_index))
