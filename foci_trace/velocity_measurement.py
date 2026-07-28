@@ -426,6 +426,130 @@ def audit_rung_origin_recovery(
     }
 
 
+def audit_selected_recovery_rest(
+    record: dict[str, object],
+    plan: dict[str, object],
+    terminal: dict[str, object],
+    recovery_records: list[dict[str, object]],
+) -> dict[str, object]:
+    """Check one firmware-authored selected-recovery rest diagnostic."""
+    mismatches: list[str] = []
+    plan_digest = int(plan["plan_digest_low"]) | (int(plan["plan_digest_high"]) << 32)
+    start = int(record["start_offset_counts"])
+    first_in_band = int(record["first_in_band_offset_counts"])
+    final = int(record["final_offset_counts"])
+    origin_band = int(plan["recovery_origin_band_counts"])
+    planned_return = recovery_return_distance_counts(start, origin_band)
+    disposition = int(record["disposition"])
+    rung_index = int(record["rung_index"])
+    matching_recoveries = [
+        item for item in recovery_records if int(item["rung_index"]) == rung_index
+    ]
+
+    if (
+        int(plan["nominal_workflow_ms"]),
+        int(plan["maximum_workflow_ms"]),
+    ) != (452_073, 496_528):
+        mismatches.append("selected recovery rest is outside the Stage-B-11 duration pair")
+    if rung_index != int(terminal["emitted_rungs"]) - 1:
+        mismatches.append("selected recovery rest is not attached to the final emitted rung")
+    if int(record["stage"]) != 0:
+        mismatches.append("selected recovery rest carries the wrong stage")
+    if int(record["plan_digest"]) != plan_digest:
+        mismatches.append("selected recovery rest plan digest differs")
+    if planned_return is None or int(record["planned_return_distance_counts"]) != planned_return:
+        mismatches.append("selected recovery rest planned return differs")
+    if abs(first_in_band) > origin_band:
+        mismatches.append("selected recovery rest first in-band offset is outside the band")
+    if int(record["displacement_to_band_counts"]) != first_in_band - start:
+        mismatches.append("selected recovery rest entry displacement differs")
+    if abs(final) > origin_band:
+        mismatches.append("selected recovery rest final offset is outside the band")
+    lead_net = int(record["lead_in_net_displacement_counts"])
+    lead_span = int(record["lead_in_displacement_span_counts"])
+    if abs(lead_net) > lead_span:
+        mismatches.append("selected recovery rest lead-in net exceeds its span")
+    scored_net = int(record["scored_net_displacement_counts"])
+    scored_min = int(record["scored_min_displacement_counts"])
+    scored_max = int(record["scored_max_displacement_counts"])
+    if not scored_min <= scored_net <= scored_max:
+        mismatches.append("selected recovery rest scored displacement is inconsistent")
+
+    if disposition == 0:
+        if len(matching_recoveries) != 1:
+            mismatches.append("confirmed selected recovery rest lacks one ordinary recovery")
+        elif int(record["entry_to_band_duration_us"]) > int(
+            matching_recoveries[0]["moving_duration_us"]
+        ):
+            mismatches.append("selected recovery entry duration exceeds ordinary moving duration")
+    elif matching_recoveries:
+        mismatches.append("unconfirmed selected recovery rest emitted an ordinary recovery")
+    if disposition == 1 and (
+        int(terminal["outcome"]) != STAGE_B_OUTCOME_INCONCLUSIVE
+        or int(terminal["cause"]) != STAGE_B_CAUSE_RECOVERY_UNAVAILABLE
+        or int(terminal.get("recovery_unavailable", 0)) != 1
+    ):
+        mismatches.append("unconfirmed selected recovery rest has the wrong Stage-B terminal")
+
+    return {
+        "matches_firmware": not mismatches,
+        "mismatches": mismatches,
+        "record": dict(record),
+    }
+
+
+def _selected_recovery_scope_comparison(
+    selected: dict[str, object],
+    recovery_records: list[dict[str, object]],
+    plan: dict[str, object],
+) -> dict[str, object]:
+    """Report whether intermediate recoveries share the selected return geometry."""
+    selected_rung = int(selected["rung_index"])
+    selected_return = int(selected["planned_return_distance_counts"])
+    selected_entry = int(selected["entry_to_band_duration_us"])
+    intermediate = []
+    for record in recovery_records:
+        if int(record["rung_index"]) == selected_rung:
+            continue
+        return_distance = recovery_return_distance_counts(
+            int(record["start_offset_counts"]), int(plan["recovery_origin_band_counts"])
+        )
+        intermediate.append(
+            {
+                "rung_index": int(record["rung_index"]),
+                "start_offset_counts": int(record["start_offset_counts"]),
+                "origin_band_counts": int(record["origin_band_counts"]),
+                "planned_return_distance_counts": return_distance,
+                "moving_duration_us": int(record["moving_duration_us"]),
+                "short_return_like_selected": (
+                    return_distance is not None and return_distance <= selected_return
+                ),
+                "fast_entry_like_selected": int(record["moving_duration_us"]) <= selected_entry,
+            }
+        )
+    return {
+        "interpretation": "selected-recovery scope comparison; never firmware gating",
+        "selected": {
+            name: int(selected[name])
+            for name in (
+                "rung_index",
+                "planned_return_distance_counts",
+                "entry_to_band_duration_us",
+                "lead_in_net_displacement_counts",
+                "lead_in_displacement_span_counts",
+                "scored_net_displacement_counts",
+                "scored_min_displacement_counts",
+                "scored_max_displacement_counts",
+            )
+        },
+        "intermediate": intermediate,
+        "scope_mismatch": any(
+            bool(item["short_return_like_selected"]) or bool(item["fast_entry_like_selected"])
+            for item in intermediate
+        ),
+    }
+
+
 def _f32(value: float | int) -> float:
     """Round one value to the firmware's IEEE-754 single-precision domain."""
     return struct.unpack("<f", struct.pack("<f", value))[0]
@@ -2544,6 +2668,8 @@ def _stage_b_record_identity(value: dict[str, object]) -> tuple[object, ...]:
         return kind, int(value["rung_index"])
     if kind == "rung_origin_recovery":
         return kind, int(value["rung_index"])
+    if kind == "selected_recovery_rest":
+        return kind, int(value["rung_index"])
     if kind == "velocity_primitive_current":
         return kind, int(value["rung_index"]), int(value["slot"])
     if kind == "directional_region":
@@ -2616,6 +2742,11 @@ def _compare_stage_b_causal_order(
         for value in records
         if value["record_kind"] == "rung_origin_recovery"
     }
+    selected_rest_rungs = {
+        int(value["rung_index"])
+        for value in records
+        if value["record_kind"] == "selected_recovery_rest"
+    }
     observation_slots = {
         (int(value["rung_index"]), int(value["slot"]))
         for value in records
@@ -2641,6 +2772,8 @@ def _compare_stage_b_causal_order(
         expected.extend(joint_at_boundary.get(rung_index, ()))
         if rung_index in reported_rungs:
             expected.append(("rung", rung_index))
+        if rung_index in selected_rest_rungs:
+            expected.append(("selected_recovery_rest", rung_index))
         if rung_index in recovery_rungs:
             expected.append(("rung_origin_recovery", rung_index))
         expected.extend(directional_after_rung.get(rung_index, ()))
@@ -3091,7 +3224,10 @@ def replay_stage_b_regions(
     if len(plans) != 1 or len(terminals) != 1:
         raise ValueError("one plan and one terminal are required for Stage B replay")
     plan, terminal = plans[0], terminals[0]
-    combined_response_selected = (
+    selected_recovery_rest_present = any(
+        value["record_kind"] == "selected_recovery_rest" for _raw, value in evidence_records
+    )
+    combined_response_selected = selected_recovery_rest_present or (
         int(terminal.get("outcome", STAGE_B_OUTCOME_INCONCLUSIVE)) == STAGE_B_OUTCOME_COMPLETE
         and any(
             value["record_kind"] == "directional_region" and int(value["closure"]) == 5
@@ -3103,7 +3239,9 @@ def replay_stage_b_regions(
         )
     )
     schema_revision = (
-        9
+        11
+        if selected_recovery_rest_present
+        else 9
         if combined_response_selected
         else 8
         if any(
@@ -3434,6 +3572,9 @@ def _audit_stage_b_velocity_sweep(
     recovery_records = [
         value for _raw, value in nonterminal if value["record_kind"] == "rung_origin_recovery"
     ]
+    selected_rest_records = [
+        value for _raw, value in nonterminal if value["record_kind"] == "selected_recovery_rest"
+    ]
     current_records = [
         value for _raw, value in nonterminal if value["record_kind"] == "velocity_primitive_current"
     ]
@@ -3516,6 +3657,18 @@ def _audit_stage_b_velocity_sweep(
             )
     elif recovery_records:
         mismatches.append("historical Stage B plan carries unexpected recovery records")
+    if len(selected_rest_records) > 1:
+        mismatches.append("Stage B carries more than one selected recovery rest diagnostic")
+    selected_rest_audit = None
+    selected_scope = None
+    if selected_rest_records:
+        selected_rest_audit = audit_selected_recovery_rest(
+            selected_rest_records[0], plan, terminal, recovery_records
+        )
+        mismatches.extend(selected_rest_audit["mismatches"])
+        selected_scope = _selected_recovery_scope_comparison(
+            selected_rest_records[0], recovery_records, plan
+        )
     if reproduction_group_error:
         mismatches.append(reproduction_group_error)
     if digest != reported_digest:
@@ -4026,6 +4179,18 @@ def _audit_stage_b_velocity_sweep(
         mismatches.append("Stage B terminal selected memberships differ from replay")
     if list(terminal["selected_intervals"]) != expected_intervals:
         mismatches.append("Stage B terminal selected intervals differ from replay")
+    if combined_response_selected:
+        selected_unconfirmed = bool(
+            selected_rest_records and int(selected_rest_records[0]["disposition"]) == 1
+        )
+        expected_outcome = (
+            STAGE_B_OUTCOME_INCONCLUSIVE if selected_unconfirmed else STAGE_B_OUTCOME_COMPLETE
+        )
+        expected_cause = STAGE_B_CAUSE_RECOVERY_UNAVAILABLE if selected_unconfirmed else 0
+        if int(terminal["outcome"]) != expected_outcome or int(terminal["cause"]) != expected_cause:
+            mismatches.append("Stage B selected-response terminal differs from recovery rest")
+        if int(terminal.get("recovery_unavailable", 0)) != int(selected_unconfirmed):
+            mismatches.append("Stage B selected-response recovery flag differs")
     if not replay["sufficient"] and int(terminal["outcome"]) == STAGE_B_OUTCOME_INCONCLUSIVE:
         recovery_failure = any(
             int(record["outcome"]) in (2, 3)
@@ -4206,6 +4371,11 @@ def _audit_stage_b_velocity_sweep(
         "mismatches": mismatches,
         "caveats": caveats,
         "recoveries": [dict(record) for record in recovery_records],
+        "selected_recovery_rest": (
+            dict(selected_rest_records[0]) if selected_rest_records else None
+        ),
+        "selected_recovery_rest_audit": selected_rest_audit,
+        "selected_recovery_scope": selected_scope,
         "current_evidence": [dict(record) for record in current_records],
         "limit_evidence_capabilities": sorted(
             {int(record["capability"]) for record in current_records}

@@ -2595,6 +2595,7 @@ def test_recovery_records_route_to_their_owning_stage(monkeypatch) -> None:
     state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
     payloads = (
         {"record_kind": "plan", "run_sequence": 7},
+        {"record_kind": "selected_recovery_rest", "run_sequence": 7, "stage": 0},
         {"record_kind": "rung_origin_recovery", "run_sequence": 7, "stage": 0},
         {"record_kind": "stage_b_terminal", "run_sequence": 7},
         {"record_kind": "integral_plan_core", "run_sequence": 8},
@@ -2627,7 +2628,12 @@ def test_recovery_records_route_to_their_owning_stage(monkeypatch) -> None:
     analyze._velocity_sweep_audits({0: state})
     analyze._velocity_integral_audits({0: state})
 
-    assert routed["stage_b"] == ["plan", "rung_origin_recovery", "stage_b_terminal"]
+    assert routed["stage_b"] == [
+        "plan",
+        "selected_recovery_rest",
+        "rung_origin_recovery",
+        "stage_b_terminal",
+    ]
     assert routed["stage_c"] == [
         "integral_plan_core",
         "velocity_primitive_current",
@@ -2725,3 +2731,43 @@ def test_stage_b_schema_ten_is_bound_by_its_companion_stage_c_plan(monkeypatch) 
     audit = analyze._velocity_sweep_audits({0: state})[0]
 
     assert audit["stage_b_replay"]["schema_revision"] == 10
+
+
+def test_selected_recovery_rest_binds_stage_b_schema_eleven(monkeypatch) -> None:
+    import foci_trace.analyze as analyze
+
+    state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
+    payloads = (
+        {"record_kind": "plan", "run_sequence": 9},
+        {"record_kind": "selected_recovery_rest", "run_sequence": 9, "stage": 0},
+        {"record_kind": "stage_b_terminal", "run_sequence": 9},
+        {
+            "record_kind": "integral_plan_core",
+            "run_sequence": 9,
+            "schema_revision": 10,
+        },
+    )
+    state.velocity_sweep_evidence = [
+        analyze._VelocitySweepEvidenceFrame(index, 0, bytes((index,)), payload)
+        for index, payload in enumerate(payloads, 1)
+    ]
+    monkeypatch.setattr(
+        analyze,
+        "audit_velocity_sweep",
+        lambda *_args: {
+            "stage_b_replay": {"schema_revision": 9},
+            "terminal": {"outcome": 1, "cause": 0},
+            "selected_recovery_rest": {"disposition": 0},
+            "plan": {
+                "nominal_workflow_ms": 452_073,
+                "maximum_workflow_ms": 496_528,
+            },
+            "matches_firmware": True,
+            "mismatches": [],
+        },
+    )
+
+    audit = analyze._velocity_sweep_audits({0: state})[0]
+
+    assert audit["stage_b_replay"]["schema_revision"] == 11
+    assert audit["matches_firmware"] is True

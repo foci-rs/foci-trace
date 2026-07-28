@@ -79,6 +79,40 @@ def test_summary_tracks_stage_b_regions_nomination_and_terminal() -> None:
     assert "stage_b_recovery_unavailable=true" in text
 
 
+def test_summary_tracks_selected_recovery_rest() -> None:
+    summary = LiveSummary()
+    summary.observe(
+        0,
+        1,
+        Frame(
+            header=FrameHeader(
+                9,
+                32,
+                FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
+                0,
+                0,
+                1,
+                0,
+                1,
+                1,
+                1,
+            ),
+            payload={
+                "record_kind": "selected_recovery_rest",
+                "disposition": 1,
+                "lead_in_net_displacement_counts": -3,
+                "lead_in_displacement_span_counts": 7,
+                "scored_net_displacement_counts": -2,
+                "scored_min_displacement_counts": -2,
+                "scored_max_displacement_counts": 0,
+            },
+            raw_payload=b"",
+        ),
+    )
+
+    assert "selected_recovery_rest=1:-3:7:-2:-2:0" in summary.render()
+
+
 def test_summary_tracks_velocity_integral_rungs_and_terminal() -> None:
     summary = LiveSummary()
     for sequence, payload in enumerate(

@@ -1997,7 +1997,25 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                 and int(companion_stage_c.get("schema_revision", 0)) == 10
                 and isinstance(replay, dict)
             ):
-                replay["schema_revision"] = 10
+                selected_rest = report.get("selected_recovery_rest")
+                replay["schema_revision"] = 11 if isinstance(selected_rest, dict) else 10
+                expected_duration = (
+                    (452_073, 496_528) if isinstance(selected_rest, dict) else (451_573, 496_528)
+                )
+                plan = report.get("plan")
+                if isinstance(plan, dict):
+                    actual_duration = (
+                        int(plan.get("nominal_workflow_ms", -1)),
+                        int(plan.get("maximum_workflow_ms", -1)),
+                    )
+                else:
+                    actual_duration = expected_duration
+                if isinstance(plan, dict) and actual_duration != expected_duration:
+                    report["matches_firmware"] = False
+                    report["mismatches"].append(
+                        "combined Stage-B duration pair differs from its schema: "
+                        f"firmware={actual_duration} offline={expected_duration}"
+                    )
             report["device_index"] = device_index
             report["source_index"] = source_index
             report["serial"] = state.report.serial or state.report.metadata_serial

@@ -37,6 +37,7 @@ class DeviceSummary:
     stage_b_outcome: int | None = None
     stage_b_cause: int | None = None
     stage_b_recovery_unavailable: bool = False
+    selected_recovery_rest: tuple[int, int, int, int, int, int] | None = None
     stage_b_directional_validity: tuple[int, int] | None = None
     stage_b_reduced_margin: bool = False
     velocity_integral_test_p: int = 0
@@ -112,6 +113,15 @@ class LiveSummary:
                 device.stage_b_cause = int(frame.payload["cause"])
                 device.stage_b_recovery_unavailable = bool(
                     int(frame.payload["recovery_unavailable"])
+                )
+            elif kind == "selected_recovery_rest":
+                device.selected_recovery_rest = (
+                    int(frame.payload["disposition"]),
+                    int(frame.payload["lead_in_net_displacement_counts"]),
+                    int(frame.payload["lead_in_displacement_span_counts"]),
+                    int(frame.payload["scored_net_displacement_counts"]),
+                    int(frame.payload["scored_min_displacement_counts"]),
+                    int(frame.payload["scored_max_displacement_counts"]),
                 )
             elif kind == "reproduction_v4_header":
                 device.stage_b_nominated_p = int(frame.payload["final_p"])
@@ -191,6 +201,7 @@ class LiveSummary:
                 "stage_b_p={stage_b_p} stage_b_outcome={stage_b_outcome} "
                 "stage_b_cause={stage_b_cause} "
                 "stage_b_recovery_unavailable={stage_b_recovery_unavailable} "
+                "selected_recovery_rest={selected_recovery_rest} "
                 "stage_b_validity={stage_b_validity} "
                 "stage_b_reduced_margin={stage_b_reduced_margin} "
                 "velocity_integral_p={integral_p} "
@@ -229,6 +240,11 @@ class LiveSummary:
                     ),
                     stage_b_cause=("none" if item.stage_b_cause is None else item.stage_b_cause),
                     stage_b_recovery_unavailable=str(item.stage_b_recovery_unavailable).lower(),
+                    selected_recovery_rest=(
+                        "none"
+                        if item.selected_recovery_rest is None
+                        else ":".join(str(value) for value in item.selected_recovery_rest)
+                    ),
                     stage_b_validity=(
                         "none"
                         if item.stage_b_directional_validity is None

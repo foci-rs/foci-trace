@@ -9,6 +9,7 @@ from foci_trace.velocity_measurement import (
     analyze_velocity_observations,
     analyze_stationary_tail,
     audit_rung_origin_recovery,
+    audit_selected_recovery_rest,
     classify_absolute_rate,
     plan_rung_origin_recovery,
     project_recovery_authority,
@@ -1003,6 +1004,57 @@ def test_stage_b_recovery_failure_owns_the_inconclusive_cause() -> None:
     assert _stage_b_inconclusive_cause(0, recovery_failure=True) == 7
 
 
+def test_selected_recovery_rest_binds_schema11_and_terminal_disposition() -> None:
+    plan = {
+        "plan_digest_low": 0x5566_7788,
+        "plan_digest_high": 0x1122_3344,
+        "recovery_origin_band_counts": 1_000,
+        "nominal_workflow_ms": 452_073,
+        "maximum_workflow_ms": 496_528,
+    }
+    terminal = {
+        "emitted_rungs": 16,
+        "outcome": 1,
+        "cause": 0,
+        "recovery_unavailable": 0,
+    }
+    selected = {
+        "plan_digest": 0x1122_3344_5566_7788,
+        "stage": 0,
+        "rung_index": 15,
+        "start_offset_counts": -1_834,
+        "closest_offset_counts": 998,
+        "final_offset_counts": 999,
+        "planned_return_distance_counts": 834,
+        "first_in_band_offset_counts": 998,
+        "displacement_to_band_counts": 2_832,
+        "entry_to_band_duration_us": 90_904,
+        "lead_in_net_displacement_counts": -3,
+        "lead_in_displacement_span_counts": 7,
+        "scored_net_displacement_counts": 0,
+        "scored_min_displacement_counts": -1,
+        "scored_max_displacement_counts": 1,
+        "disposition": 0,
+    }
+    recovery = {"rung_index": 15, "moving_duration_us": 100_000}
+
+    assert audit_selected_recovery_rest(selected, plan, terminal, [recovery])["matches_firmware"]
+
+    historical = dict(plan, nominal_workflow_ms=451_573)
+    audit = audit_selected_recovery_rest(selected, historical, terminal, [recovery])
+    assert audit["matches_firmware"] is False
+    assert any("outside the Stage-B-11 duration pair" in item for item in audit["mismatches"])
+
+    unconfirmed = dict(selected, disposition=1)
+    terminal = {
+        **terminal,
+        "outcome": 2,
+        "cause": 7,
+        "recovery_unavailable": 1,
+    }
+    assert audit_selected_recovery_rest(unconfirmed, plan, terminal, [])["matches_firmware"]
+
+
 def test_rung_disjoint_pair_has_no_reportable_disturbance_interval() -> None:
     from foci_trace.velocity_measurement import _rung_class
 
@@ -1543,6 +1595,53 @@ def test_stage_b_causal_order_places_recovery_after_each_complete_rung() -> None
     assert _compare_stage_b_causal_order(records, replay) == ""
     records[-2], records[-3] = records[-3], records[-2]
     assert "causal order" in _compare_stage_b_causal_order(records, replay)
+
+
+def test_stage_b_causal_order_places_selected_rest_before_final_recovery() -> None:
+    from foci_trace.velocity_measurement import _compare_stage_b_causal_order
+
+    replay = {
+        "slot_count": 8,
+        "structured_boundaries": {},
+        "directions": [[], []],
+        "joint_regions": [],
+        "nomination": {},
+        "sufficient": False,
+    }
+    records = [
+        {"record_kind": "plan"},
+        *({"record_kind": "observation", "rung_index": 0, "slot": slot} for slot in range(8)),
+        {"record_kind": "rung", "rung_index": 0},
+        {"record_kind": "selected_recovery_rest", "rung_index": 0},
+        {"record_kind": "rung_origin_recovery", "rung_index": 0},
+        {"record_kind": "stage_b_terminal"},
+    ]
+
+    assert _compare_stage_b_causal_order(records, replay) == ""
+    records[-2], records[-3] = records[-3], records[-2]
+    assert "causal order" in _compare_stage_b_causal_order(records, replay)
+
+
+def test_stage_b_causal_order_allows_failed_selected_rest_without_recovery() -> None:
+    from foci_trace.velocity_measurement import _compare_stage_b_causal_order
+
+    replay = {
+        "slot_count": 8,
+        "structured_boundaries": {},
+        "directions": [[], []],
+        "joint_regions": [],
+        "nomination": {},
+        "sufficient": False,
+    }
+    records = [
+        {"record_kind": "plan"},
+        *({"record_kind": "observation", "rung_index": 0, "slot": slot} for slot in range(8)),
+        {"record_kind": "rung", "rung_index": 0},
+        {"record_kind": "selected_recovery_rest", "rung_index": 0},
+        {"record_kind": "stage_b_terminal"},
+    ]
+
+    assert _compare_stage_b_causal_order(records, replay) == ""
 
 
 def test_stage_b_causal_order_omits_handoff_for_insufficient_run() -> None:
