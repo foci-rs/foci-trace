@@ -787,6 +787,86 @@ def test_decodes_rung_origin_recovery_record() -> None:
     }
 
 
+def test_decodes_selected_recovery_rest_record() -> None:
+    payload = struct.pack(
+        "<BIHBBHQiiiIiiIiIiiiBBqqHBB",
+        10,
+        0x0102_0304,
+        19,
+        0,
+        15,
+        1_024,
+        0x1122_3344_5566_7788,
+        -1_834,
+        998,
+        999,
+        834,
+        998,
+        2_832,
+        90_904,
+        -3,
+        7,
+        0,
+        -1,
+        1,
+        0,
+        1,
+        -9,
+        11,
+        1_560,
+        0,
+        0,
+    )
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert len(payload) == 89
+    assert frame.payload == {
+        "record_kind": "selected_recovery_rest",
+        "run_sequence": 0x0102_0304,
+        "evidence_sequence": 19,
+        "stage": 0,
+        "rung_index": 15,
+        "velocity_p": 1_024,
+        "plan_digest": 0x1122_3344_5566_7788,
+        "start_offset_counts": -1_834,
+        "closest_offset_counts": 998,
+        "final_offset_counts": 999,
+        "planned_return_distance_counts": 834,
+        "first_in_band_offset_counts": 998,
+        "displacement_to_band_counts": 2_832,
+        "entry_to_band_duration_us": 90_904,
+        "lead_in_net_displacement_counts": -3,
+        "lead_in_displacement_span_counts": 7,
+        "scored_net_displacement_counts": 0,
+        "scored_min_displacement_counts": -1,
+        "scored_max_displacement_counts": 1,
+        "stationarity_code": 0,
+        "interval_present": 1,
+        "exact_velocity_interval_q": [-9, 11],
+        "peak_torque_target_abs": 1_560,
+        "current_contact_code": 0,
+        "disposition": 0,
+    }
+    for corrupt in (
+        payload[:-1],
+        payload + b"\x00",
+        payload[:67] + b"\x01\x01" + payload[69:],
+        payload[:68] + b"\x00" + payload[69:85] + payload[85:],
+        payload[:88] + b"\x02",
+    ):
+        with pytest.raises(DecodeError):
+            decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, corrupt) + corrupt)
+
+    excluded = bytearray(payload)
+    excluded[67:69] = b"\x04\x00"
+    excluded[69:85] = bytes(16)
+    excluded_frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, excluded) + excluded)
+    assert excluded_frame.payload["stationarity_code"] == 4
+    assert excluded_frame.payload["interval_present"] == 0
+    assert excluded_frame.payload["exact_velocity_interval_q"] == [0, 0]
+
+
 def test_decodes_velocity_integral_response_plan_marker() -> None:
     payload = bytearray([1])
     payload.extend(struct.pack("<IHIIHBI", 7, 1, 0x89AB_CDEF, 0x0123_4567, 1_448, 5, 69_888))
