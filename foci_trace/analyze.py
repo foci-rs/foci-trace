@@ -1943,6 +1943,10 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                     item.payload.get("record_kind") != "velocity_primitive_current"
                     or int(item.payload.get("stage", -1)) == 0
                 )
+                and (
+                    item.payload.get("record_kind") != "recovery_rest"
+                    or int(item.payload.get("stage", -1)) == 0
+                )
             }
         )
         for run_sequence in run_sequences:
@@ -1960,6 +1964,10 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                     )
                     and (
                         item.payload.get("record_kind") != "velocity_primitive_current"
+                        or int(item.payload.get("stage", -1)) == 0
+                    )
+                    and (
+                        item.payload.get("record_kind") != "recovery_rest"
                         or int(item.payload.get("stage", -1)) == 0
                     )
                 )
@@ -1992,13 +2000,13 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                 None,
             )
             replay = report.get("stage_b_replay")
-            if (
-                isinstance(companion_stage_c, dict)
-                and int(companion_stage_c.get("schema_revision", 0)) == 10
-                and isinstance(replay, dict)
-            ):
-                selected_rest = report.get("selected_recovery_rest")
-                replay["schema_revision"] = 11 if isinstance(selected_rest, dict) else 10
+            if isinstance(companion_stage_c, dict) and isinstance(replay, dict):
+                companion_schema = int(companion_stage_c.get("schema_revision", 0))
+                if companion_schema == 11:
+                    replay["schema_revision"] = 12
+                elif companion_schema == 10:
+                    selected_rest = report.get("selected_recovery_rest")
+                    replay["schema_revision"] = 11 if isinstance(selected_rest, dict) else 10
             report["device_index"] = device_index
             report["source_index"] = source_index
             report["serial"] = state.report.serial or state.report.metadata_serial
@@ -2050,6 +2058,10 @@ def _velocity_integral_audits(states: dict[int, _DeviceState]) -> list[dict[str,
                         item.payload.get("record_kind") == "velocity_primitive_current"
                         and int(item.payload.get("stage", -1)) == 1
                     )
+                    or (
+                        item.payload.get("record_kind") == "recovery_rest"
+                        and int(item.payload.get("stage", -1)) == 1
+                    )
                 )
                 and "run_sequence" in item.payload
                 and int(item.payload["run_sequence"]) not in matrix_runs
@@ -2068,6 +2080,10 @@ def _velocity_integral_audits(states: dict[int, _DeviceState]) -> list[dict[str,
                     )
                     or (
                         item.payload.get("record_kind") == "velocity_primitive_current"
+                        and int(item.payload.get("stage", -1)) == 1
+                    )
+                    or (
+                        item.payload.get("record_kind") == "recovery_rest"
                         and int(item.payload.get("stage", -1)) == 1
                     )
                 )

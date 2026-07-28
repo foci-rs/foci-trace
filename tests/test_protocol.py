@@ -787,7 +787,7 @@ def test_decodes_rung_origin_recovery_record() -> None:
     }
 
 
-def test_decodes_selected_recovery_rest_record() -> None:
+def test_decodes_recovery_rest_record() -> None:
     payload = struct.pack(
         "<BIHBBHQiiiIiiIiIiiiBBqqHBB",
         10,
@@ -822,7 +822,7 @@ def test_decodes_selected_recovery_rest_record() -> None:
 
     assert len(payload) == 89
     assert frame.payload == {
-        "record_kind": "selected_recovery_rest",
+        "record_kind": "recovery_rest",
         "run_sequence": 0x0102_0304,
         "evidence_sequence": 19,
         "stage": 0,

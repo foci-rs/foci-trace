@@ -12,8 +12,10 @@ from .velocity_measurement import (
     _stationary_suffix,
     _upper_bound_signed,
     _upper_bound_unsigned,
+    audit_recovery_rest_geometry,
     audit_rung_origin_recovery,
     plan_rung_origin_recovery,
+    summarize_recovery_rest_diagnostics,
 )
 
 
@@ -38,6 +40,7 @@ _TERMINAL_PROBE_CONSTRAINED_TEST_POINT = 1 << 3
 _TERMINAL_COMBINED_TARGET_MASK = 0b111 << 4
 _TERMINAL_COMBINED_WORKFLOW = 1 << 7
 _SLOT_TRANSITION_ALLOWANCE_US = 20_000
+_RECOVERY_STABILIZATION_US = 500_000
 _U128_MAX = (1 << 128) - 1
 
 
@@ -191,7 +194,7 @@ def derive_integral_ladder(
     build_revision: int | None,
 ) -> dict[str, object]:
     """Reconstruct the cap-only whole-octave positive-I ladder."""
-    if schema_revision not in range(1, 11):
+    if schema_revision not in range(1, 12):
         raise ValueError("unsupported Stage-C evidence schema")
     if shortest_suffix_us < 2:
         raise ValueError("shortest suffix must contain at least two microseconds")
@@ -940,9 +943,12 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
         except ValueError as error:
             mismatches.append(f"plan recovery reconstruction failed: {error}")
             return
+        expected_nominal_slot_us = int(recovery["nominal_slot_us"])
+        if schema_revision >= 11:
+            expected_nominal_slot_us += _RECOVERY_STABILIZATION_US
         for name, expected in (
             ("recovery_origin_band_counts", recovery["origin_band_counts"]),
-            ("recovery_nominal_slot_us", recovery["nominal_slot_us"]),
+            ("recovery_nominal_slot_us", expected_nominal_slot_us),
             ("recovery_maximum_slot_us", recovery["maximum_slot_us"]),
             ("recovery_slot_count", expected_rungs),
         ):
@@ -1205,6 +1211,7 @@ def audit_velocity_integral(
             "integral_plan_marker",
             "integral_observation",
             "integral_rung",
+            "recovery_rest",
             "rung_origin_recovery",
             "velocity_primitive_current",
         )
@@ -1385,6 +1392,30 @@ def audit_velocity_integral(
     recovery_records = [
         value for _raw, value in nonterminal if value["record_kind"] == "rung_origin_recovery"
     ]
+    recovery_rest_records = [
+        value for _raw, value in nonterminal if value["record_kind"] == "recovery_rest"
+    ]
+    recovery_rest_rungs = [int(record["rung_index"]) for record in recovery_rest_records]
+    if len(recovery_rest_rungs) != len(set(recovery_rest_rungs)):
+        mismatches.append("Stage C carries duplicate recovery rest diagnostics")
+    if schema_revision < 11 and recovery_rest_records:
+        mismatches.append("historical Stage C carries recovery-wide rest evidence")
+    for record in recovery_rest_records:
+        mismatches.extend(
+            f"recovery rest rung {record['rung_index']}: {item}"
+            for item in audit_recovery_rest_geometry(record, plan, expected_stage=1)
+        )
+        matching = [
+            recovery
+            for recovery in recovery_records
+            if int(recovery["rung_index"]) == int(record["rung_index"])
+        ]
+        if int(record["disposition"]) == 0 and (
+            len(matching) != 1 or int(matching[0]["outcome"]) not in (1, 5)
+        ):
+            mismatches.append("confirmed Stage C recovery rest lacks one moving recovery")
+        if int(record["disposition"]) == 1 and (matching or int(terminal["cause"]) != 53):
+            mismatches.append("unconfirmed Stage C recovery rest has the wrong successor")
     if schema_revision >= 6:
         recovery_flags = int(terminal.get("recovery_flags", -1))
         known_flags = (
@@ -1489,6 +1520,14 @@ def audit_velocity_integral(
                 f"recovery rung {record['rung_index']}: {item}"
                 for item in recovery_audit["mismatches"]
             )
+        if schema_revision >= 11:
+            diagnostic_rung_set = set(recovery_rest_rungs)
+            for recovery in recovery_records:
+                if (
+                    int(recovery["outcome"]) in (1, 5)
+                    and int(recovery["rung_index"]) not in diagnostic_rung_set
+                ):
+                    mismatches.append("moving Stage C recovery lacks recovery rest evidence")
         if schema_revision >= 6 and "recovered_with_current_headroom" in terminal:
             recovered = any(int(record["outcome"]) == 5 for record in recovery_records)
             if bool(terminal["recovered_with_current_headroom"]) != recovered:
@@ -1503,6 +1542,7 @@ def audit_velocity_integral(
         }
         rung_indexes = {int(value["rung_index"]) for value in rung_records}
         recovery_indexes = {int(value["rung_index"]) for value in recovery_records}
+        recovery_rest_indexes = {int(value["rung_index"]) for value in recovery_rest_records}
         if schema_revision >= 5 and rest_boundary is not None:
             boundary_key = (
                 int(rest_boundary[1]["positive_rung_index"]) + 1,
@@ -1525,6 +1565,8 @@ def audit_velocity_integral(
                     expected_order.append(("velocity_primitive_current", rung_index))
             if rung_index in rung_indexes:
                 expected_order.append(("integral_rung", rung_index))
+            if rung_index in recovery_rest_indexes:
+                expected_order.append(("recovery_rest", rung_index))
             if rung_index in recovery_indexes:
                 expected_order.append(("rung_origin_recovery", rung_index))
         observed_order = [
@@ -1712,6 +1754,8 @@ def audit_velocity_integral(
         "caveats": caveats,
         "historical_attribution_caveat": historical_attribution_caveat,
         "recoveries": [dict(record) for record in recovery_records],
+        "recovery_rest_diagnostics": [dict(record) for record in recovery_rest_records],
+        "recovery_rest_distribution": summarize_recovery_rest_diagnostics(recovery_rest_records),
         "current_evidence": [dict(record) for record in current_records],
         "rest_boundary": dict(rest_boundary[1]) if rest_boundary is not None else None,
         "limit_evidence_capabilities": sorted(

@@ -1553,18 +1553,18 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         interval_present = int(decoded["interval_present"])
         interval = decoded["exact_velocity_interval_q"]
         if stationarity not in range(6):
-            raise DecodeError("selected recovery rest stationarity code is invalid")
+            raise DecodeError("recovery rest stationarity code is invalid")
         if interval_present not in (0, 1) or interval_present != int(stationarity == 0):
-            raise DecodeError("selected recovery rest interval presence is invalid")
+            raise DecodeError("recovery rest interval presence is invalid")
         if interval_present == 0 and interval != [0, 0]:
-            raise DecodeError("excluded selected recovery rest carries an interval")
+            raise DecodeError("excluded recovery rest carries an interval")
         if interval_present == 1 and interval[0] > interval[1]:
-            raise DecodeError("selected recovery rest interval is reversed")
+            raise DecodeError("recovery rest interval is reversed")
         if int(decoded["disposition"]) not in (0, 1):
-            raise DecodeError("selected recovery rest disposition is invalid")
+            raise DecodeError("recovery rest disposition is invalid")
         if int(decoded["current_contact_code"]) not in range(4):
-            raise DecodeError("selected recovery rest current contact is invalid")
-        decoded["record_kind"] = "selected_recovery_rest"
+            raise DecodeError("recovery rest current contact is invalid")
+        decoded["record_kind"] = "recovery_rest"
     elif kind == 10:
         common_fields = (
             ("run_sequence", "I"),

@@ -114,7 +114,7 @@ class LiveSummary:
                 device.stage_b_recovery_unavailable = bool(
                     int(frame.payload["recovery_unavailable"])
                 )
-            elif kind == "selected_recovery_rest":
+            elif kind == "recovery_rest":
                 device.selected_recovery_rest = (
                     int(frame.payload["disposition"]),
                     int(frame.payload["lead_in_net_displacement_counts"]),

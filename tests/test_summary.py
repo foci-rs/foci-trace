@@ -79,7 +79,7 @@ def test_summary_tracks_stage_b_regions_nomination_and_terminal() -> None:
     assert "stage_b_recovery_unavailable=true" in text
 
 
-def test_summary_tracks_selected_recovery_rest() -> None:
+def test_summary_tracks_recovery_rest() -> None:
     summary = LiveSummary()
     summary.observe(
         0,
@@ -98,7 +98,7 @@ def test_summary_tracks_selected_recovery_rest() -> None:
                 1,
             ),
             payload={
-                "record_kind": "selected_recovery_rest",
+                "record_kind": "recovery_rest",
                 "disposition": 1,
                 "lead_in_net_displacement_counts": -3,
                 "lead_in_displacement_span_counts": 7,

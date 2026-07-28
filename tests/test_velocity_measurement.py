@@ -18,6 +18,7 @@ from foci_trace.velocity_measurement import (
     recovery_target_rpm,
     recovery_wrong_way,
     select_recovery_authority,
+    summarize_recovery_rest_diagnostics,
     velocity_report_to_json,
 )
 
@@ -1094,6 +1095,50 @@ def test_episode_eight_selected_recovery_uses_stage_local_duration() -> None:
     assert audit["matches_firmware"]
 
 
+def test_recovery_rest_distribution_uses_lower_middle_and_sorted_rows() -> None:
+    records = [
+        {
+            "stage": 0,
+            "rung_index": rung,
+            "planned_return_distance_counts": distance,
+            "entry_to_band_duration_us": duration,
+            "lead_in_net_displacement_counts": net,
+            "lead_in_displacement_span_counts": span,
+        }
+        for rung, distance, duration, net, span in (
+            (3, 400, 40, -4, 8),
+            (0, 100, 10, 1, 2),
+            (2, 300, 30, -3, 6),
+            (1, 200, 20, 2, 4),
+        )
+    ]
+
+    summary = summarize_recovery_rest_diagnostics(records)
+
+    assert summary["diagnostic_count"] == 4
+    assert summary["planned_return_distance_counts"] == {
+        "min": 100,
+        "median": 200,
+        "max": 400,
+    }
+    assert summary["entry_to_band_duration_us"] == {
+        "min": 10,
+        "median": 20,
+        "max": 40,
+    }
+    assert summary["absolute_lead_in_net_counts"] == {
+        "min": 1,
+        "median": 2,
+        "max": 4,
+    }
+    assert summary["lead_in_span_counts"] == {
+        "min": 2,
+        "median": 4,
+        "max": 8,
+    }
+    assert [row["rung_index"] for row in summary["rows"]] == [0, 1, 2, 3]
+
+
 def test_rung_disjoint_pair_has_no_reportable_disturbance_interval() -> None:
     from foci_trace.velocity_measurement import _rung_class
 
@@ -1651,7 +1696,7 @@ def test_stage_b_causal_order_places_selected_rest_before_final_recovery() -> No
         {"record_kind": "plan"},
         *({"record_kind": "observation", "rung_index": 0, "slot": slot} for slot in range(8)),
         {"record_kind": "rung", "rung_index": 0},
-        {"record_kind": "selected_recovery_rest", "rung_index": 0},
+        {"record_kind": "recovery_rest", "rung_index": 0},
         {"record_kind": "rung_origin_recovery", "rung_index": 0},
         {"record_kind": "stage_b_terminal"},
     ]
@@ -1676,7 +1721,7 @@ def test_stage_b_causal_order_allows_failed_selected_rest_without_recovery() -> 
         {"record_kind": "plan"},
         *({"record_kind": "observation", "rung_index": 0, "slot": slot} for slot in range(8)),
         {"record_kind": "rung", "rung_index": 0},
-        {"record_kind": "selected_recovery_rest", "rung_index": 0},
+        {"record_kind": "recovery_rest", "rung_index": 0},
         {"record_kind": "stage_b_terminal"},
     ]
 

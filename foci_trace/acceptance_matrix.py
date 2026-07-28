@@ -5,6 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from .velocity_integral import depth_three_consensus
+from .velocity_measurement import (
+    audit_recovery_rest_geometry,
+    summarize_recovery_rest_diagnostics,
+)
 
 _FNV1A64_OFFSET = 0xCBF29CE484222325
 _FNV1A64_PRIME = 0x100000001B3
@@ -311,6 +315,12 @@ def audit_acceptance_matrix(
     mismatches: list[str] = []
     plan = assemble_matrix_plan(plans)
     terminal = terminals[0]
+    expected_duration = (63_041, 66_456) if int(plan["schema_revision"]) >= 3 else (60_541, 66_456)
+    if (
+        int(plan["nominal_workflow_ms"]),
+        int(plan["maximum_workflow_ms"]),
+    ) != expected_duration:
+        mismatches.append("matrix schema and duration pair differ")
     recomputed_plan_digest = matrix_plan_digest(plan)
     if recomputed_plan_digest != int(plan["plan_digest"]):
         mismatches.append(
@@ -338,6 +348,52 @@ def audit_acceptance_matrix(
         for _raw, value in nonterminal
         if value.get("record_kind") == "acceptance_matrix_amplitude"
     ]
+    recovery_records = [
+        value for _raw, value in nonterminal if value.get("record_kind") == "rung_origin_recovery"
+    ]
+    recovery_rest_records = [
+        value for _raw, value in nonterminal if value.get("record_kind") == "recovery_rest"
+    ]
+    recovery_rest_rungs = [int(record["rung_index"]) for record in recovery_rest_records]
+    if len(recovery_rest_rungs) != len(set(recovery_rest_rungs)):
+        mismatches.append("matrix carries duplicate recovery rest diagnostics")
+    if int(plan["schema_revision"]) < 3 and recovery_rest_records:
+        mismatches.append("historical matrix carries recovery-wide rest evidence")
+    for record in recovery_rest_records:
+        mismatches.extend(
+            f"recovery rest rung {record['rung_index']}: {item}"
+            for item in audit_recovery_rest_geometry(record, plan, expected_stage=1)
+        )
+    for index, (_raw, record) in enumerate(nonterminal):
+        if record.get("record_kind") != "recovery_rest":
+            continue
+        rung_index = int(record["rung_index"])
+        previous = nonterminal[index - 1][1] if index else {}
+        if (
+            previous.get("record_kind") != "acceptance_matrix_amplitude"
+            or int(previous.get("amplitude_index", -1)) != rung_index
+        ):
+            mismatches.append("matrix recovery rest lacks its causal amplitude")
+        successor = nonterminal[index + 1][1] if index + 1 < len(nonterminal) else None
+        if int(record["disposition"]) == 0 and (
+            successor is None
+            or successor.get("record_kind") != "rung_origin_recovery"
+            or int(successor.get("rung_index", -1)) != rung_index
+            or int(successor.get("outcome", -1)) not in (1, 5)
+        ):
+            mismatches.append("confirmed matrix recovery rest lacks its moving recovery")
+        if int(record["disposition"]) == 1 and (
+            successor is not None or int(terminal["cause"]) != 2
+        ):
+            mismatches.append("unconfirmed matrix recovery rest has the wrong successor")
+    if int(plan["schema_revision"]) >= 3:
+        diagnostic_rungs = set(recovery_rest_rungs)
+        for recovery in recovery_records:
+            if (
+                int(recovery["outcome"]) in (1, 5)
+                and int(recovery["rung_index"]) not in diagnostic_rungs
+            ):
+                mismatches.append("moving matrix recovery lacks recovery rest evidence")
     amplitudes: list[dict[str, Any]] = []
     attempted = [0, 0]
     eligible = [0, 0]
@@ -430,6 +486,9 @@ def audit_acceptance_matrix(
         "plan": plan,
         "terminal": dict(terminal),
         "amplitudes": amplitudes,
+        "recoveries": [dict(record) for record in recovery_records],
+        "recovery_rest_diagnostics": [dict(record) for record in recovery_rest_records],
+        "recovery_rest_distribution": summarize_recovery_rest_diagnostics(recovery_rest_records),
         "complete": int(terminal["outcome"]) == 0,
         "matches_firmware": not mismatches,
         "mismatches": mismatches,

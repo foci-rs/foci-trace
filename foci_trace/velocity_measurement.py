@@ -14,6 +14,7 @@ RATE_Q_SCALE = 1_000
 RECOVERY_MOVING_ALLOWANCE_US = 512_000
 RECOVERY_ZERO_SETTLE_US = 500_000
 RECOVERY_ANALYSIS_BUDGET_US = 236_000
+RECOVERY_STABILIZATION_US = 500_000
 MIN_SELECTED_BLOCKS = 16
 CONFIDENCE_MULTIPLIER_95 = 2.131
 
@@ -426,6 +427,83 @@ def audit_rung_origin_recovery(
     }
 
 
+def audit_recovery_rest_geometry(
+    record: dict[str, object],
+    plan: dict[str, object],
+    *,
+    expected_stage: int,
+) -> list[str]:
+    """Check stage-neutral recovery-rest geometry and scored evidence."""
+    mismatches: list[str] = []
+    plan_digest = (
+        int(plan["plan_digest"])
+        if "plan_digest" in plan
+        else int(plan["plan_digest_low"]) | (int(plan["plan_digest_high"]) << 32)
+    )
+    start = int(record["start_offset_counts"])
+    first_in_band = int(record["first_in_band_offset_counts"])
+    final = int(record["final_offset_counts"])
+    origin_band = int(plan["recovery_origin_band_counts"])
+    planned_return = recovery_return_distance_counts(start, origin_band)
+    if int(record["stage"]) != expected_stage:
+        mismatches.append("recovery rest carries the wrong stage")
+    if int(record["plan_digest"]) != plan_digest:
+        mismatches.append("recovery rest plan digest differs")
+    if planned_return is None or int(record["planned_return_distance_counts"]) != planned_return:
+        mismatches.append("recovery rest planned return differs")
+    if abs(first_in_band) > origin_band:
+        mismatches.append("recovery rest first in-band offset is outside the band")
+    if int(record["displacement_to_band_counts"]) != first_in_band - start:
+        mismatches.append("recovery rest entry displacement differs")
+    if abs(final) > origin_band:
+        mismatches.append("recovery rest final offset is outside the band")
+    lead_net = int(record["lead_in_net_displacement_counts"])
+    lead_span = int(record["lead_in_displacement_span_counts"])
+    if abs(lead_net) > lead_span:
+        mismatches.append("recovery rest lead-in net exceeds its span")
+    scored_net = int(record["scored_net_displacement_counts"])
+    scored_min = int(record["scored_min_displacement_counts"])
+    scored_max = int(record["scored_max_displacement_counts"])
+    if not scored_min <= scored_net <= scored_max:
+        mismatches.append("recovery rest scored displacement is inconsistent")
+    return mismatches
+
+
+def summarize_recovery_rest_diagnostics(
+    records: list[dict[str, object]],
+) -> dict[str, object]:
+    """Return an exact, report-only distribution over recovery diagnostics."""
+    rows = sorted(
+        (dict(record) for record in records),
+        key=lambda record: (
+            int(record["planned_return_distance_counts"]),
+            int(record["stage"]),
+            int(record["rung_index"]),
+        ),
+    )
+
+    def distribution(name: str, *, absolute: bool = False) -> dict[str, int] | None:
+        values = sorted(abs(int(row[name])) if absolute else int(row[name]) for row in rows)
+        if not values:
+            return None
+        return {
+            "min": values[0],
+            "median": values[(len(values) - 1) // 2],
+            "max": values[-1],
+        }
+
+    return {
+        "diagnostic_count": len(rows),
+        "planned_return_distance_counts": distribution("planned_return_distance_counts"),
+        "entry_to_band_duration_us": distribution("entry_to_band_duration_us"),
+        "absolute_lead_in_net_counts": distribution(
+            "lead_in_net_displacement_counts", absolute=True
+        ),
+        "lead_in_span_counts": distribution("lead_in_displacement_span_counts"),
+        "rows": rows,
+    }
+
+
 def audit_selected_recovery_rest(
     record: dict[str, object],
     plan: dict[str, object],
@@ -434,62 +512,42 @@ def audit_selected_recovery_rest(
 ) -> dict[str, object]:
     """Check one firmware-authored selected-recovery rest diagnostic."""
     mismatches: list[str] = []
-    plan_digest = int(plan["plan_digest_low"]) | (int(plan["plan_digest_high"]) << 32)
-    start = int(record["start_offset_counts"])
-    first_in_band = int(record["first_in_band_offset_counts"])
-    final = int(record["final_offset_counts"])
-    origin_band = int(plan["recovery_origin_band_counts"])
-    planned_return = recovery_return_distance_counts(start, origin_band)
+    mismatches.extend(audit_recovery_rest_geometry(record, plan, expected_stage=0))
     disposition = int(record["disposition"])
     rung_index = int(record["rung_index"])
     matching_recoveries = [
         item for item in recovery_records if int(item["rung_index"]) == rung_index
     ]
 
-    if (
+    duration = (
         int(plan["nominal_workflow_ms"]),
         int(plan["maximum_workflow_ms"]),
-    ) != (271_423, 298_632):
+    )
+    recovery_wide = duration == (282_923, 298_632)
+    if duration not in ((271_423, 298_632), (282_923, 298_632)):
         mismatches.append("selected recovery rest is outside the Stage-B-11 duration pair")
-    if rung_index != int(terminal["emitted_rungs"]) - 1:
+    if not recovery_wide and rung_index != int(terminal["emitted_rungs"]) - 1:
         mismatches.append("selected recovery rest is not attached to the final emitted rung")
-    if int(record["stage"]) != 0:
-        mismatches.append("selected recovery rest carries the wrong stage")
-    if int(record["plan_digest"]) != plan_digest:
-        mismatches.append("selected recovery rest plan digest differs")
-    if planned_return is None or int(record["planned_return_distance_counts"]) != planned_return:
-        mismatches.append("selected recovery rest planned return differs")
-    if abs(first_in_band) > origin_band:
-        mismatches.append("selected recovery rest first in-band offset is outside the band")
-    if int(record["displacement_to_band_counts"]) != first_in_band - start:
-        mismatches.append("selected recovery rest entry displacement differs")
-    if abs(final) > origin_band:
-        mismatches.append("selected recovery rest final offset is outside the band")
-    lead_net = int(record["lead_in_net_displacement_counts"])
-    lead_span = int(record["lead_in_displacement_span_counts"])
-    if abs(lead_net) > lead_span:
-        mismatches.append("selected recovery rest lead-in net exceeds its span")
-    scored_net = int(record["scored_net_displacement_counts"])
-    scored_min = int(record["scored_min_displacement_counts"])
-    scored_max = int(record["scored_max_displacement_counts"])
-    if not scored_min <= scored_net <= scored_max:
-        mismatches.append("selected recovery rest scored displacement is inconsistent")
 
     if disposition == 0:
         if len(matching_recoveries) != 1:
             mismatches.append("confirmed selected recovery rest lacks one ordinary recovery")
+        elif recovery_wide and int(matching_recoveries[0]["outcome"]) not in (1, 5):
+            mismatches.append("recovery-wide rest diagnostic follows a no-motion recovery")
         elif int(record["entry_to_band_duration_us"]) > int(
             matching_recoveries[0]["moving_duration_us"]
         ):
             mismatches.append("selected recovery entry duration exceeds ordinary moving duration")
     elif matching_recoveries:
         mismatches.append("unconfirmed selected recovery rest emitted an ordinary recovery")
-    if disposition == 1 and (
-        int(terminal["outcome"]) != STAGE_B_OUTCOME_INCONCLUSIVE
-        or int(terminal["cause"]) != STAGE_B_CAUSE_RECOVERY_UNAVAILABLE
-        or int(terminal.get("recovery_unavailable", 0)) != 1
-    ):
-        mismatches.append("unconfirmed selected recovery rest has the wrong Stage-B terminal")
+    if disposition == 1:
+        selected_terminal = (
+            int(terminal["outcome"]) == STAGE_B_OUTCOME_INCONCLUSIVE
+            and int(terminal["cause"]) == STAGE_B_CAUSE_RECOVERY_UNAVAILABLE
+            and int(terminal.get("recovery_unavailable", 0)) == 1
+        )
+        if not selected_terminal and not (recovery_wide and int(terminal["cause"]) == 53):
+            mismatches.append("unconfirmed selected recovery rest has the wrong Stage-B terminal")
 
     return {
         "matches_firmware": not mismatches,
@@ -2668,7 +2726,7 @@ def _stage_b_record_identity(value: dict[str, object]) -> tuple[object, ...]:
         return kind, int(value["rung_index"])
     if kind == "rung_origin_recovery":
         return kind, int(value["rung_index"])
-    if kind == "selected_recovery_rest":
+    if kind == "recovery_rest":
         return kind, int(value["rung_index"])
     if kind == "velocity_primitive_current":
         return kind, int(value["rung_index"]), int(value["slot"])
@@ -2743,9 +2801,7 @@ def _compare_stage_b_causal_order(
         if value["record_kind"] == "rung_origin_recovery"
     }
     selected_rest_rungs = {
-        int(value["rung_index"])
-        for value in records
-        if value["record_kind"] == "selected_recovery_rest"
+        int(value["rung_index"]) for value in records if value["record_kind"] == "recovery_rest"
     }
     observation_slots = {
         (int(value["rung_index"]), int(value["slot"]))
@@ -2773,7 +2829,7 @@ def _compare_stage_b_causal_order(
         if rung_index in reported_rungs:
             expected.append(("rung", rung_index))
         if rung_index in selected_rest_rungs:
-            expected.append(("selected_recovery_rest", rung_index))
+            expected.append(("recovery_rest", rung_index))
         if rung_index in recovery_rungs:
             expected.append(("rung_origin_recovery", rung_index))
         expected.extend(directional_after_rung.get(rung_index, ()))
@@ -3224,10 +3280,14 @@ def replay_stage_b_regions(
     if len(plans) != 1 or len(terminals) != 1:
         raise ValueError("one plan and one terminal are required for Stage B replay")
     plan, terminal = plans[0], terminals[0]
-    selected_recovery_rest_present = any(
-        value["record_kind"] == "selected_recovery_rest" for _raw, value in evidence_records
+    recovery_rest_present = any(
+        value["record_kind"] == "recovery_rest" for _raw, value in evidence_records
     )
-    combined_response_selected = selected_recovery_rest_present or (
+    recovery_wide = (
+        int(plan.get("nominal_workflow_ms", -1)),
+        int(plan.get("maximum_workflow_ms", -1)),
+    ) == (282_923, 298_632)
+    combined_response_selected = recovery_rest_present or (
         int(terminal.get("outcome", STAGE_B_OUTCOME_INCONCLUSIVE)) == STAGE_B_OUTCOME_COMPLETE
         and any(
             value["record_kind"] == "directional_region" and int(value["closure"]) == 5
@@ -3239,8 +3299,10 @@ def replay_stage_b_regions(
         )
     )
     schema_revision = (
-        11
-        if selected_recovery_rest_present
+        12
+        if recovery_wide
+        else 11
+        if recovery_rest_present
         else 9
         if combined_response_selected
         else 8
@@ -3573,7 +3635,7 @@ def _audit_stage_b_velocity_sweep(
         value for _raw, value in nonterminal if value["record_kind"] == "rung_origin_recovery"
     ]
     selected_rest_records = [
-        value for _raw, value in nonterminal if value["record_kind"] == "selected_recovery_rest"
+        value for _raw, value in nonterminal if value["record_kind"] == "recovery_rest"
     ]
     current_records = [
         value for _raw, value in nonterminal if value["record_kind"] == "velocity_primitive_current"
@@ -3593,6 +3655,10 @@ def _audit_stage_b_velocity_sweep(
         if current_keys != observation_keys:
             mismatches.append("Stage B current evidence does not cover every observation")
     recovery_projections: list[dict[str, object]] = []
+    recovery_wide = (
+        int(plan.get("nominal_workflow_ms", -1)),
+        int(plan.get("maximum_workflow_ms", -1)),
+    ) == (282_923, 298_632)
     recovery_schema = "recovery_origin_band_counts" in plan
     if recovery_schema:
         try:
@@ -3606,9 +3672,12 @@ def _audit_stage_b_velocity_sweep(
         except ValueError as error:
             mismatches.append(f"Stage B recovery plan reconstruction failed: {error}")
         else:
+            expected_nominal_slot_us = int(recovery_plan["nominal_slot_us"])
+            if recovery_wide:
+                expected_nominal_slot_us += RECOVERY_STABILIZATION_US
             for name, expected in (
                 ("recovery_origin_band_counts", recovery_plan["origin_band_counts"]),
-                ("recovery_nominal_slot_us", recovery_plan["nominal_slot_us"]),
+                ("recovery_nominal_slot_us", expected_nominal_slot_us),
                 ("recovery_maximum_slot_us", recovery_plan["maximum_slot_us"]),
                 ("recovery_slot_count", int(plan["rung_count"])),
             ):
@@ -3657,15 +3726,31 @@ def _audit_stage_b_velocity_sweep(
             )
     elif recovery_records:
         mismatches.append("historical Stage B plan carries unexpected recovery records")
-    if len(selected_rest_records) > 1:
+    diagnostic_rungs = [int(record["rung_index"]) for record in selected_rest_records]
+    if len(diagnostic_rungs) != len(set(diagnostic_rungs)):
+        mismatches.append("Stage B carries duplicate recovery rest diagnostics")
+    if not recovery_wide and len(selected_rest_records) > 1:
         mismatches.append("Stage B carries more than one selected recovery rest diagnostic")
+    if recovery_wide:
+        diagnostic_rung_set = set(diagnostic_rungs)
+        for recovery in recovery_records:
+            if (
+                int(recovery["outcome"]) in (1, 5)
+                and int(recovery["rung_index"]) not in diagnostic_rung_set
+            ):
+                mismatches.append("moving Stage B recovery lacks recovery rest evidence")
     selected_rest_audit = None
     selected_scope = None
-    if selected_rest_records:
+    recovery_rest_audits = [
+        audit_selected_recovery_rest(record, plan, terminal, recovery_records)
+        for record in selected_rest_records
+    ]
+    for audit in recovery_rest_audits:
+        mismatches.extend(audit["mismatches"])
+    if selected_rest_records and not recovery_wide:
         selected_rest_audit = audit_selected_recovery_rest(
             selected_rest_records[0], plan, terminal, recovery_records
         )
-        mismatches.extend(selected_rest_audit["mismatches"])
         selected_scope = _selected_recovery_scope_comparison(
             selected_rest_records[0], recovery_records, plan
         )
@@ -4371,8 +4456,11 @@ def _audit_stage_b_velocity_sweep(
         "mismatches": mismatches,
         "caveats": caveats,
         "recoveries": [dict(record) for record in recovery_records],
+        "recovery_rest_diagnostics": [dict(record) for record in selected_rest_records],
+        "recovery_rest_distribution": summarize_recovery_rest_diagnostics(selected_rest_records),
+        "recovery_rest_audits": recovery_rest_audits,
         "selected_recovery_rest": (
-            dict(selected_rest_records[0]) if selected_rest_records else None
+            dict(selected_rest_records[0]) if selected_rest_records and not recovery_wide else None
         ),
         "selected_recovery_rest_audit": selected_rest_audit,
         "selected_recovery_scope": selected_scope,
