@@ -508,7 +508,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
     _require(payload, 1, "velocity-sweep evidence")
     cursor = _EvidenceCursor(payload)
     kind = cursor.take("B")
-    if kind == 0 and len(payload) in (43, 56, 73):
+    if kind == 0 and len(payload) in (43, 56, 72, 73):
         decoded = _take_fields(
             cursor,
             (
@@ -549,7 +549,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                     ),
                 )
             )
-        elif (fragment, len(payload)) == (1, 56):
+        elif fragment == 1 and len(payload) in (56, 72):
             decoded.update(
                 _take_fields(
                     cursor,
@@ -560,6 +560,18 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                         ("nominal_workflow_ms", "I"),
                         ("maximum_workflow_ms", "I"),
                         ("recovery_origin_band_counts", "I"),
+                    ),
+                )
+            )
+            if len(payload) == 72:
+                decoded["recovery_lower_rate_q"] = [
+                    cursor.take("Q"),
+                    cursor.take("Q"),
+                ]
+            decoded.update(
+                _take_fields(
+                    cursor,
+                    (
                         ("recovery_nominal_slot_us", "I"),
                         ("recovery_maximum_slot_us", "I"),
                         ("recovery_slot_count", "B"),
@@ -591,7 +603,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             raise DecodeError("matrix plan fragment shape is invalid")
         decoded["namespace"] = "acceptance_matrix"
         decoded["record_kind"] = "acceptance_matrix_plan"
-    elif kind == 0 and len(payload) in (65, 82):
+    elif kind == 0 and len(payload) in (65, 82, 98):
         decoded = _take_fields(
             cursor,
             (
@@ -618,13 +630,18 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         )
         decoded["evidence_sequence"] = 1
         decoded["record_kind"] = "integral_plan_marker"
-        if len(payload) == 82:
+        if len(payload) in (82, 98):
             if cursor.take("B") != 1:
                 raise DecodeError("combined integral plan marker is invalid")
             decoded["combined_selected_response"] = True
             decoded["selected_response_intervals_q"] = [
                 [cursor.take("i"), cursor.take("i")] for _ in range(2)
             ]
+            if len(payload) == 98:
+                decoded["recovery_lower_rate_q"] = [
+                    cursor.take("Q"),
+                    cursor.take("Q"),
+                ]
     elif kind == 0:
         decoded = _take_fields(
             cursor,

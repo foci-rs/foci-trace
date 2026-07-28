@@ -535,6 +535,64 @@ def test_decodes_acceptance_matrix_plan_fragments() -> None:
     assert decoded[2]["requested_velocity_mrev_s"] == 4_383
 
 
+def test_decodes_schema_two_matrix_timing_and_compact_recovery_bounds() -> None:
+    timing = bytearray([0])
+    timing.extend(struct.pack("<IHQB", 7, 2, 0x0123_4567_89AB_CDEF, 1))
+    timing.extend(
+        struct.pack(
+            "<6I2Q2IBHHBBB",
+            512_000,
+            500_000,
+            236_000,
+            60_541,
+            66_456,
+            1_000,
+            13_217_792,
+            12_827_648,
+            1_816_958,
+            3_000_000,
+            5,
+            2_816,
+            2_816,
+            1,
+            0,
+            1,
+        )
+    )
+    marker = bytearray([0])
+    marker.extend(struct.pack("<IQH", 7, 0x1122_3344_5566_7788, 1_024))
+    marker.extend(struct.pack("<IiIHBH", 4_394, 263, 25_000, 1_024, 5, 20))
+    marker.extend(struct.pack("<IIII", 512_000, 500_000, 236_000, 66_456))
+    marker.extend(struct.pack("<III", 1_000, 1_816_958, 3_000_000))
+    marker.extend(struct.pack("<BHH", 5, 2_816, 2_816))
+    marker.extend(
+        struct.pack(
+            "<BiiiiQQ",
+            1,
+            0x3333_4444,
+            0x1111_2222,
+            0x0123,
+            0,
+            13_217_792,
+            12_827_648,
+        )
+    )
+
+    timing_frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, timing) + timing)
+    marker_frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, marker) + marker)
+
+    assert len(timing) == 72
+    assert timing_frame.payload["recovery_lower_rate_q"] == [
+        13_217_792,
+        12_827_648,
+    ]
+    assert len(marker) == 98
+    assert marker_frame.payload["recovery_lower_rate_q"] == [
+        13_217_792,
+        12_827_648,
+    ]
+
+
 def _acceptance_direction(
     *,
     response: tuple[int, int] | None,

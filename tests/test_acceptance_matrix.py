@@ -57,6 +57,13 @@ def _plan() -> dict[str, object]:
     }
 
 
+def _schema_two_plan() -> dict[str, object]:
+    plan = _plan()
+    plan["schema_revision"] = 2
+    plan["recovery_lower_rate_q"] = [13_217_792, 12_827_648]
+    return plan
+
+
 def _observations(
     intervals: list[tuple[int, int]],
     means: list[int],
@@ -95,6 +102,21 @@ def test_plan_digest_is_sensitive_to_order_and_exact_targets() -> None:
     descending["order"] = 2
     descending["target_rpm"] = list(reversed(plan["target_rpm"]))
     assert matrix_plan_digest(descending) != matrix_plan_digest(plan)
+
+
+def test_schema_two_digest_and_execution_marker_bind_recovery_authority() -> None:
+    plan = _schema_two_plan()
+
+    digest = matrix_plan_digest(plan)
+    marker = _compact_execution_marker({**plan, "run_sequence": 7, "plan_digest": digest})
+
+    assert digest == 0x8543_77D8_CC8D_7426
+    assert digest != matrix_plan_digest(_plan())
+    assert len(marker) == 98
+    assert marker[15:19] == (4_394).to_bytes(4, "little")
+    assert marker[19:23] == (263).to_bytes(4, "little", signed=True)
+    assert marker[82:90] == (13_217_792).to_bytes(8, "little")
+    assert marker[90:98] == (12_827_648).to_bytes(8, "little")
 
 
 def test_plan_fragments_require_one_shared_identity() -> None:

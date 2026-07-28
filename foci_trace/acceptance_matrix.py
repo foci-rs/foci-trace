@@ -69,6 +69,12 @@ def matrix_plan_digest(plan: dict[str, Any]) -> int:
         ("nominal_workflow_ms", 4),
         ("maximum_workflow_ms", 4),
         ("recovery_origin_band_counts", 4),
+    ):
+        _append(encoded, int(plan[name]), size)
+    if int(plan["schema_revision"]) >= 2:
+        for lower_rate_q in plan["recovery_lower_rate_q"]:
+            _append(encoded, int(lower_rate_q), 8)
+    for name, size in (
         ("recovery_nominal_slot_us", 4),
         ("recovery_maximum_slot_us", 4),
         ("recovery_slot_count", 1),
@@ -220,7 +226,12 @@ def _compact_execution_marker(plan: dict[str, Any]) -> bytes:
     _append(marker, int(plan["plan_digest"]), 8)
     _append(marker, int(plan["selected_p"]), 2)
     top_target = max(int(value) for value in plan["target_rpm"])
-    _append(marker, top_target * 1_000 // 60, 4)
+    planned_velocity_mrev_s = (
+        int(plan["requested_velocity_mrev_s"])
+        if int(plan["schema_revision"]) >= 2
+        else top_target * 1_000 // 60
+    )
+    _append(marker, planned_velocity_mrev_s, 4)
     _append(marker, top_target, 4, signed=True)
     _append(marker, int(plan["pwm_hz"]), 4)
     _append(marker, int(plan["selected_i"]), 2)
@@ -248,6 +259,9 @@ def _compact_execution_marker(plan: dict[str, Any]) -> bytes:
         0,
     ):
         _append(marker, value, 4, signed=True)
+    if int(plan["schema_revision"]) >= 2:
+        for lower_rate_q in plan["recovery_lower_rate_q"]:
+            _append(marker, int(lower_rate_q), 8)
     return bytes(marker)
 
 
