@@ -2759,8 +2759,8 @@ def test_selected_recovery_rest_binds_stage_b_schema_eleven(monkeypatch) -> None
             "terminal": {"outcome": 1, "cause": 0},
             "selected_recovery_rest": {"disposition": 0},
             "plan": {
-                "nominal_workflow_ms": 452_073,
-                "maximum_workflow_ms": 496_528,
+                "nominal_workflow_ms": 271_423,
+                "maximum_workflow_ms": 298_632,
             },
             "matches_firmware": True,
             "mismatches": [],

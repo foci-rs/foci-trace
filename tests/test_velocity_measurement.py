@@ -1009,8 +1009,8 @@ def test_selected_recovery_rest_binds_schema11_and_terminal_disposition() -> Non
         "plan_digest_low": 0x5566_7788,
         "plan_digest_high": 0x1122_3344,
         "recovery_origin_band_counts": 1_000,
-        "nominal_workflow_ms": 452_073,
-        "maximum_workflow_ms": 496_528,
+        "nominal_workflow_ms": 271_423,
+        "maximum_workflow_ms": 298_632,
     }
     terminal = {
         "emitted_rungs": 16,
@@ -1040,8 +1040,8 @@ def test_selected_recovery_rest_binds_schema11_and_terminal_disposition() -> Non
 
     assert audit_selected_recovery_rest(selected, plan, terminal, [recovery])["matches_firmware"]
 
-    historical = dict(plan, nominal_workflow_ms=451_573)
-    audit = audit_selected_recovery_rest(selected, historical, terminal, [recovery])
+    wrong_stage_duration = dict(plan, nominal_workflow_ms=271_422)
+    audit = audit_selected_recovery_rest(selected, wrong_stage_duration, terminal, [recovery])
     assert audit["matches_firmware"] is False
     assert any("outside the Stage-B-11 duration pair" in item for item in audit["mismatches"])
 
@@ -1053,6 +1053,45 @@ def test_selected_recovery_rest_binds_schema11_and_terminal_disposition() -> Non
         "recovery_unavailable": 1,
     }
     assert audit_selected_recovery_rest(unconfirmed, plan, terminal, [])["matches_firmware"]
+
+
+def test_episode_eight_selected_recovery_uses_stage_local_duration() -> None:
+    plan = {
+        "plan_digest_low": 1_505_349_572,
+        "plan_digest_high": 898_309_201,
+        "recovery_origin_band_counts": 1_000,
+        "nominal_workflow_ms": 271_423,
+        "maximum_workflow_ms": 298_632,
+    }
+    terminal = {
+        "emitted_rungs": 20,
+        "outcome": 1,
+        "cause": 0,
+        "recovery_unavailable": 0,
+    }
+    selected = {
+        "plan_digest": 3_858_208_641_496_240_068,
+        "stage": 0,
+        "rung_index": 19,
+        "start_offset_counts": -1_176,
+        "closest_offset_counts": -950,
+        "final_offset_counts": -951,
+        "planned_return_distance_counts": 176,
+        "first_in_band_offset_counts": -991,
+        "displacement_to_band_counts": 185,
+        "entry_to_band_duration_us": 17_857,
+        "lead_in_net_displacement_counts": 40,
+        "lead_in_displacement_span_counts": 41,
+        "scored_net_displacement_counts": 0,
+        "scored_min_displacement_counts": 0,
+        "scored_max_displacement_counts": 0,
+        "disposition": 0,
+    }
+    recovery = {"rung_index": 19, "moving_duration_us": 17_912}
+
+    audit = audit_selected_recovery_rest(selected, plan, terminal, [recovery])
+
+    assert audit["matches_firmware"]
 
 
 def test_rung_disjoint_pair_has_no_reportable_disturbance_interval() -> None:

@@ -449,7 +449,7 @@ def audit_selected_recovery_rest(
     if (
         int(plan["nominal_workflow_ms"]),
         int(plan["maximum_workflow_ms"]),
-    ) != (452_073, 496_528):
+    ) != (271_423, 298_632):
         mismatches.append("selected recovery rest is outside the Stage-B-11 duration pair")
     if rung_index != int(terminal["emitted_rungs"]) - 1:
         mismatches.append("selected recovery rest is not attached to the final emitted rung")
