@@ -7,6 +7,7 @@ from typing import Any
 from .velocity_integral import depth_three_consensus
 from .velocity_measurement import (
     audit_recovery_rest_geometry,
+    audit_scored_rest_grammar,
     summarize_recovery_rest_diagnostics,
 )
 
@@ -332,6 +333,20 @@ def audit_acceptance_matrix(
         for raw, value in evidence_records
         if value.get("record_kind") not in ("acceptance_matrix_plan", "acceptance_matrix_terminal")
     ]
+    mismatches.extend(
+        audit_scored_rest_grammar(
+            [value for _raw, value in nonterminal],
+            terminal,
+            schema_revision=int(plan["schema_revision"]),
+            schema_floor=4,
+            expected_stage=1,
+            ordinary_owners=(7,),
+            recovery_owners=(8,),
+            observation_kind="integral_observation",
+            plan_digest=int(plan["plan_digest"]),
+            label="acceptance matrix",
+        )
+    )
     digest = _fnv1a64(_compact_execution_marker(plan))
     for raw, _value in nonterminal:
         digest = _fnv1a64(raw, digest)
@@ -368,7 +383,8 @@ def audit_acceptance_matrix(
         if record.get("record_kind") != "recovery_rest":
             continue
         rung_index = int(record["rung_index"])
-        previous = nonterminal[index - 1][1] if index else {}
+        previous_offset = 2 if int(plan["schema_revision"]) >= 4 else 1
+        previous = nonterminal[index - previous_offset][1] if index >= previous_offset else {}
         if (
             previous.get("record_kind") != "acceptance_matrix_amplitude"
             or int(previous.get("amplitude_index", -1)) != rung_index

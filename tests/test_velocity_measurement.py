@@ -385,6 +385,51 @@ def test_scored_rest_record_must_match_independent_recomputation() -> None:
         verify_scored_rest_selection(observations, record)
 
 
+def test_scored_rest_grammar_requires_fixed_observation_and_recovery_joins() -> None:
+    from foci_trace.velocity_measurement import audit_scored_rest_grammar
+
+    identity = {
+        "run_sequence": 7,
+        "stage": 0,
+        "plan_digest": 11,
+        "disposition": 0,
+    }
+    records = [
+        {
+            "record_kind": "rest_selection",
+            "owner": 0,
+            "rung_index": 2,
+            "slot": 3,
+            **identity,
+        },
+        {"record_kind": "observation", "rung_index": 2, "slot": 3},
+        {
+            "record_kind": "rest_selection",
+            "owner": 1,
+            "rung_index": 2,
+            "slot": 0xFF,
+            **identity,
+        },
+        {"record_kind": "recovery_rest", "rung_index": 2},
+        {"record_kind": "rung_origin_recovery", "rung_index": 2},
+    ]
+    terminal = {"record_kind": "stage_b_terminal", "run_sequence": 7, "cause": 0}
+    arguments = {
+        "schema_revision": 13,
+        "schema_floor": 13,
+        "expected_stage": 0,
+        "ordinary_owners": (0,),
+        "recovery_owners": (1, 2),
+        "observation_kind": "observation",
+        "plan_digest": 11,
+        "label": "Stage B",
+    }
+
+    assert audit_scored_rest_grammar(records, terminal, **arguments) == []
+    records[2], records[3] = records[3], records[2]
+    assert audit_scored_rest_grammar(records, terminal, **arguments)
+
+
 def test_sweep_confidence_width_matches_firmware_single_precision(monkeypatch) -> None:
     import foci_trace.velocity_measurement as measurement
 

@@ -1226,6 +1226,80 @@ def verify_scored_rest_selection(
     return reconstructed
 
 
+def audit_scored_rest_grammar(
+    records: list[dict[str, object]],
+    terminal: dict[str, object],
+    *,
+    schema_revision: int,
+    schema_floor: int,
+    expected_stage: int,
+    ordinary_owners: tuple[int, ...],
+    recovery_owners: tuple[int, ...],
+    observation_kind: str,
+    plan_digest: int,
+    label: str,
+) -> list[str]:
+    """Validate the fixed Event 151 joins for one commissioning stage."""
+    selections = [record for record in records if record["record_kind"] == "rest_selection"]
+    if schema_revision < schema_floor:
+        return [f"historical {label} carries scored-rest selections"] if selections else []
+
+    mismatches: list[str] = []
+    stream = [*records, terminal]
+    for index, record in enumerate(records):
+        kind = str(record["record_kind"])
+        previous = stream[index - 1] if index else {}
+        successor = stream[index + 1]
+        if kind == observation_kind:
+            if (
+                previous.get("record_kind") != "rest_selection"
+                or int(previous.get("owner", -1)) not in ordinary_owners
+                or int(previous.get("rung_index", -1)) != int(record["rung_index"])
+                or int(previous.get("slot", -1)) != int(record["slot"])
+            ):
+                mismatches.append(f"{label} observation lacks its causal scored-rest selection")
+        elif kind == "recovery_rest":
+            if (
+                previous.get("record_kind") != "rest_selection"
+                or int(previous.get("owner", -1)) not in recovery_owners
+                or int(previous.get("rung_index", -1)) != int(record["rung_index"])
+            ):
+                mismatches.append(f"{label} recovery rest lacks its causal selection")
+        elif kind != "rest_selection":
+            continue
+
+        if kind != "rest_selection":
+            continue
+        owner = int(record["owner"])
+        if (
+            int(record["stage"]) != expected_stage
+            or int(record["plan_digest"]) != plan_digest
+            or int(record["run_sequence"]) != int(terminal["run_sequence"])
+        ):
+            mismatches.append(f"{label} scored-rest selection has the wrong identity")
+        if owner in ordinary_owners:
+            matched_observation = (
+                successor.get("record_kind") == observation_kind
+                and int(successor.get("rung_index", -1)) == int(record["rung_index"])
+                and int(successor.get("slot", -1)) == int(record["slot"])
+            )
+            terminal_rejection = (
+                successor is terminal
+                and int(record["disposition"]) == 2
+                and int(terminal.get("cause", -1)) == 53
+            )
+            if not (matched_observation or terminal_rejection):
+                mismatches.append(f"{label} scored-rest selection has the wrong successor")
+        elif owner in recovery_owners:
+            if successor.get("record_kind") != "recovery_rest" or int(
+                successor.get("rung_index", -1)
+            ) != int(record["rung_index"]):
+                mismatches.append(f"{label} recovery selection does not precede Event 150")
+        else:
+            mismatches.append(f"{label} scored-rest selection has the wrong owner")
+    return mismatches
+
+
 def _suffix_diagnostic(observations: list[VelocityObservation]) -> dict[str, object]:
     levels = [_Level() for _ in range(5)]
     for observation in observations:
@@ -2824,6 +2898,8 @@ def _stage_b_record_identity(value: dict[str, object]) -> tuple[object, ...]:
         return kind, int(value["rung_index"])
     if kind == "recovery_rest":
         return kind, int(value["rung_index"])
+    if kind == "rest_selection":
+        return kind, int(value["owner"]), int(value["rung_index"]), int(value["slot"])
     if kind == "velocity_primitive_current":
         return kind, int(value["rung_index"]), int(value["slot"])
     if kind == "directional_region":
@@ -2899,6 +2975,16 @@ def _compare_stage_b_causal_order(
     selected_rest_rungs = {
         int(value["rung_index"]) for value in records if value["record_kind"] == "recovery_rest"
     }
+    ordinary_rest_slots = {
+        (int(value["rung_index"]), int(value["slot"])): int(value["owner"])
+        for value in records
+        if value["record_kind"] == "rest_selection" and int(value["owner"]) == 0
+    }
+    recovery_rest_owners = {
+        int(value["rung_index"]): int(value["owner"])
+        for value in records
+        if value["record_kind"] == "rest_selection" and int(value["owner"]) in (1, 2)
+    }
     observation_slots = {
         (int(value["rung_index"]), int(value["slot"]))
         for value in records
@@ -2915,6 +3001,10 @@ def _compare_stage_b_causal_order(
         for slot in range(slot_count):
             if (rung_index, slot) not in observation_slots:
                 continue
+            if (rung_index, slot) in ordinary_rest_slots:
+                expected.append(
+                    ("rest_selection", ordinary_rest_slots[(rung_index, slot)], rung_index, slot)
+                )
             expected.append(("observation", rung_index, slot))
             if (rung_index, slot) in boundary_keys:
                 expected.append(("structured_boundary", rung_index, slot))
@@ -2925,6 +3015,10 @@ def _compare_stage_b_causal_order(
         if rung_index in reported_rungs:
             expected.append(("rung", rung_index))
         if rung_index in selected_rest_rungs:
+            if rung_index in recovery_rest_owners:
+                expected.append(
+                    ("rest_selection", recovery_rest_owners[rung_index], rung_index, 0xFF)
+                )
             expected.append(("recovery_rest", rung_index))
         if rung_index in recovery_rungs:
             expected.append(("rung_origin_recovery", rung_index))
@@ -2939,6 +3033,10 @@ def _compare_stage_b_causal_order(
         for value in records
     ):
         expected.append(("reproduction",))
+    for value in records:
+        token = _stage_b_record_identity(value)
+        if value["record_kind"] == "rest_selection" and token not in expected:
+            expected.append(token)
     expected.append(("stage_b_terminal",))
 
     observed = [_stage_b_record_identity(value) for value in records]
@@ -3727,6 +3825,21 @@ def _audit_stage_b_velocity_sweep(
             digest = (digest * FNV1A64_PRIME) & 0xFFFF_FFFF_FFFF_FFFF
     reported_digest = int(terminal["digest_low"]) | (int(terminal["digest_high"]) << 32)
     mismatches: list[str] = []
+    plan_digest = int(plan["plan_digest_low"]) | (int(plan["plan_digest_high"]) << 32)
+    mismatches.extend(
+        audit_scored_rest_grammar(
+            [value for _raw, value in nonterminal],
+            terminal,
+            schema_revision=int(plan.get("schema_revision", 1)),
+            schema_floor=13,
+            expected_stage=0,
+            ordinary_owners=(0,),
+            recovery_owners=(1, 2),
+            observation_kind="observation",
+            plan_digest=plan_digest,
+            label="Stage B",
+        )
+    )
     recovery_records = [
         value for _raw, value in nonterminal if value["record_kind"] == "rung_origin_recovery"
     ]

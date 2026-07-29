@@ -14,6 +14,7 @@ from .velocity_measurement import (
     _upper_bound_unsigned,
     audit_recovery_rest_geometry,
     audit_rung_origin_recovery,
+    audit_scored_rest_grammar,
     plan_rung_origin_recovery,
     summarize_recovery_rest_diagnostics,
 )
@@ -197,7 +198,7 @@ def derive_integral_ladder(
     build_revision: int | None,
 ) -> dict[str, object]:
     """Reconstruct the cap-only whole-octave positive-I ladder."""
-    if schema_revision not in range(1, 12):
+    if schema_revision not in range(1, 13):
         raise ValueError("unsupported Stage-C evidence schema")
     if shortest_suffix_us < 2:
         raise ValueError("shortest suffix must contain at least two microseconds")
@@ -1215,10 +1216,25 @@ def audit_velocity_integral(
             "integral_observation",
             "integral_rung",
             "recovery_rest",
+            "rest_selection",
             "rung_origin_recovery",
             "velocity_primitive_current",
         )
     ]
+    mismatches.extend(
+        audit_scored_rest_grammar(
+            [value for _raw, value in nonterminal],
+            terminal,
+            schema_revision=schema_revision,
+            schema_floor=12,
+            expected_stage=1,
+            ordinary_owners=(3, 4, 6),
+            recovery_owners=(5,),
+            observation_kind="integral_observation",
+            plan_digest=int(plan["plan_digest"]),
+            label="Stage C",
+        )
+    )
     sequences = [int(value["evidence_sequence"]) for _raw, value in nonterminal]
     if sequences != list(range(1, len(sequences) + 1)):
         mismatches.append(f"integral evidence sequence is not contiguous: {sequences}")
@@ -1556,6 +1572,16 @@ def audit_velocity_integral(
         rung_indexes = {int(value["rung_index"]) for value in rung_records}
         recovery_indexes = {int(value["rung_index"]) for value in recovery_records}
         recovery_rest_indexes = {int(value["rung_index"]) for value in recovery_rest_records}
+        ordinary_rest_keys = {
+            (int(value["rung_index"]), int(value["slot"]))
+            for _raw, value in nonterminal
+            if value["record_kind"] == "rest_selection" and int(value["owner"]) in (3, 4, 6)
+        }
+        recovery_selection_indexes = {
+            int(value["rung_index"])
+            for _raw, value in nonterminal
+            if value["record_kind"] == "rest_selection" and int(value["owner"]) == 5
+        }
         if schema_revision >= 5 and rest_boundary is not None:
             boundary_key = (
                 int(rest_boundary[1]["positive_rung_index"]) + 1,
@@ -1571,6 +1597,8 @@ def audit_velocity_integral(
         for rung_index in sorted(all_rung_indexes):
             for slot in range(8):
                 if (rung_index, slot) in observation_keys:
+                    if (rung_index, slot) in ordinary_rest_keys:
+                        expected_order.append(("rest_selection", rung_index))
                     expected_order.append(("integral_observation", rung_index))
                     if (
                         schema_revision >= 3
@@ -1582,6 +1610,8 @@ def audit_velocity_integral(
             if rung_index in rung_indexes:
                 expected_order.append(("integral_rung", rung_index))
             if rung_index in recovery_rest_indexes:
+                if rung_index in recovery_selection_indexes:
+                    expected_order.append(("rest_selection", rung_index))
                 expected_order.append(("recovery_rest", rung_index))
             if rung_index in recovery_indexes:
                 expected_order.append(("rung_origin_recovery", rung_index))

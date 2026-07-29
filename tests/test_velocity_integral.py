@@ -1636,7 +1636,7 @@ def test_schema_four_sufficiency_requires_both_closing_bookends() -> None:
     assert _stage_c_run_sufficient(3, opening, [None, None], masks) is True
 
 
-@pytest.mark.parametrize("schema_revision", [0, 12])
+@pytest.mark.parametrize("schema_revision", [0, 13])
 def test_integral_ladder_rejects_unsupported_schema(schema_revision: int) -> None:
     with pytest.raises(ValueError, match="unsupported Stage-C evidence schema"):
         derive_integral_ladder(
