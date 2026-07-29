@@ -353,6 +353,38 @@ def test_excluded_observation_zeros_unavailable_suffix_metrics() -> None:
     assert result["tested_suffixes"] == 0
 
 
+def test_scored_rest_selection_recomputes_all_suffixes_independently() -> None:
+    from foci_trace.velocity_measurement import analyze_scored_rest_selection
+
+    result = analyze_scored_rest_selection([_observation(0) for _ in range(256)])
+
+    assert result == {
+        "structural_codes": [0, 0, 0],
+        "interval_present_mask": 0b111,
+        "usable_mask": 0b111,
+        "zero_compatible_mask": 0b111,
+        "selected_mask": 0b100,
+        "selected_suffix_len": 256,
+        "disposition": 0,
+        "intervals_q": [[0, 0], [0, 0], [0, 0]],
+        "conditioned_rest_evidence": True,
+    }
+
+
+def test_scored_rest_record_must_match_independent_recomputation() -> None:
+    from foci_trace.velocity_measurement import (
+        analyze_scored_rest_selection,
+        verify_scored_rest_selection,
+    )
+
+    observations = [_observation(0) for _ in range(256)]
+    record = analyze_scored_rest_selection(observations)
+    record["intervals_q"] = [[0, 0], [0, 1], [0, 0]]
+
+    with pytest.raises(ValueError, match="intervals_q"):
+        verify_scored_rest_selection(observations, record)
+
+
 def test_sweep_confidence_width_matches_firmware_single_precision(monkeypatch) -> None:
     import foci_trace.velocity_measurement as measurement
 

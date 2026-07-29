@@ -1130,6 +1130,102 @@ def analyze_stationary_tail(observations: list[VelocityObservation]) -> dict[str
     return _stationary_suffix(observations[-256:])
 
 
+def analyze_scored_rest_selection(
+    observations: list[VelocityObservation],
+) -> dict[str, object]:
+    """Recompute one causal scored-rest decision from raw observations."""
+    if len(observations) < 256:
+        raise ValueError("scored-rest analysis requires at least 256 observations")
+    if any(item.elapsed_us <= 0 for item in observations):
+        raise ValueError("elapsed_us must be positive")
+
+    structural_codes: list[int] = []
+    intervals_q: list[list[int]] = []
+    interval_present_mask = 0
+    usable_mask = 0
+    zero_compatible_mask = 0
+    for index, suffix_len in enumerate((64, 128, 256)):
+        suffix = observations[-suffix_len:]
+        levels = [_Level() for _ in range(5)]
+        for observation in suffix:
+            _observe(levels, observation)
+        selection = _select_level(levels)
+        interval = [0, 0]
+        if selection is None:
+            code = 2 if _has_two_doubling_plateau(levels) else 1
+        else:
+            variance = _q(levels[selection].moments)
+            assert variance is not None
+            metrics = _stationarity_metrics(suffix, selection, variance)
+            if isinstance(metrics, int):
+                code = {1: 2, 2: 3, 3: 4, 4: 5}[metrics]
+            else:
+                code = 0
+            if code in (0, 3, 4):
+                mean = _trunc_div(
+                    levels[selection].exact_delta_counts * 1_000_000 * RATE_Q_SCALE,
+                    levels[selection].exact_elapsed_us,
+                )
+                half_width = _confidence_half_width(variance, 3)
+                interval = [mean - half_width, mean + half_width]
+                interval_present_mask |= 1 << index
+        structural_codes.append(code)
+        intervals_q.append(interval)
+        if code == 0:
+            usable_mask |= 1 << index
+            if interval[0] <= 0 <= interval[1]:
+                zero_compatible_mask |= 1 << index
+
+    selected_mask = 0
+    selected_suffix_len = 0
+    for index, suffix_len in enumerate((64, 128, 256)):
+        bit = 1 << index
+        if zero_compatible_mask & bit == 0:
+            break
+        selected_mask = bit
+        selected_suffix_len = suffix_len
+
+    cumulative = 0
+    minimum = 0
+    maximum = 0
+    for observation in observations:
+        cumulative += observation.delta_counts
+        minimum = min(minimum, cumulative)
+        maximum = max(maximum, cumulative)
+    if selected_mask != 0:
+        disposition = 0
+    elif maximum - minimum <= 1:
+        disposition = 1
+    else:
+        disposition = 2
+    return {
+        "structural_codes": structural_codes,
+        "interval_present_mask": interval_present_mask,
+        "usable_mask": usable_mask,
+        "zero_compatible_mask": zero_compatible_mask,
+        "selected_mask": selected_mask,
+        "selected_suffix_len": selected_suffix_len,
+        "disposition": disposition,
+        "intervals_q": intervals_q,
+        "conditioned_rest_evidence": disposition == 0,
+    }
+
+
+def verify_scored_rest_selection(
+    observations: list[VelocityObservation],
+    record: dict[str, object],
+) -> dict[str, object]:
+    """Require a decoded Event 151 to match independent raw-sample analysis."""
+    reconstructed = analyze_scored_rest_selection(observations)
+    for field_name, expected in reconstructed.items():
+        if record.get(field_name) != expected:
+            raise ValueError(
+                f"scored-rest {field_name} mismatch: "
+                f"firmware={record.get(field_name)!r} offline={expected!r}"
+            )
+    return reconstructed
+
+
 def _suffix_diagnostic(observations: list[VelocityObservation]) -> dict[str, object]:
     levels = [_Level() for _ in range(5)]
     for observation in observations:

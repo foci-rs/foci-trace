@@ -1606,6 +1606,115 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 )
             )
             decoded["record_kind"] = "reproduction_v3_header"
+    elif kind == 11 and len(payload) == 78:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("stage", "B"),
+                ("owner", "B"),
+                ("rung_index", "B"),
+                ("direction", "B"),
+                ("slot", "B"),
+                ("plan_digest", "Q"),
+            ),
+        )
+        decoded["structural_codes"] = [cursor.take("B") for _ in range(3)]
+        decoded.update(
+            _take_fields(
+                cursor,
+                (
+                    ("interval_present_mask", "B"),
+                    ("usable_mask", "B"),
+                    ("zero_compatible_mask", "B"),
+                    ("selected_mask", "B"),
+                    ("selected_suffix_len", "H"),
+                    ("disposition", "B"),
+                ),
+            )
+        )
+        decoded["intervals_q"] = [[cursor.take("q"), cursor.take("q")] for _ in range(3)]
+
+        stage = int(decoded["stage"])
+        owner = int(decoded["owner"])
+        direction = int(decoded["direction"])
+        if stage not in (0, 1) or owner not in range(9):
+            raise DecodeError("scored-rest stage or owner is invalid")
+        expected_stage = 0 if owner <= 2 else 1
+        if stage != expected_stage:
+            raise DecodeError("scored-rest owner does not belong to its stage")
+        if owner in (1, 2, 5, 8):
+            if direction != 0xFF or int(decoded["slot"]) != 0xFF:
+                raise DecodeError("scored-rest recovery position is invalid")
+        elif direction not in (0, 1):
+            raise DecodeError("scored-rest direction is invalid")
+
+        masks = [
+            int(decoded["interval_present_mask"]),
+            int(decoded["usable_mask"]),
+            int(decoded["zero_compatible_mask"]),
+            int(decoded["selected_mask"]),
+        ]
+        if any(mask & ~0b111 for mask in masks):
+            raise DecodeError("scored-rest mask is out of range")
+
+        expected_interval_mask = 0
+        expected_usable_mask = 0
+        expected_zero_mask = 0
+        intervals = decoded["intervals_q"]
+        for index, code in enumerate(decoded["structural_codes"]):
+            bit = 1 << index
+            if code == 5:
+                raise DecodeError("scored-rest arithmetic result cannot be serialized")
+            if code not in range(5):
+                raise DecodeError("scored-rest structural code is invalid")
+            interval_expected = code in (0, 3, 4)
+            if interval_expected:
+                expected_interval_mask |= bit
+                low, high = intervals[index]
+                if low > high:
+                    raise DecodeError("scored-rest interval is reversed")
+                if code == 0:
+                    expected_usable_mask |= bit
+                    if low <= 0 <= high:
+                        expected_zero_mask |= bit
+            elif intervals[index] != [0, 0]:
+                raise DecodeError("excluded scored-rest suffix carries an interval")
+        if int(decoded["interval_present_mask"]) != expected_interval_mask:
+            raise DecodeError("scored-rest interval-presence mask is inconsistent")
+        if int(decoded["usable_mask"]) != expected_usable_mask:
+            raise DecodeError("scored-rest usable mask is inconsistent")
+        if int(decoded["zero_compatible_mask"]) != expected_zero_mask:
+            raise DecodeError("scored-rest zero-compatible mask is inconsistent")
+
+        expected_selected_mask = 0
+        expected_selected_len = 0
+        for index, suffix_len in enumerate((64, 128, 256)):
+            bit = 1 << index
+            if expected_zero_mask & bit == 0:
+                break
+            expected_selected_mask = bit
+            expected_selected_len = suffix_len
+        disposition = int(decoded["disposition"])
+        if disposition == 0:
+            if (
+                expected_selected_mask == 0
+                or int(decoded["selected_mask"]) != expected_selected_mask
+                or int(decoded["selected_suffix_len"]) != expected_selected_len
+            ):
+                raise DecodeError("scored-rest statistical selection is inconsistent")
+        elif disposition in (1, 2):
+            if (
+                expected_selected_mask != 0
+                or int(decoded["selected_mask"]) != 0
+                or int(decoded["selected_suffix_len"]) != 0
+            ):
+                raise DecodeError("scored-rest terminal selection is inconsistent")
+        else:
+            raise DecodeError("scored-rest disposition is invalid")
+        decoded["conditioned_rest_evidence"] = disposition == 0
+        decoded["record_kind"] = "rest_selection"
     elif 11 <= kind <= 13:
         decoded = _take_fields(
             cursor,

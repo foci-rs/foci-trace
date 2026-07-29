@@ -867,6 +867,118 @@ def test_decodes_recovery_rest_record() -> None:
     assert excluded_frame.payload["exact_velocity_interval_q"] == [0, 0]
 
 
+def test_decodes_exact_scored_rest_selection_record() -> None:
+    payload = struct.pack(
+        "<BIHBBBBBQ3B4BHB6q",
+        11,
+        0x0102_0304,
+        0x0506,
+        1,
+        4,
+        7,
+        1,
+        0xFF,
+        0x1122_3344_5566_7788,
+        0,
+        0,
+        3,
+        0b111,
+        0b011,
+        0b011,
+        0b010,
+        128,
+        0,
+        -9,
+        0,
+        -17,
+        29,
+        31,
+        47,
+    )
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert len(payload) == 78
+    assert frame.payload == {
+        "record_kind": "rest_selection",
+        "run_sequence": 0x0102_0304,
+        "evidence_sequence": 0x0506,
+        "stage": 1,
+        "owner": 4,
+        "rung_index": 7,
+        "direction": 1,
+        "slot": 0xFF,
+        "plan_digest": 0x1122_3344_5566_7788,
+        "structural_codes": [0, 0, 3],
+        "interval_present_mask": 0b111,
+        "usable_mask": 0b011,
+        "zero_compatible_mask": 0b011,
+        "selected_mask": 0b010,
+        "selected_suffix_len": 128,
+        "disposition": 0,
+        "intervals_q": [[-9, 0], [-17, 29], [31, 47]],
+        "conditioned_rest_evidence": True,
+    }
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    (
+        {"selected_mask": 0b001},
+        {"selected_suffix_len": 64},
+        {"zero_compatible_mask": 0b111},
+        {"usable_mask": 0b111},
+        {"interval_present_mask": 0b011},
+        {"structural_codes": (0, 0, 5)},
+        {"stage": 0},
+        {"direction": 2},
+    ),
+)
+def test_rejects_invalid_scored_rest_selection_record(replacement) -> None:
+    values = {
+        "stage": 1,
+        "owner": 4,
+        "rung_index": 7,
+        "direction": 1,
+        "slot": 0xFF,
+        "structural_codes": (0, 0, 3),
+        "interval_present_mask": 0b111,
+        "usable_mask": 0b011,
+        "zero_compatible_mask": 0b011,
+        "selected_mask": 0b010,
+        "selected_suffix_len": 128,
+    }
+    values.update(replacement)
+    payload = struct.pack(
+        "<BIHBBBBBQ3B4BHB6q",
+        11,
+        7,
+        2,
+        values["stage"],
+        values["owner"],
+        values["rung_index"],
+        values["direction"],
+        values["slot"],
+        11,
+        *values["structural_codes"],
+        values["interval_present_mask"],
+        values["usable_mask"],
+        values["zero_compatible_mask"],
+        values["selected_mask"],
+        values["selected_suffix_len"],
+        0,
+        -9,
+        0,
+        -17,
+        29,
+        31,
+        47,
+    )
+
+    with pytest.raises(DecodeError):
+        decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+
 def test_decodes_velocity_integral_response_plan_marker() -> None:
     payload = bytearray([1])
     payload.extend(struct.pack("<IHIIHBI", 7, 1, 0x89AB_CDEF, 0x0123_4567, 1_448, 5, 69_888))
