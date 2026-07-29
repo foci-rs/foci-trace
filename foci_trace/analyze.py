@@ -54,6 +54,7 @@ from .velocity_measurement import (
     analyze_velocity_observations,
     audit_stage_b_reproduction_pair,
     audit_velocity_sweep,
+    verify_scored_rest_selection,
     velocity_report_to_json,
 )
 from .velocity_integral import (
@@ -1924,6 +1925,41 @@ def _velocity_capture_groups(
     return groups
 
 
+def _attach_rest_selection_audit(
+    report: dict[str, object],
+    state: _DeviceState,
+    evidence: list[_VelocitySweepEvidenceFrame],
+    source_index: int,
+) -> None:
+    """Compare each Event 151 with the last 256 raw samples before emission."""
+    mismatches: list[str] = []
+    verified = 0
+    for event in evidence:
+        if event.payload.get("record_kind") != "rest_selection":
+            continue
+        observations = [
+            item.observation
+            for item in state.velocity_observations
+            if item.source_index == source_index and item.timestamp_ticks <= event.timestamp_ticks
+        ][-256:]
+        if len(observations) != 256:
+            mismatches.append("scored-rest selection lacks 256 causal raw samples")
+            continue
+        try:
+            verify_scored_rest_selection(observations, event.payload)
+        except ValueError as error:
+            mismatches.append(str(error))
+        else:
+            verified += 1
+    report["rest_selection_verified_count"] = verified
+    if mismatches:
+        report["matches_firmware"] = False
+        reported_mismatches = report.setdefault("mismatches", [])
+        if not isinstance(reported_mismatches, list):
+            raise TypeError("audit mismatches must be a list")
+        reported_mismatches.extend(mismatches)
+
+
 def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, object]]:
     audits: list[dict[str, object]] = []
     retained_candidates: dict[tuple[int, int], dict[str, object]] = {}
@@ -1945,6 +1981,10 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                 )
                 and (
                     item.payload.get("record_kind") != "recovery_rest"
+                    or int(item.payload.get("stage", -1)) == 0
+                )
+                and (
+                    item.payload.get("record_kind") != "rest_selection"
                     or int(item.payload.get("stage", -1)) == 0
                 )
             }
@@ -1970,6 +2010,10 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                         item.payload.get("record_kind") != "recovery_rest"
                         or int(item.payload.get("stage", -1)) == 0
                     )
+                    and (
+                        item.payload.get("record_kind") != "rest_selection"
+                        or int(item.payload.get("stage", -1)) == 0
+                    )
                 )
             ]
             if not evidence:
@@ -1989,6 +2033,7 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                 raw,
                 [(item.raw_payload, item.payload) for item in evidence],
             )
+            _attach_rest_selection_audit(report, state, evidence, source_index)
             companion_stage_c = next(
                 (
                     item.payload
@@ -2062,6 +2107,10 @@ def _velocity_integral_audits(states: dict[int, _DeviceState]) -> list[dict[str,
                         item.payload.get("record_kind") == "recovery_rest"
                         and int(item.payload.get("stage", -1)) == 1
                     )
+                    or (
+                        item.payload.get("record_kind") == "rest_selection"
+                        and int(item.payload.get("stage", -1)) == 1
+                    )
                 )
                 and "run_sequence" in item.payload
                 and int(item.payload["run_sequence"]) not in matrix_runs
@@ -2086,6 +2135,10 @@ def _velocity_integral_audits(states: dict[int, _DeviceState]) -> list[dict[str,
                         item.payload.get("record_kind") == "recovery_rest"
                         and int(item.payload.get("stage", -1)) == 1
                     )
+                    or (
+                        item.payload.get("record_kind") == "rest_selection"
+                        and int(item.payload.get("stage", -1)) == 1
+                    )
                 )
             ]
             if not evidence:
@@ -2105,6 +2158,7 @@ def _velocity_integral_audits(states: dict[int, _DeviceState]) -> list[dict[str,
                 raw,
                 [(item.raw_payload, item.payload) for item in evidence],
             )
+            _attach_rest_selection_audit(report, state, evidence, source_index)
             report["device_index"] = device_index
             report["source_index"] = source_index
             report["serial"] = state.report.serial or state.report.metadata_serial
@@ -2165,6 +2219,7 @@ def _acceptance_matrix_audits(states: dict[int, _DeviceState]) -> list[dict[str,
             report = audit_acceptance_matrix(
                 [(item.raw_payload, item.payload) for item in evidence]
             )
+            _attach_rest_selection_audit(report, state, evidence, source_index)
             report["device_index"] = device_index
             report["source_index"] = source_index
             report["serial"] = state.report.serial or state.report.metadata_serial

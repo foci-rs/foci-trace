@@ -2806,3 +2806,29 @@ def test_recovery_wide_stage_c_plan_binds_stage_b_schema_twelve(monkeypatch) -> 
     audit = analyze._velocity_sweep_audits({0: state})[0]
 
     assert audit["stage_b_replay"]["schema_revision"] == 12
+
+
+def test_event_151_is_verified_against_its_causal_raw_suffixes() -> None:
+    import foci_trace.analyze as analyze
+    from foci_trace.velocity_measurement import (
+        VelocityObservation,
+        analyze_scored_rest_selection,
+    )
+
+    state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
+    observations = [VelocityObservation(0, 1_000, 1, 0, 0) for _ in range(256)]
+    state.velocity_observations = [
+        analyze._VelocityFrameObservation(index, 0, observation, 0)
+        for index, observation in enumerate(observations, 1)
+    ]
+    payload = {
+        "record_kind": "rest_selection",
+        **analyze_scored_rest_selection(observations),
+    }
+    evidence = [analyze._VelocitySweepEvidenceFrame(300, 0, b"", payload)]
+    report = {"matches_firmware": True, "mismatches": []}
+
+    analyze._attach_rest_selection_audit(report, state, evidence, 0)
+
+    assert report["rest_selection_verified_count"] == 1
+    assert report["matches_firmware"] is True
