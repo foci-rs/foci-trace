@@ -1910,3 +1910,66 @@ def test_decodes_schema_eight_integral_terminal_target() -> None:
     assert frame.payload["final_p"] == 1_024
     assert frame.payload["target_status"] == 2
     assert frame.payload["target_terminus"] == 6
+
+
+def test_decodes_gate_rejection_diagnostic_on_an_excluded_observation() -> None:
+    """An excluded observation reports why the gate rejected it.
+
+    Byte-exact against the firmware encoder in integral_reporting.rs so the two
+    sides cannot drift silently, which is how three wire defects shipped before.
+    """
+    payload = bytearray([2])
+    payload.extend(struct.pack("<IHII", 7, 1, 0x1122_3344, 0x5566_7788))
+    payload.extend(struct.pack("<BBHBBB", 3, 6, 512, 0, 4, 0))
+    payload.extend(struct.pack("<iiiiiBH", 0, 0, 0, 0, 0, 0, 1_023))
+    payload.extend(bytes([3]))  # ResolvedSlope
+    payload.extend(bytes([1]))  # rejection present
+    payload.extend(struct.pack("<HBBB", 256, 1, 0, 1))
+    payload.extend(struct.pack("<qqqi", -8_773_356, -8_351_644, -2_389_706, 55_874))
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert len(payload) == 80
+    assert frame.payload["record_kind"] == "integral_observation"
+    assert frame.payload["stationarity_code"] == 3
+    assert frame.payload["rejection_present"] == 1
+    assert frame.payload["rejection_suffix_len"] == 256
+    assert frame.payload["rejection_usable_plateau"] == 1
+    assert frame.payload["rejection_slope_passed"] == 0
+    assert frame.payload["rejection_lag_one_passed"] == 1
+    assert frame.payload["rejection_settled_rate_interval_q"] == [-8_773_356, -8_351_644]
+    assert frame.payload["rejection_slope_margin_q"] == -2_389_706
+    assert frame.payload["rejection_lag_one_margin_q"] == 55_874
+
+
+def test_decodes_an_exclusion_that_never_reached_the_gates() -> None:
+    payload = bytearray([2])
+    payload.extend(struct.pack("<IHII", 7, 1, 0x1122_3344, 0x5566_7788))
+    payload.extend(struct.pack("<BBHBBB", 3, 6, 512, 0, 4, 0))
+    payload.extend(struct.pack("<iiiiiBH", 0, 0, 0, 0, 0, 0, 1_023))
+    payload.extend(bytes([1]))  # NoBlockingPlateau
+    payload.extend(bytes([0]))  # rejection absent
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert len(payload) == 47
+    assert frame.payload["record_kind"] == "integral_observation"
+    assert frame.payload["stationarity_code"] == 1
+    assert frame.payload["rejection_present"] == 0
+    assert "rejection_slope_margin_q" not in frame.payload
+
+
+def test_still_decodes_pre_rejection_excluded_observations() -> None:
+    """The existing capture corpus must keep decoding unchanged."""
+    payload = bytearray([2])
+    payload.extend(struct.pack("<IHII", 7, 1, 0x1122_3344, 0x5566_7788))
+    payload.extend(struct.pack("<BBHBBB", 3, 6, 512, 0, 4, 0))
+    payload.extend(struct.pack("<iiiiiBH", 0, 0, 0, 0, 0, 0, 1_023))
+    payload.extend(bytes([3]))
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert len(payload) == 46
+    assert frame.payload["record_kind"] == "integral_observation"
+    assert frame.payload["stationarity_code"] == 3
+    assert "rejection_present" not in frame.payload

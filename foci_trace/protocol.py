@@ -836,7 +836,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         decoded["record_kind"] = "plan"
     elif kind == 2 and (matrix := _try_decode_acceptance_amplitude(payload)) is not None:
         return matrix
-    elif kind == 2 and len(payload) in (46, 77):
+    elif kind == 2 and len(payload) in (46, 47, 77, 80):
         decoded = _take_fields(
             cursor,
             (
@@ -890,6 +890,40 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                     ),
                 )
             )
+        elif cursor.offset < len(payload):
+            # Firmware emitting gate statistics for rejected tails. Captures made
+            # before that keep the shorter record and carry no presence flag.
+            decoded["rejection_present"] = cursor.take("B")
+            if decoded["rejection_present"] not in (0, 1):
+                raise DecodeError("observation rejection presence is invalid")
+            if decoded["rejection_present"] == 1:
+                decoded.update(
+                    _take_fields(
+                        cursor,
+                        (
+                            ("rejection_suffix_len", "H"),
+                            ("rejection_usable_plateau", "B"),
+                            ("rejection_slope_passed", "B"),
+                            ("rejection_lag_one_passed", "B"),
+                        ),
+                    )
+                )
+                decoded["rejection_settled_rate_interval_q"] = [
+                    cursor.take("q"),
+                    cursor.take("q"),
+                ]
+                decoded["rejection_slope_margin_q"] = cursor.take("q")
+                decoded["rejection_lag_one_margin_q"] = cursor.take("i")
+                if decoded["rejection_suffix_len"] not in (64, 128, 256):
+                    raise DecodeError("observation rejection suffix is not in the family")
+                interval = decoded["rejection_settled_rate_interval_q"]
+                if interval[0] > interval[1]:
+                    raise DecodeError("observation rejection interval is reversed")
+                if (
+                    decoded["rejection_slope_passed"] == 1
+                    and decoded["rejection_lag_one_passed"] == 1
+                ):
+                    raise DecodeError("a rejected tail cannot pass every gate")
         decoded["plan_digest"] = decoded["plan_digest_low"] | (decoded["plan_digest_high"] << 32)
         decoded["record_kind"] = "integral_observation"
     elif kind == 2:
