@@ -601,6 +601,19 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             )
         else:
             raise DecodeError("matrix plan fragment shape is invalid")
+        if "order" in decoded:
+            # Slot order rides in the high nibble of the amplitude-order byte, so
+            # forward-first runs keep the byte they had before it was recorded.
+            # `order` stays raw because the plan digest hashes the packed value.
+            packed = int(decoded["order"])
+            amplitude_order = packed & 0x0F
+            slot_order = packed >> 4
+            if amplitude_order not in (1, 2):
+                raise DecodeError("matrix plan amplitude order is invalid")
+            if slot_order not in (0, 1):
+                raise DecodeError("matrix plan slot order is invalid")
+            decoded["amplitude_order"] = amplitude_order
+            decoded["slot_order"] = slot_order
         decoded["namespace"] = "acceptance_matrix"
         decoded["record_kind"] = "acceptance_matrix_plan"
     elif kind == 0 and len(payload) in (65, 82, 98):

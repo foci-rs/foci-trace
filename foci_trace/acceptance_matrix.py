@@ -315,6 +315,7 @@ def audit_acceptance_matrix(
         }
     mismatches: list[str] = []
     plan = assemble_matrix_plan(plans)
+    slot_order = int(plan.get("slot_order", 0))
     terminal = terminals[0]
     expected_duration = (63_041, 66_456) if int(plan["schema_revision"]) >= 3 else (60_541, 66_456)
     if (
@@ -501,6 +502,7 @@ def audit_acceptance_matrix(
         "run_sequence": int(plan["run_sequence"]),
         "plan": plan,
         "terminal": dict(terminal),
+        "slot_order": slot_order,
         "amplitudes": amplitudes,
         "recoveries": [dict(record) for record in recovery_records],
         "recovery_rest_diagnostics": [dict(record) for record in recovery_rest_records],

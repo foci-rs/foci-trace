@@ -1973,3 +1973,71 @@ def test_still_decodes_pre_rejection_excluded_observations() -> None:
     assert frame.payload["record_kind"] == "integral_observation"
     assert frame.payload["stationarity_code"] == 3
     assert "rejection_present" not in frame.payload
+
+
+def _matrix_plan_core(order_byte: int, schema_revision: int = 5) -> bytes:
+    """Build one matrix plan core fragment with an explicit packed order byte."""
+    core = bytearray([0])
+    core.extend(struct.pack("<IHQB", 7, 1, 0x0123_4567_89AB_CDEF, 0))
+    core.extend(
+        struct.pack(
+            "<HBIHQBHHHII5iBHH",
+            schema_revision,
+            0,
+            0x1122_3344,
+            10,
+            0xAABB_CCDD_EEFF_0011,
+            order_byte,
+            1_024,
+            1_024,
+            3,
+            25_000,
+            4_000,
+            16,
+            33,
+            66,
+            132,
+            263,
+            5,
+            40,
+            20,
+        )
+    )
+    return bytes(core)
+
+
+def test_unpacks_the_amplitude_and_slot_order_from_the_packed_order_byte() -> None:
+    """Slot order rides in the high nibble of the amplitude-order byte.
+
+    `order` must stay the raw wire byte because the plan digest hashes it, while
+    the unpacked pair is what makes a mirrored run identifiable in an audit.
+    """
+    for order_byte, amplitude, slot in (
+        (0x01, 1, 0),
+        (0x02, 2, 0),
+        (0x11, 1, 1),
+        (0x12, 2, 1),
+    ):
+        payload = _matrix_plan_core(order_byte)
+        frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+        assert frame.payload["order"] == order_byte, "digest input must stay the raw byte"
+        assert frame.payload["amplitude_order"] == amplitude
+        assert frame.payload["slot_order"] == slot
+
+
+def test_pre_mirror_captures_report_the_forward_first_slot_order() -> None:
+    """Schema 4 and earlier never set the high nibble, so they are forward-first."""
+    payload = _matrix_plan_core(0x02, schema_revision=4)
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert frame.payload["order"] == 2
+    assert frame.payload["amplitude_order"] == 2
+    assert frame.payload["slot_order"] == 0
+
+
+def test_rejects_an_unusable_packed_order_byte() -> None:
+    for order_byte in (0x00, 0x03, 0x21, 0xF1):
+        payload = _matrix_plan_core(order_byte)
+        with pytest.raises(DecodeError):
+            decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
