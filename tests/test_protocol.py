@@ -1979,6 +1979,140 @@ def test_still_decodes_pre_rejection_excluded_observations() -> None:
     assert "rejection_present" not in frame.payload
 
 
+def _stage_c_observation_payload(
+    *,
+    stationarity_code: int,
+    rejection_variant: str | None = None,
+    drift_ratio_ppm: int | None = None,
+) -> bytes:
+    """Build a Stage-C ("integral_observation") record byte-for-byte.
+
+    Mirrors `encode_observation` in integral_reporting.rs: the fixed prefix,
+    then (if present) the u32 drift ratio, then the stationarity code and its
+    variable-length tail. `rejection_variant` selects among the tail shapes
+    for an excluded observation: None (no more bytes at all), "absent"
+    (presence flag only), "short" (rejection diagnostic without the trailing
+    slope fields), or "full" (rejection diagnostic with them).
+    """
+    payload = bytearray([2])
+    payload.extend(struct.pack("<IHII", 7, 1, 0x1122_3344, 0x5566_7788))
+    payload.extend(struct.pack("<BBHBBB", 2, 3, 20, 0, 0, 1))
+    payload.extend(struct.pack("<iiiiiBH", 100, 110, 120, 10, 20, 2, 100))
+    if drift_ratio_ppm is not None:
+        payload.extend(struct.pack("<I", drift_ratio_ppm))
+    payload.extend(bytes([stationarity_code]))
+    if stationarity_code == 0:
+        payload.extend(struct.pack("<HBI", 64, 3, 16))
+        payload.extend(struct.pack("<iBIBiIIBB", -5, 0, 10, 0, -60, 20, 30, 0, 3))
+    elif rejection_variant == "absent":
+        payload.extend(bytes([0]))
+    elif rejection_variant == "short":
+        payload.extend(bytes([1]))
+        payload.extend(struct.pack("<HBBB", 256, 1, 0, 1))
+        payload.extend(struct.pack("<qqqi", -8_773_356, -8_351_644, -2_389_706, 55_874))
+    elif rejection_variant == "full":
+        payload.extend(bytes([1]))
+        payload.extend(struct.pack("<HBBB", 256, 1, 0, 1))
+        payload.extend(struct.pack("<qqqi", -8_773_356, -8_351_644, -2_389_706, 55_874))
+        payload.extend(struct.pack("<qQ", -6_100_000, 3_710_294))
+    return bytes(payload)
+
+
+@pytest.mark.parametrize(
+    ("stationarity_code", "rejection_variant", "old_length", "new_length"),
+    [
+        (3, None, 46, 50),
+        (1, "absent", 47, 51),
+        (0, None, 77, 81),
+        (3, "short", 80, 84),
+        (3, "full", 96, 100),
+    ],
+)
+def test_new_and_old_stage_c_observation_lengths_both_decode(
+    stationarity_code: int, rejection_variant: str | None, old_length: int, new_length: int
+) -> None:
+    """A replaced length set would stop decoding every capture taken before the
+    drift field existed, including the six exported for that design.
+    A rejected length falls through silently rather than raising, so this is the
+    only place the regression would show."""
+    old_payload = _stage_c_observation_payload(
+        stationarity_code=stationarity_code, rejection_variant=rejection_variant
+    )
+    assert len(old_payload) == old_length
+    old_frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, old_payload) + old_payload)
+    assert old_frame.payload["record_kind"] == "integral_observation"
+    assert old_frame.payload["drift_ratio_ppm"] is None
+
+    new_payload = _stage_c_observation_payload(
+        stationarity_code=stationarity_code,
+        rejection_variant=rejection_variant,
+        drift_ratio_ppm=38_503,
+    )
+    assert len(new_payload) == new_length
+    new_frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, new_payload) + new_payload)
+    assert new_frame.payload["record_kind"] == "integral_observation"
+    assert new_frame.payload["drift_ratio_ppm"] == 38_503
+
+
+def test_stage_c_drift_ratio_decodes_before_stationarity_encoding() -> None:
+    """Length acceptance alone would pass while reading the four bytes from the
+    wrong place. Assert the decoded value sits between predicted_torque_target_abs
+    and stationarity_code, for both an accepted and an excluded observation."""
+    accepted = _stage_c_observation_payload(stationarity_code=0, drift_ratio_ppm=38_503)
+    accepted_frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, accepted) + accepted)
+    assert accepted_frame.payload["drift_ratio_ppm"] == 38_503
+    assert accepted_frame.payload["stationarity_code"] == 0
+
+    excluded = _stage_c_observation_payload(
+        stationarity_code=6, rejection_variant="absent", drift_ratio_ppm=412_009
+    )
+    excluded_frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, excluded) + excluded)
+    assert excluded_frame.payload["drift_ratio_ppm"] == 412_009
+    assert excluded_frame.payload["stationarity_code"] == 6
+
+
+def _stage_b_observation_payload(*, drift_ratio_ppm: int | None) -> bytes:
+    """Build a Stage-B ("observation") record byte-for-byte, mirroring
+    `encode_observation` in sweep_reporting.rs. Unlike Stage C this record has
+    no variable-length tail: the drift ratio, when present, is the last four
+    bytes."""
+    payload = bytearray([2])
+    payload.extend(struct.pack("<IH", 7, 1))
+    payload.extend(struct.pack("<BBiBBB", 0, 0, 3_200, 1, 0, 0))
+    payload.extend(struct.pack("<IB", 0x1122_3344, 4))
+    payload.extend(struct.pack("<IB", 0x5566_7788, 4))
+    payload.extend(struct.pack("<iiiiiB", -5_000_000, -4_000_000, -3_000_000, -6_000, -5_000, 2))
+    payload.extend(struct.pack("<HBI", 64, 3, 16))
+    payload.extend(struct.pack("<IB", 10, 0))
+    payload.extend(struct.pack("<iBIB", 12, 0, 20, 0))
+    payload.extend(struct.pack("<iIIBB", -18, 30, 40, 0, 3))
+    payload.extend(struct.pack("<H", 350))
+    payload.extend(struct.pack("<iii", 123_456, 120_000, 130_000))
+    payload.extend(struct.pack("<IB", 1 << 20, 0))
+    payload.extend(struct.pack("<H", 500))
+    if drift_ratio_ppm is not None:
+        payload.extend(struct.pack("<I", drift_ratio_ppm))
+    return bytes(payload)
+
+
+def test_new_and_old_stage_b_observation_lengths_both_decode() -> None:
+    """Stage B has no rejection diagnostic block at all, so extending only the
+    Stage C length set would leave every Stage B capture undecoded for the new
+    field while claiming the length-set change was complete."""
+    old_payload = _stage_b_observation_payload(drift_ratio_ppm=None)
+    assert len(old_payload) == 104
+    old_frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, old_payload) + old_payload)
+    assert old_frame.payload["record_kind"] == "observation"
+    assert old_frame.payload["drift_ratio_ppm"] is None
+
+    new_payload = _stage_b_observation_payload(drift_ratio_ppm=14_220)
+    assert len(new_payload) == 108
+    new_frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, new_payload) + new_payload)
+    assert new_frame.payload["record_kind"] == "observation"
+    assert new_frame.payload["drift_ratio_ppm"] == 14_220
+    assert new_frame.payload["predicted_torque_target_abs"] == 500
+
+
 def _matrix_plan_core(order_byte: int, schema_revision: int = 5) -> bytes:
     """Build one matrix plan core fragment with an explicit packed order byte."""
     core = bytearray([0])

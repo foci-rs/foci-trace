@@ -504,6 +504,16 @@ def _try_decode_acceptance_amplitude(payload: bytes) -> dict[str, Any] | None:
     return decoded
 
 
+# Lengths of the Stage C ("integral_observation") record from before the drift
+# ratio field existed. These must keep decoding: replacing this set instead of
+# extending it would silently stop decoding every capture taken before the
+# field was added, including the six exported as design evidence.
+_STAGE_C_OBSERVATION_LEGACY_LENGTHS = (46, 47, 77, 80, 96)
+
+# Each legacy length plus the four bytes of the inserted `drift_ratio_ppm` u32.
+_STAGE_C_OBSERVATION_LENGTHS_WITH_DRIFT = (50, 51, 81, 84, 100)
+
+
 def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
     _require(payload, 1, "velocity-sweep evidence")
     cursor = _EvidenceCursor(payload)
@@ -853,7 +863,10 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         decoded["record_kind"] = "plan"
     elif kind == 2 and (matrix := _try_decode_acceptance_amplitude(payload)) is not None:
         return matrix
-    elif kind == 2 and len(payload) in (46, 47, 77, 80, 96):
+    elif kind == 2 and len(payload) in (
+        *_STAGE_C_OBSERVATION_LEGACY_LENGTHS,
+        *_STAGE_C_OBSERVATION_LENGTHS_WITH_DRIFT,
+    ):
         decoded = _take_fields(
             cursor,
             (
@@ -874,9 +887,17 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ("deficit_high", "i"),
                 ("rate_shift", "B"),
                 ("predicted_torque_target_abs", "H"),
-                ("stationarity_code", "B"),
             ),
         )
+        # Firmware inserts the u32 drift ratio between predicted_torque_target_abs
+        # and stationarity_code. Captures from before the field existed have no
+        # such value, and that absence must decode as None, not as the u32::MAX
+        # "no finite reportable ratio" sentinel the firmware also emits.
+        if len(payload) in _STAGE_C_OBSERVATION_LENGTHS_WITH_DRIFT:
+            decoded["drift_ratio_ppm"] = cursor.take("I")
+        else:
+            decoded["drift_ratio_ppm"] = None
+        decoded["stationarity_code"] = cursor.take("B")
         shift = decoded["rate_shift"]
         decoded["settled_rate_interval_q"] = [
             decoded["rate_low"] << shift,
@@ -993,6 +1014,12 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ("predicted_torque_target_abs", "H"),
             ),
         )
+        # Firmware appends the u32 drift ratio at the end of the record, after
+        # predicted_torque_target_abs. Captures from before the field existed
+        # end here instead, and that absence must decode as None rather than
+        # the u32::MAX "no finite reportable ratio" sentinel the firmware
+        # also emits.
+        decoded["drift_ratio_ppm"] = cursor.take("I") if len(payload) - cursor.offset >= 4 else None
         decoded["record_kind"] = "observation"
     elif kind == 3 and len(payload) == 67:
         decoded = _take_fields(
