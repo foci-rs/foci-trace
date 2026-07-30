@@ -1833,6 +1833,18 @@ def _compare_fields(
 # observation_class_report_code uses after hitting the identical collision.
 _STAGE_B_CLASS_CODE = {0: 4, 1: 5, 2: 6, 3: 7, 4: 8, 5: 12}
 
+# Every code firmware assigns to StationarityExcluded(_), derived from the map
+# above so appending an exclusion extends the numeric bands with it. The old
+# literal `4 <= code <= 8` band silently sorted ExcessiveDrift (code 12) into
+# the fault arm, where firmware matches StationarityExcluded(_) and yields
+# EXCLUDED.
+_STAGE_B_EXCLUSION_CODES = frozenset(_STAGE_B_CLASS_CODE.values())
+
+# WrongDirectionFault, HardClipFault, InvalidEvidenceFault -- the codes
+# firmware's observation_is_fault matches. Unlike the exclusions this set is
+# closed: new exclusions take codes above the fault block, not inside it.
+_STAGE_B_FAULT_CODES = frozenset({9, 10, 11})
+
 
 def _reconstruct_observation(
     raw: list[VelocityObservation],
@@ -2040,9 +2052,9 @@ def _rung_class(first: dict[str, int], second: dict[str, int]) -> tuple[int, int
         return 2, 0, 0, reproduced
     if first_class == second_class == 3:
         return 3, 0, 0, reproduced
-    if first_class >= 9 or second_class >= 9:
+    if first_class in _STAGE_B_FAULT_CODES or second_class in _STAGE_B_FAULT_CODES:
         return 7, 0, 0, reproduced
-    if 4 <= first_class <= 8 and 4 <= second_class <= 8:
+    if first_class in _STAGE_B_EXCLUSION_CODES and second_class in _STAGE_B_EXCLUSION_CODES:
         return 6, 0, 0, reproduced
     return 5, 0, 0, reproduced
 
@@ -2265,7 +2277,10 @@ def _project_stage_b_recovery_authorities(
                     )
                 )
             boundary = boundaries.get(key)
-            if 4 <= int(observation["classification"]) <= 8 and boundary is not None:
+            if (
+                int(observation["classification"]) in _STAGE_B_EXCLUSION_CODES
+                and boundary is not None
+            ):
                 structured.append(list(boundary["common_rate_interval_q"]))
         projection = project_recovery_authority(
             record,
@@ -3910,7 +3925,7 @@ def replay_stage_b_regions(
     )
     structured_boundaries = {}
     for key, observation in reconstructed.items():
-        if not 4 <= int(observation["classification"]) <= 8:
+        if int(observation["classification"]) not in _STAGE_B_EXCLUSION_CODES:
             continue
         boundary = analyze_structured_boundary(by_stroke.get(key[0] * slot_count + key[1], []))
         if boundary is not None:

@@ -1185,6 +1185,25 @@ def test_stage_b_replay_uses_eight_slots_and_four_k_confidence() -> None:
     assert replay["directional_rungs"][1][0]["operable_count"] == 4
 
 
+def test_drift_excluded_observations_reproduce_as_excluded_not_faulted() -> None:
+    """Report code 12 is an exclusion, so a drift-excluded pair is EXCLUDED.
+
+    The numeric band used to be `>= 9 -> fault`, which swallowed code 12.
+    Firmware's `reproduce_velocity_rung` matches `StationarityExcluded(_)`
+    and yields Excluded for the same pair.
+    """
+    from foci_trace.velocity_measurement import _rung_class
+
+    drift = {"classification": 12}
+    resolved_slope = {"classification": 6}
+    wrong_direction = {"classification": 9}
+
+    assert _rung_class(drift, drift)[0] == 6
+    assert _rung_class(drift, resolved_slope)[0] == 6
+    assert _rung_class(drift, wrong_direction)[0] == 7
+    assert _rung_class(wrong_direction, drift)[0] == 7
+
+
 def test_stage_b_recovery_is_statistically_excluded_at_partial_terminus() -> None:
     from foci_trace.velocity_measurement import _reconstruct_observation, replay_stage_b_regions
 
