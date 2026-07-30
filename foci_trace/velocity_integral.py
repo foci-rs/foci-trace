@@ -36,6 +36,11 @@ _PLAN_RECOVERY_QUANTIZATION_EXPOSED = 1 << 0
 _PLAN_PROBE_CONSTRAINED_TEST_POINT = 1 << 1
 _PLAN_SLOT_ORDER_SHIFT = 2
 _PLAN_SLOT_ORDER_MASK = 0b11 << _PLAN_SLOT_ORDER_SHIFT
+
+SLOT_ORDER_FORWARD_FIRST = 0
+SLOT_ORDER_REVERSE_FIRST = 1
+SLOT_ORDER_PAIRED_OUT_AND_BACK = 2
+
 _TERMINAL_RECOVERY_UNAVAILABLE = 1 << 0
 _TERMINAL_RECOVERED_WITH_CURRENT_HEADROOM = 1 << 1
 _TERMINAL_RECOVERY_QUANTIZATION_EXPOSED = 1 << 2
@@ -50,6 +55,52 @@ _U128_MAX = (1 << 128) - 1
 
 class UnsupportedIntegralRepresentationError(ValueError):
     """Raised when a firmware build has no declared integral-gain domain."""
+
+
+def _slot_order_parity_twist(slot_order: int, observation: int) -> int:
+    """Return the parity offset one order applies to a same-direction ordinal.
+
+    Mirrors the firmware's ``IntegralSlotOrder::parity_twist``, which is the
+    only thing separating the three orders.
+    """
+    if slot_order == SLOT_ORDER_FORWARD_FIRST:
+        return 0
+    if slot_order == SLOT_ORDER_REVERSE_FIRST:
+        return 1
+    if slot_order == SLOT_ORDER_PAIRED_OUT_AND_BACK:
+        return observation & 1
+    raise ValueError(f"unknown observation slot order {slot_order}")
+
+
+def slot_direction_index(slot_order: int, slot: int) -> int:
+    """Return 0 for forward and 1 for reverse travel in the declared order.
+
+    Mirrors the firmware's ``IntegralSlotOrder::direction_index``.
+
+    Slot parity alone gives the direction only under forward-first, and the
+    paired F,R,R,F order is not a parity function at all.
+    """
+    return (slot & 1) ^ _slot_order_parity_twist(slot_order, slot >> 1)
+
+
+def slot_for_observation(slot_order: int, observation: int, direction: int) -> int:
+    """Return the slot carrying one same-direction observation ordinal.
+
+    Mirrors the firmware's ``IntegralSlotOrder::slot_for``, the inverse of
+    [`slot_direction_index`]. Evidence is written by raw slot and read back by
+    observation and direction, so both mappings have to route through the
+    declared order or they disagree on everything but forward-first.
+    """
+    return observation * 2 + (direction ^ _slot_order_parity_twist(slot_order, observation))
+
+
+def plan_slot_order(plan: dict[str, object]) -> int:
+    """Return the observation slot order declared by one Stage-C plan.
+
+    Captures taken before the field existed leave the bits clear, which is
+    forward-first.
+    """
+    return (int(plan.get("flags", 0)) & _PLAN_SLOT_ORDER_MASK) >> _PLAN_SLOT_ORDER_SHIFT
 
 
 def integral_numerator_for_build(build_revision: int | None) -> int:
@@ -163,7 +214,7 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     # Hashed only when the order is not forward-first, matching firmware.
     # Forward-first is the historical order, so omitting it keeps every archived
     # plan digest valid.
-    slot_order = (int(plan.get("flags", 0)) & _PLAN_SLOT_ORDER_MASK) >> _PLAN_SLOT_ORDER_SHIFT
+    slot_order = plan_slot_order(plan)
     if slot_order:
         _append_integer(encoded, slot_order, 1)
     return _fnv1a64(bytes(encoded))
@@ -512,7 +563,7 @@ def reconstruct_observation(
         raise ValueError("integral observation has no raw moving samples")
     rung_index = int(identity["rung_index"])
     slot = int(identity["slot"])
-    direction = 0 if slot % 2 == 0 else 1
+    direction = slot_direction_index(plan_slot_order(plan), slot)
     stationarity = _stationary_suffix(raw[-256:])
     predicted = (
         max(item.peak_torque_target_abs or 0 for item in raw)
@@ -1264,7 +1315,9 @@ def audit_velocity_integral(
             mismatches.append("integral rest boundary carries the wrong I gain")
         if not 0 <= slot < 8:
             mismatches.append("integral rest boundary slot is outside the fixed schedule")
-        elif int(boundary["direction"]) != (1 if slot % 2 == 0 else -1):
+        elif int(boundary["direction"]) != (
+            1 if slot_direction_index(plan_slot_order(plan), slot) == 0 else -1
+        ):
             mismatches.append("integral rest boundary carries the wrong direction")
         if int(boundary["cleanup_confirmed"]) not in (0, 1):
             mismatches.append("integral rest boundary cleanup flag is not boolean")
@@ -1351,7 +1404,7 @@ def audit_velocity_integral(
             continue
         if int(record["i_raw"]) != int(expected_gains[rung_index]):
             mismatches.append(f"integral observation {key} has wrong I gain")
-        if int(record["direction"]) != slot % 2:
+        if int(record["direction"]) != slot_direction_index(plan_slot_order(plan), slot):
             mismatches.append(f"integral observation {key} has wrong direction")
         if int(record["plan_digest"]) != int(plan["plan_digest"]):
             mismatches.append(f"integral observation {key} has wrong plan digest")
@@ -1665,7 +1718,10 @@ def audit_velocity_integral(
             )
         expected_directions: list[dict[str, object]] = []
         for direction in range(2):
-            keys = [(rung_index, direction + 2 * repeat) for repeat in range(4)]
+            keys = [
+                (rung_index, slot_for_observation(plan_slot_order(plan), repeat, direction))
+                for repeat in range(4)
+            ]
             if any(key not in reconstructed for key in keys):
                 mismatches.append(
                     f"integral rung {rung_index} lacks four direction {direction} observations"

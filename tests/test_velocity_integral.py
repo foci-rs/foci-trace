@@ -20,6 +20,11 @@ from foci_trace.velocity_integral import (
     integral_numerator_for_build,
     _PLAN_SLOT_ORDER_SHIFT,
     integral_plan_digest,
+    slot_direction_index,
+    slot_for_observation,
+    SLOT_ORDER_FORWARD_FIRST,
+    SLOT_ORDER_PAIRED_OUT_AND_BACK,
+    SLOT_ORDER_REVERSE_FIRST,
     recovery_quantization_exposed,
     reconstruct_observation,
     select_transition_capable_test_point,
@@ -32,6 +37,16 @@ from foci_trace.velocity_measurement import VelocityObservation, audit_rung_orig
 
 LEGACY_Q8_8_BUILD = 0x75536758
 CURRENT_Q4_12_BUILD = 0x05E21F75
+
+# Direction index per slot for each declared order, transcribed from
+# IntegralSlotOrder in the firmware's integral_plan.rs. Kept as literal rows
+# rather than derived from slot_direction_index, so the tests below compare the
+# reconstruction against the schedule instead of against itself.
+_DECLARED_DIRECTIONS: dict[int, tuple[int, ...]] = {
+    SLOT_ORDER_FORWARD_FIRST: (0, 1, 0, 1, 0, 1, 0, 1),
+    SLOT_ORDER_REVERSE_FIRST: (1, 0, 1, 0, 1, 0, 1, 0),
+    SLOT_ORDER_PAIRED_OUT_AND_BACK: (0, 1, 1, 0, 0, 1, 1, 0),
+}
 
 
 def _fnv1a32(value: str) -> int:
@@ -641,9 +656,20 @@ def _current_record(rung_index: int, slot: int, sequence: int) -> tuple[bytes, d
     return raw, {"record_kind": "velocity_primitive_current", **values}
 
 
-def _rest_boundary_record(sequence: int) -> tuple[bytes, dict[str, object]]:
+def _rest_boundary_record(
+    sequence: int,
+    slot_order: int = SLOT_ORDER_FORWARD_FIRST,
+    positive_rung_index: int = 11,
+    i_raw: int = 1_024,
+) -> tuple[bytes, dict[str, object]]:
+    # The boundary sits at slot 0, whose travel direction is forward under
+    # forward-first and paired but reverse under reverse-first. The record
+    # carries signed travel, not a direction index.
+    signed_direction = 1 if _DECLARED_DIRECTIONS[slot_order][0] == 0 else -1
     raw = bytearray([5])
-    raw.extend(struct.pack("<IHQBBHb", 7, sequence, 0, 11, 0, 1_024, 1))
+    raw.extend(
+        struct.pack("<IHQBBHb", 7, sequence, 0, positive_rung_index, 0, i_raw, signed_direction)
+    )
     raw.extend(struct.pack("<HIiiiH", 433, 433_000, 2, 0, 2, 2))
     raw.extend(struct.pack("<HIii", 3, 3_000, 1, 1))
     raw.extend(struct.pack("<HIii", 401, 401_000, 1, 2))
@@ -654,10 +680,10 @@ def _rest_boundary_record(sequence: int) -> tuple[bytes, dict[str, object]]:
         "run_sequence": 7,
         "evidence_sequence": sequence,
         "plan_digest": 0,
-        "positive_rung_index": 11,
+        "positive_rung_index": positive_rung_index,
         "slot": 0,
-        "i_raw": 1_024,
-        "direction": 1,
+        "i_raw": i_raw,
+        "direction": signed_direction,
         "active_stationarity_code": 4,
         "cleanup_confirmed": 1,
     }
@@ -773,8 +799,11 @@ def _rung_record(
 
 def _synthetic_complete_capture(
     schema_revision: int = 1,
+    slot_order: int = SLOT_ORDER_FORWARD_FIRST,
 ) -> tuple[list[VelocityObservation], list[tuple[bytes, dict[str, object]]]]:
     plan = _plan(schema_revision)
+    if slot_order != SLOT_ORDER_FORWARD_FIRST:
+        plan["flags"] = int(plan.get("flags", 0)) | (slot_order << _PLAN_SLOT_ORDER_SHIFT)
     plan["plan_digest"] = integral_plan_digest(plan)
     records = _plan_records(plan)
     sequence = 1
@@ -785,7 +814,7 @@ def _synthetic_complete_capture(
     for rung_index, gain in enumerate(gains):
         direction_results: list[list[dict[str, object]]] = [[], []]
         for slot in range(8):
-            direction = slot % 2
+            direction = _DECLARED_DIRECTIONS[slot_order][slot]
             raw = [
                 VelocityObservation(
                     17 if direction == 0 else -17,
@@ -803,6 +832,10 @@ def _synthetic_complete_capture(
                 {"rung_index": rung_index, "slot": slot, "i_raw": gain},
                 plan,
             )
+            # Firmware emits the direction the schedule declares. Taking it from
+            # the reconstruction instead would make the audit below compare the
+            # reconstruction against itself, which passes however wrong it is.
+            result["direction"] = direction
             direction_results[direction].append(result)
             records.append(_observation_record(result, sequence, int(plan["plan_digest"])))
             sequence += 1
@@ -1004,18 +1037,29 @@ def test_schema_nine_reports_firmware_response_horizon_mismatch() -> None:
     assert any("response horizon tau_us" in mismatch for mismatch in audit["mismatches"])
 
 
-def _synthetic_schema_five_boundary_capture() -> tuple[
-    list[VelocityObservation], list[tuple[bytes, dict[str, object]]]
-]:
-    raw_observations, records = _synthetic_complete_capture(schema_revision=5)
-    plan = _plan(schema_revision=5)
+def _synthetic_boundary_capture(
+    schema_revision: int = 5,
+    slot_order: int = SLOT_ORDER_FORWARD_FIRST,
+) -> tuple[list[VelocityObservation], list[tuple[bytes, dict[str, object]]]]:
+    raw_observations, records = _synthetic_complete_capture(
+        schema_revision=schema_revision, slot_order=slot_order
+    )
+    plan = _plan(schema_revision=schema_revision)
+    if slot_order != SLOT_ORDER_FORWARD_FIRST:
+        plan["flags"] = int(plan.get("flags", 0)) | (slot_order << _PLAN_SLOT_ORDER_SHIFT)
     plan["plan_digest"] = integral_plan_digest(plan)
+    # The capture ends at the last positive rung, whose records are dropped and
+    # replaced by the rest boundary. Rung 0 is the opening anchor, so positive
+    # rung ordinal n sits at rung index n + 1.
+    positive_rung_count = int(plan["positive_rung_count"])
+    boundary_positive_rung = positive_rung_count - 1
+    dropped_rung_index = boundary_positive_rung + 1
     terminal = records.pop()
     records = [
         (raw, value)
         for raw, value in records
         if not (
-            int(value.get("rung_index", -1)) == 12
+            int(value.get("rung_index", -1)) == dropped_rung_index
             and (
                 value["record_kind"] in ("integral_observation", "integral_rung")
                 or (
@@ -1040,7 +1084,12 @@ def _synthetic_schema_five_boundary_capture() -> tuple[
             raw = bytes(encoded)
         resequenced.append((raw, value))
         sequence += 1
-    boundary_raw, boundary = _rest_boundary_record(sequence)
+    boundary_raw, boundary = _rest_boundary_record(
+        sequence,
+        slot_order,
+        boundary_positive_rung,
+        int(plan["positive_i"][boundary_positive_rung]),  # type: ignore[index]
+    )
     boundary["plan_digest"] = plan["plan_digest"]
     encoded_boundary = bytearray(boundary_raw)
     encoded_boundary[7:15] = int(plan["plan_digest"]).to_bytes(8, "little")
@@ -1060,12 +1109,89 @@ def _synthetic_schema_five_boundary_capture() -> tuple[
             "evidence_sequence": sequence,
             "digest": digest,
             "cause": 10,
-            "emitted_observations": 104,
-            "emitted_rungs": 13,
-            "eligible_masks": [0x7FF, 0x7FF],
+            # One rung's worth of observations and the rung record itself are
+            # gone, and the dropped rung's eligibility bit with them.
+            "emitted_observations": 8 * (positive_rung_count + 1),
+            "emitted_rungs": positive_rung_count + 1,
+            "eligible_masks": [((1 << positive_rung_count) - 1) & ~(1 << boundary_positive_rung)]
+            * 2,
         }
     )
     return raw_observations, [*resequenced, (boundary_raw, boundary), terminal]
+
+
+def _synthetic_schema_five_boundary_capture() -> tuple[
+    list[VelocityObservation], list[tuple[bytes, dict[str, object]]]
+]:
+    return _synthetic_boundary_capture(schema_revision=5)
+
+
+def test_slot_direction_index_matches_the_declared_schedule() -> None:
+    """Slot parity is the direction only under forward-first.
+
+    The paired order is not a parity function at all: its twist alternates with
+    the same-direction ordinal, giving F,R,R,F,F,R,R,F.
+    """
+    for slot_order, expected in _DECLARED_DIRECTIONS.items():
+        actual = tuple(slot_direction_index(slot_order, slot) for slot in range(8))
+        assert actual == expected, f"slot order {slot_order}"
+
+
+def test_slot_lookup_inverts_the_direction_mapping_in_every_order() -> None:
+    """Evidence is written by raw slot and read back by observation and
+    direction. The two mappings are used at different sites, so a drift between
+    them silently pairs a reading with the wrong stroke."""
+    for slot_order in _DECLARED_DIRECTIONS:
+        for slot in range(8):
+            direction = slot_direction_index(slot_order, slot)
+            assert slot_for_observation(slot_order, slot // 2, direction) == slot
+
+
+def test_unknown_slot_order_is_rejected_rather_than_treated_as_forward_first() -> None:
+    """Bits 2-3 hold four values and only three are declared. Falling back to
+    forward-first would reconstruct a whole capture at the wrong directions."""
+    with pytest.raises(ValueError):
+        slot_direction_index(3, 0)
+
+
+@pytest.mark.parametrize(
+    "slot_order",
+    (SLOT_ORDER_FORWARD_FIRST, SLOT_ORDER_REVERSE_FIRST, SLOT_ORDER_PAIRED_OUT_AND_BACK),
+)
+def test_every_slot_order_reconstructs_the_direction_the_schedule_declares(
+    slot_order: int,
+) -> None:
+    """Aggregation-level cover for the reconstruction path.
+
+    A type-level test of slot_direction_index alone cannot catch a site that
+    derives direction itself instead of calling it, which is how all three sites
+    came to disagree with firmware. This drives a whole capture through the audit
+    at each declared order, so a site that bypasses the helper still shows up.
+    """
+    raw, records = _synthetic_complete_capture(schema_revision=8, slot_order=slot_order)
+
+    audit = audit_velocity_integral(raw, records)
+
+    direction_mismatches = [mismatch for mismatch in audit["mismatches"] if "direction" in mismatch]
+    assert direction_mismatches == []
+
+
+def test_mirrored_rest_boundary_direction_follows_the_slot_order() -> None:
+    """The boundary carries signed travel for slot 0, which reverse-first flips.
+
+    Covered separately from the observation path because the boundary check is a
+    third site with its own sign convention.
+    """
+    # Schema 8, not 5: the plan flags carrying the slot order do not exist on
+    # the wire before schema 6, so a schema-5 capture is forward-first by
+    # construction and cannot exercise this at all.
+    raw, records = _synthetic_boundary_capture(
+        schema_revision=8, slot_order=SLOT_ORDER_REVERSE_FIRST
+    )
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert [mismatch for mismatch in audit["mismatches"] if "direction" in mismatch] == []
 
 
 def test_complete_capture_reconstructs_curve_counts_and_digest() -> None:
