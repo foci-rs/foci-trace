@@ -18,6 +18,7 @@ from foci_trace.velocity_integral import (
     derive_integral_ladder,
     integral_deficit_reaches_target,
     integral_numerator_for_build,
+    _PLAN_MIRRORED_SLOT_ORDER,
     integral_plan_digest,
     recovery_quantization_exposed,
     reconstruct_observation,
@@ -1776,3 +1777,30 @@ def test_retained_slot_lifecycle_is_deterministic(
     state: str, outcome: str, comparison: str | None, expected: str
 ) -> None:
     assert stage_c_slot_transition(state, outcome, comparison) == expected
+
+
+def test_mirrored_slot_order_is_reported_and_hashed_only_when_set() -> None:
+    """Stage C records the mirrored slot order in bit 2 of the plan flags byte.
+
+    Firmware hashes the order only when mirrored, so forward-first plans keep the
+    digest they had before slot order was recorded and every archived capture and
+    retained acceptance-point binding stays valid.
+    """
+    forward_first = _plan()
+    forward_first["flags"] = 0
+    baseline = integral_plan_digest(forward_first)
+
+    reverse_first = _plan()
+    reverse_first["flags"] = 0b100
+
+    assert integral_plan_digest(forward_first) == baseline
+    assert integral_plan_digest(reverse_first) != baseline
+
+    # Unlike the older flag bits, the slot order is hashed at every schema,
+    # because firmware records it without moving the Stage-C schema revision.
+    for schema_revision in (1, 7):
+        unmirrored = _plan(schema_revision)
+        unmirrored["flags"] = 0
+        mirrored = _plan(schema_revision)
+        mirrored["flags"] = _PLAN_MIRRORED_SLOT_ORDER
+        assert integral_plan_digest(mirrored) != integral_plan_digest(unmirrored)

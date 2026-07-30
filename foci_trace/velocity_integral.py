@@ -34,6 +34,7 @@ _FNV1A64_OFFSET = 0xCBF29CE484222325
 _FNV1A64_PRIME = 0x100000001B3
 _PLAN_RECOVERY_QUANTIZATION_EXPOSED = 1 << 0
 _PLAN_PROBE_CONSTRAINED_TEST_POINT = 1 << 1
+_PLAN_MIRRORED_SLOT_ORDER = 1 << 2
 _TERMINAL_RECOVERY_UNAVAILABLE = 1 << 0
 _TERMINAL_RECOVERED_WITH_CURRENT_HEADROOM = 1 << 1
 _TERMINAL_RECOVERY_QUANTIZATION_EXPOSED = 1 << 2
@@ -158,6 +159,10 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     ):
         _append_integer(encoded, int(plan[name]), 4)
     _append_integer(encoded, int(plan["max_duration_ms"]), 2)
+    # Hashed only when mirrored, matching firmware. Forward-first is the historical
+    # order, so omitting it keeps every archived plan digest valid.
+    if int(plan.get("flags", 0)) & _PLAN_MIRRORED_SLOT_ORDER:
+        _append_integer(encoded, 1, 1)
     return _fnv1a64(bytes(encoded))
 
 
