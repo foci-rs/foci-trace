@@ -1890,10 +1890,19 @@ _STAGE_B_CLASS_CODE = {0: 4, 1: 5, 2: 6, 3: 7, 4: 8, 5: 12}
 # EXCLUDED.
 _STAGE_B_EXCLUSION_CODES = frozenset(_STAGE_B_CLASS_CODE.values())
 
-# WrongDirectionFault, HardClipFault, InvalidEvidenceFault -- the codes
-# firmware's observation_is_fault matches. Unlike the exclusions this set is
-# closed: new exclusions take codes above the fault block, not inside it.
-_STAGE_B_FAULT_CODES = frozenset({9, 10, 11})
+# Every code outside the four moving classes (0-3) and the stationarity
+# exclusions is a fault. Firmware's own default for a classification byte it
+# cannot decode is InvalidEvidenceFault -- see analyze_directional_set's
+# `.unwrap_or(VelocityObservationClass::InvalidEvidenceFault)` in
+# sweep_evidence.rs -- so this must be derived the same way the exclusion set
+# is, not left as a literal `{9, 10, 11}`. The literal was accidentally
+# correct only because nothing occupied 13-15 yet: the classification field
+# is 4 bits wide, so those codes are representable, and a literal fault set
+# would send them to _rung_class's Ambiguous catch-all instead of matching
+# firmware's fault default. Unreachable today since firmware never emits
+# above 12, but the derivation keeps it that way instead of leaving the trap
+# armed for the next exclusion or fault variant added above this line.
+_STAGE_B_FAULT_CODES = frozenset(range(16)) - {0, 1, 2, 3} - _STAGE_B_EXCLUSION_CODES
 
 
 def _reconstruct_observation(
