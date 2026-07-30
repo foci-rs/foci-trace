@@ -1230,6 +1230,10 @@ def _stationary_suffix(
                 "usable": 0,
                 "exclusion": 1 if _has_two_doubling_plateau(levels) else 0,
                 "tested_suffixes": tested,
+                # No regression was ever attempted, so there is no ratio to
+                # report. Mirrors firmware's poll_blocking, which reports this
+                # same sentinel when select_plateau() finds nothing.
+                "drift_ratio_ppm": NO_REPORTABLE_DRIFT_RATIO_PPM,
             }
         variance = _q(levels[level].moments)
         assert variance is not None
@@ -1242,7 +1246,14 @@ def _stationary_suffix(
             if selected is not None:
                 selected["tested_suffixes"] = tested
                 return selected
-            return {"usable": 0, "exclusion": fit, "tested_suffixes": tested}
+            return {
+                "usable": 0,
+                "exclusion": fit,
+                "tested_suffixes": tested,
+                # Same as above: the plateau was too thin for a regression, so
+                # slope_q and span_x2_us never existed to form a ratio from.
+                "drift_ratio_ppm": NO_REPORTABLE_DRIFT_RATIO_PPM,
+            }
         exclusion = _classify_stationarity(
             fit,
             "moving",
@@ -1255,7 +1266,15 @@ def _stationary_suffix(
             if selected is not None:
                 selected["tested_suffixes"] = tested
                 return selected
-            return {"usable": 0, "exclusion": exclusion, "tested_suffixes": tested}
+            return {
+                "usable": 0,
+                "exclusion": exclusion,
+                "tested_suffixes": tested,
+                # A post-fit rejection evaluated a ratio, so it reports it,
+                # matching firmware's finish_on_exclusion call sites that pass
+                # metrics.drift_ratio_ppm rather than the sentinel.
+                "drift_ratio_ppm": fit["drift_ratio_ppm"],
+            }
         selected = {
             "usable": 1,
             "suffix_len": suffix_len,
@@ -1271,8 +1290,14 @@ def _stationary_suffix(
             "lag_one_q": fit["lag_one_q"],
             "lag_one_half_width_q": fit["lag_one_half_width_q"],
             "residual_magnitude_q2": fit["residual_magnitude_q2"],
+            "drift_ratio_ppm": fit["drift_ratio_ppm"],
         }
-    return selected or {"usable": 0, "exclusion": 1, "tested_suffixes": tested}
+    return selected or {
+        "usable": 0,
+        "exclusion": 1,
+        "tested_suffixes": tested,
+        "drift_ratio_ppm": NO_REPORTABLE_DRIFT_RATIO_PPM,
+    }
 
 
 def analyze_stationary_tail(
@@ -1824,6 +1849,31 @@ def _compare_fields(
             mismatches.append(
                 f"{label} {field_name}: firmware={firmware[field_name]} offline={offline[field_name]}"
             )
+
+
+def _compare_optional_drift_ratio(
+    mismatches: list[str],
+    label: str,
+    firmware: dict[str, object],
+    offline: dict[str, int],
+) -> None:
+    """Compare `drift_ratio_ppm` only when the wire record actually carries it.
+
+    Captures recorded before the drift bound landed decode this field as
+    `None` (see `protocol.py`'s observation decoders), while the offline
+    mirror always computes a value -- a real ratio or the
+    `NO_REPORTABLE_DRIFT_RATIO_PPM` sentinel -- because `_stationary_suffix`
+    forms it unconditionally. Comparing unconditionally would fail every
+    pre-drift-bound replay capture against a value firmware never had the
+    chance to report, so this skips silently when the wire field is absent.
+    """
+    reported = firmware.get("drift_ratio_ppm")
+    if reported is None:
+        return
+    if int(reported) != int(offline["drift_ratio_ppm"]):
+        mismatches.append(
+            f"{label} drift_ratio_ppm: firmware={reported} offline={offline['drift_ratio_ppm']}"
+        )
 
 
 # Stage B's wire classification namespace reserves 4..8 for the five
@@ -4304,6 +4354,7 @@ def _audit_stage_b_velocity_sweep(
         for name in exact_fields:
             offline.setdefault(name, 0)
         _compare_fields(mismatches, f"observation {key[0]}/{key[1]}", record, offline, exact_fields)
+        _compare_optional_drift_ratio(mismatches, f"observation {key[0]}/{key[1]}", record, offline)
         reconstructed[key] = offline
 
     boundary_records = [
@@ -5107,6 +5158,7 @@ def audit_velocity_sweep(
         for name in exact_fields:
             offline.setdefault(name, 0)
         _compare_fields(mismatches, f"observation {key[0]}/{key[1]}", record, offline, exact_fields)
+        _compare_optional_drift_ratio(mismatches, f"observation {key[0]}/{key[1]}", record, offline)
         offline_observations[key] = offline
     bands = {0: _new_band(), 1: _new_band()}
     rung_records = {
