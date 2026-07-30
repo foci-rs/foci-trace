@@ -1185,6 +1185,87 @@ def test_stage_b_replay_uses_eight_slots_and_four_k_confidence() -> None:
     assert replay["directional_rungs"][1][0]["operable_count"] == 4
 
 
+def _stage_b_single_rung_evidence(
+    drift_ratio_ppm: int | None,
+) -> tuple[list[object], list[tuple[bytes, dict[str, object]]]]:
+    """Build one four-slot Stage B stream whose records report a drift ratio or not."""
+    from foci_trace.velocity_measurement import _reconstruct_observation
+
+    plan = {
+        "record_kind": "plan",
+        "run_sequence": 14,
+        "evidence_sequence": 0,
+        "rung_count": 1,
+        "observations_per_direction": 2,
+        "planned_velocity_mrev_s": 1_667,
+        "target_velocity_rpm": 100,
+        "p_start": 100,
+        "p_top": 100,
+        "hard_torque_limit": 1_000,
+        "usable_torque_limit": 900,
+    }
+    terminal = {
+        "record_kind": "stage_b_terminal",
+        "run_sequence": 14,
+        "encoder_counts_per_rev": 1_000,
+        "f_pwm_hz": 25_000,
+    }
+    raw_observations: list[object] = []
+    evidence: list[tuple[bytes, dict[str, object]]] = [(b"plan", plan)]
+    pattern = (1, 0, 1, 1, 0)
+    for slot in range(4):
+        direction = 1 if slot % 2 == 0 else -1
+        stroke = [
+            _observation(
+                direction * pattern[index % len(pattern)],
+                direction=direction,
+                stroke_index=slot,
+                target_cpms=direction,
+                peak_torque_target_abs=100,
+            )
+            for index in range(256)
+        ]
+        raw_observations.extend(stroke)
+        record = {
+            "record_kind": "observation",
+            "run_sequence": 14,
+            "evidence_sequence": slot + 1,
+            "rung_index": 0,
+            "slot": slot,
+            "velocity_p": 100,
+            "target_velocity_rpm": direction * 100,
+            "flags": int(slot == 0),
+        }
+        record.update(_reconstruct_observation(stroke, record, plan, terminal))
+        # The decoder always sets this key: an int on captures that carry the
+        # trailing u32, None on the ones taken before the field existed.
+        record["drift_ratio_ppm"] = drift_ratio_ppm
+        evidence.append((bytes([2, slot]), record))
+    evidence.append((b"terminal", terminal))
+    return raw_observations, evidence
+
+
+def test_stage_b_replay_derives_the_drift_bound_schema_from_the_reported_ratio() -> None:
+    """A reported drift ratio is the only wire signal that a capture is schema 14.
+
+    Stage B's plan record carries no schema revision, so replay derives one
+    from the stream. Before this arm existed the derivation topped out at 12
+    and real schema-14 captures were replayed against the legacy significance
+    gate, which reports `matches_firmware: False` on exactly the observations
+    the drift bound was added to accept.
+    """
+    from foci_trace.velocity_measurement import (
+        STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+        replay_stage_b_regions,
+    )
+
+    reported = replay_stage_b_regions(*_stage_b_single_rung_evidence(1_234))
+    absent = replay_stage_b_regions(*_stage_b_single_rung_evidence(None))
+
+    assert reported["schema_revision"] == STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION
+    assert absent["schema_revision"] < STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION
+
+
 def test_drift_excluded_observations_reproduce_as_excluded_not_faulted() -> None:
     """Report code 12 is an exclusion, so a drift-excluded pair is EXCLUDED.
 

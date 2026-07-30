@@ -3715,8 +3715,26 @@ def replay_stage_b_regions(
             for _raw, value in evidence_records
         )
     )
+    # Stage B's wire "plan" record carries no schema revision and firmware
+    # publishes STAGE_B_EVIDENCE_SCHEMA_REVISION only in the Klipper constant
+    # block, which trace captures do not contain -- so the revision has to be
+    # derived from what the evidence stream itself shows. The trailing
+    # drift_ratio_ppm u32 on the Stage B observation record was added by the
+    # same change that introduced the drift bound, one commit before
+    # COMBINED_STAGE_B_SCHEMA_REVISION went to 14, so a capture reporting it is
+    # schema 14 or newer. Older captures decode the field as None (see
+    # protocol._decode_velocity_sweep_evidence) and keep the ladder below.
+    # Without this arm the derivation topped out at 12 and every real schema-14
+    # capture was replayed against the legacy significance gate while firmware
+    # had applied the drift bound.
+    drift_ratio_reported = any(
+        value["record_kind"] == "observation" and value.get("drift_ratio_ppm") is not None
+        for _raw, value in evidence_records
+    )
     schema_revision = (
-        12
+        STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION
+        if drift_ratio_reported
+        else 12
         if recovery_wide
         else 11
         if recovery_rest_present
