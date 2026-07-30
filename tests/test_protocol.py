@@ -1926,10 +1926,11 @@ def test_decodes_gate_rejection_diagnostic_on_an_excluded_observation() -> None:
     payload.extend(bytes([1]))  # rejection present
     payload.extend(struct.pack("<HBBB", 256, 1, 0, 1))
     payload.extend(struct.pack("<qqqi", -8_773_356, -8_351_644, -2_389_706, 55_874))
+    payload.extend(struct.pack("<qQ", -6_100_000, 3_710_294))
 
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
 
-    assert len(payload) == 80
+    assert len(payload) == 96
     assert frame.payload["record_kind"] == "integral_observation"
     assert frame.payload["stationarity_code"] == 3
     assert frame.payload["rejection_present"] == 1
@@ -1940,6 +1941,9 @@ def test_decodes_gate_rejection_diagnostic_on_an_excluded_observation() -> None:
     assert frame.payload["rejection_settled_rate_interval_q"] == [-8_773_356, -8_351_644]
     assert frame.payload["rejection_slope_margin_q"] == -2_389_706
     assert frame.payload["rejection_lag_one_margin_q"] == 55_874
+    # A margin is half_width - |slope| and cannot recover either term.
+    assert frame.payload["rejection_slope_q"] == -6_100_000
+    assert frame.payload["rejection_slope_half_width_q"] == 3_710_294
 
 
 def test_decodes_an_exclusion_that_never_reached_the_gates() -> None:

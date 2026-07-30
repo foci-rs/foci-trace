@@ -853,7 +853,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         decoded["record_kind"] = "plan"
     elif kind == 2 and (matrix := _try_decode_acceptance_amplitude(payload)) is not None:
         return matrix
-    elif kind == 2 and len(payload) in (46, 47, 77, 80):
+    elif kind == 2 and len(payload) in (46, 47, 77, 80, 96):
         decoded = _take_fields(
             cursor,
             (
@@ -931,6 +931,11 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ]
                 decoded["rejection_slope_margin_q"] = cursor.take("q")
                 decoded["rejection_lag_one_margin_q"] = cursor.take("i")
+                # Present from the second revision of this block. A margin is
+                # half_width - |slope| and recovers neither term on its own.
+                if cursor.offset < len(payload):
+                    decoded["rejection_slope_q"] = cursor.take("q")
+                    decoded["rejection_slope_half_width_q"] = cursor.take("Q")
                 if decoded["rejection_suffix_len"] not in (64, 128, 256):
                     raise DecodeError("observation rejection suffix is not in the family")
                 interval = decoded["rejection_settled_rate_interval_q"]
