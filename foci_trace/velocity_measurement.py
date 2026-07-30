@@ -17,6 +17,32 @@ RECOVERY_ANALYSIS_BUDGET_US = 236_000
 RECOVERY_STABILIZATION_US = 500_000
 MIN_SELECTED_BLOCKS = 16
 CONFIDENCE_MULTIPLIER_95 = 2.131
+# Parts-per-million of settled rate a moving stroke may drift across its
+# regression span. Mirrors firmware's MAX_MOVING_DRIFT_PPM.
+MAX_MOVING_DRIFT_PPM = 200_000
+# Reported drift ratio when no regression produced one, or when the settled
+# interval contains zero (the Inert condition bypasses the drift bound
+# entirely). Mirrors firmware's NO_REPORTABLE_DRIFT_RATIO_PPM: a zero would
+# read as "measured, and tiny", the opposite of the truth here.
+NO_REPORTABLE_DRIFT_RATIO_PPM = 0xFFFFFFFF
+# Schema revision at which firmware's moving-stroke gate started applying the
+# drift bound instead of the slope-significance test. Every capture recorded
+# on an earlier schema was produced by firmware that never ran the drift
+# bound, so the offline mirror must keep applying the significance test for
+# those captures rather than a gate that firmware itself never executed on
+# that data.
+#
+# Stage B and Stage C number their schema revisions on independent counters,
+# so there are two thresholds, not one: Task 7 bumped firmware's
+# COMBINED_STAGE_B_SCHEMA_REVISION from 13 to 14 and COMBINED_STAGE_C_SCHEMA_REVISION
+# from 12 to 13 in the same commit. Stage B revision 13 therefore predates the
+# drift bound -- it was live firmware until Task 7 -- even though it is the
+# same integer as Stage C's post-bump floor. Comparing a Stage B revision
+# against the Stage C threshold (or vice versa) would silently apply the
+# wrong gate to real captures. Each call site must pass the threshold that
+# matches the schema namespace its `schema_revision` was drawn from.
+STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION = 14  # tracks firmware's COMBINED_STAGE_B_SCHEMA_REVISION
+STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION = 13  # tracks firmware's COMBINED_STAGE_C_SCHEMA_REVISION
 
 
 def project_combined_response_selection(
@@ -1002,9 +1028,34 @@ def _round_away(value: float) -> int:
     return math.floor(value + 0.5) if value >= 0 else math.ceil(value - 0.5)
 
 
-def _stationarity_metrics(
-    observations: list[VelocityObservation], selection: int, variance_of_mean_q2: int
-) -> dict[str, int] | int:
+def _drift_ratio_ppm(slope_q: int, span_x2_us: int, mean_rate_q: int) -> int:
+    """Drift across the regression span in parts per million of settled rate.
+
+    Integer only, mirroring firmware exactly. The ppm factor cancels against the
+    fixed-point rate units, and the span is doubled so the single ceiling
+    division applies to the exact rational.
+    """
+    denominator = 2 * abs(mean_rate_q)
+    if denominator == 0:
+        return 0xFFFFFFFF
+    numerator = abs(slope_q) * span_x2_us
+    return min(-(-numerator // denominator), 0xFFFFFFFF)
+
+
+def _stationarity_fit(
+    observations: list[VelocityObservation],
+    selection: int,
+    variance_of_mean_q2: int,
+    mean_rate_q: int,
+) -> dict[str, int | bool] | int:
+    """Fit the block-level regression shared by the moving and rest gates.
+
+    Applies no significance or drift gate: those decisions belong to
+    `_classify_stationarity`, which needs the mode to know which gate applies.
+    Returns 1 (too few decorrelated blocks) or 4 (arithmetic failure) if the
+    fit itself cannot be formed; `mean_rate_q` is the caller's settled mean for
+    the selected plateau, needed here only to compute `drift_ratio_ppm`.
+    """
     block_observations = 1 << selection
     block_count = len(observations) // block_observations
     if block_count < MIN_SELECTED_BLOCKS:
@@ -1057,23 +1108,109 @@ def _stationarity_metrics(
     slope_half_width = _f32(
         _f32(multiplier * _f32(math.sqrt(_f32(slope_variance / sxx)))) * _f32(1_000_000)
     )
-    if abs(slope_per_second) > slope_half_width:
-        return 2
     lag_one = _f32(0.0) if residual_sum == 0 else _f32(lag_product_sum / residual_sum)
     lag_null = _f32(_f32(-1.0) / _f32(n))
     lag_half_width = _f32(multiplier / _f32(math.sqrt(_f32(n))))
-    if abs(_f32(lag_one - lag_null)) > lag_half_width:
-        return 3
+    slope_q = _round_away(slope_per_second)
+    first_block_elapsed_us = blocks[0].elapsed_us
+    last_block_elapsed_us = blocks[-1].elapsed_us
+    span_x2_us = 2 * elapsed - first_block_elapsed_us - last_block_elapsed_us
     return {
-        "slope_q": _round_away(slope_per_second),
+        "slope_q": slope_q,
         "slope_half_width_q": math.ceil(slope_half_width),
         "lag_one_q": _round_away(_f32(lag_one * _f32(1_000_000))),
         "lag_one_half_width_q": math.ceil(_f32(lag_half_width * _f32(1_000_000))),
         "residual_magnitude_q2": math.ceil(_f32(residual_sum / _f32(n))),
+        # Significance is decided against the raw float margin, not the
+        # rounded Q value: rounding either side independently can flip a
+        # boundary case relative to the exact firmware comparison.
+        "slope_passed": abs(slope_per_second) <= slope_half_width,
+        "lag_one_passed": abs(_f32(lag_one - lag_null)) <= lag_half_width,
+        "drift_ratio_ppm": _drift_ratio_ppm(slope_q, span_x2_us, mean_rate_q),
     }
 
 
-def _stationary_suffix(observations: list[VelocityObservation]) -> dict[str, int]:
+def _classify_stationarity(
+    fit: dict[str, int | bool],
+    mode: str,
+    mean_rate_q: int,
+    half_width_rate_q: int,
+    *,
+    schema_revision: int | None = None,
+    drift_bound_min_schema_revision: int | None = None,
+) -> int | None:
+    """Apply the mode-specific stationarity gate to an unguarded fit.
+
+    `mode` is `"moving"` or `"rest"`. A moving stroke on a capture at or above
+    `drift_bound_min_schema_revision` is bounded on how far the settled rate
+    drifts across the regression span, not on whether the fitted slope is
+    statistically distinguishable from zero: the significance test tightens as
+    data accumulates, so a longer, better measurement of a real machine
+    rejects where a shorter one passed. Captures below that revision were
+    recorded by firmware that never ran the drift bound at all, so
+    `mode="moving"` there keeps the old significance test instead, matching
+    that firmware exactly rather than a gate it never executed.
+
+    `drift_bound_min_schema_revision` must be the threshold matching the
+    namespace `schema_revision` was drawn from --
+    `STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION` or
+    `STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION` -- since Stage B and Stage C
+    number their schema revisions independently and the same integer means a
+    different thing in each namespace. Passing `schema_revision` without the
+    matching threshold is a caller bug and raises `ValueError` rather than
+    silently assuming one. `schema_revision` of `None` (unknown) is treated as
+    below any threshold: an unidentified capture is far more likely to be an
+    old one, and defaulting toward the legacy gate fails safe toward
+    preserving existing replay behavior.
+
+    Zero-target rest always keeps the significance test unchanged (it never
+    reads `schema_revision` or `drift_bound_min_schema_revision`), since a
+    drift bound relative to a near-zero mean would collapse with the mean
+    itself.
+
+    Returns the zero-based `StationarityExclusion` discriminant on rejection,
+    or `None` when the fit is usable.
+    """
+    if mode == "moving":
+        if schema_revision is not None and drift_bound_min_schema_revision is None:
+            raise ValueError(
+                "schema_revision requires a stage-qualified drift_bound_min_schema_revision"
+            )
+        use_drift_bound = (
+            schema_revision is not None and schema_revision >= drift_bound_min_schema_revision
+        )
+        if use_drift_bound:
+            # The settled interval containing zero is exactly the Inert
+            # condition, which bypasses the drift bound entirely rather than
+            # reporting a meaningless ratio against a near-zero denominator.
+            interval_contains_zero = abs(mean_rate_q) <= half_width_rate_q
+            if not interval_contains_zero and fit["drift_ratio_ppm"] > MAX_MOVING_DRIFT_PPM:
+                return 5
+        elif not fit["slope_passed"]:
+            return 2
+    elif mode == "rest":
+        if not fit["slope_passed"]:
+            return 2
+    else:
+        raise ValueError(f"unknown stationarity mode: {mode!r}")
+    if not fit["lag_one_passed"]:
+        return 3
+    return None
+
+
+def _stationary_suffix(
+    observations: list[VelocityObservation],
+    *,
+    schema_revision: int | None = None,
+    drift_bound_min_schema_revision: int | None = None,
+) -> dict[str, int]:
+    """Reconstruct the longest usable moving-stroke stationary suffix.
+
+    `schema_revision` and `drift_bound_min_schema_revision` select which
+    moving gate `_classify_stationarity` applies (see there); `None` for
+    `schema_revision` means unknown and defaults to the legacy
+    significance-based gate.
+    """
     selected: dict[str, int] | None = None
     tested = 0
     for suffix_len in (64, 128, 256):
@@ -1096,14 +1233,29 @@ def _stationary_suffix(observations: list[VelocityObservation]) -> dict[str, int
             }
         variance = _q(levels[level].moments)
         assert variance is not None
-        metrics = _stationarity_metrics(suffix, level, variance)
-        if isinstance(metrics, int):
+        exact_delta = levels[level].exact_delta_counts
+        exact_elapsed = levels[level].exact_elapsed_us
+        mean_rate_q = _trunc_div(exact_delta * 1_000_000 * RATE_Q_SCALE, exact_elapsed)
+        half_width_rate_q = _confidence_half_width(variance, 3)
+        fit = _stationarity_fit(suffix, level, variance, mean_rate_q)
+        if isinstance(fit, int):
             if selected is not None:
                 selected["tested_suffixes"] = tested
                 return selected
-            return {"usable": 0, "exclusion": metrics, "tested_suffixes": tested}
-        exact_delta = levels[level].exact_delta_counts
-        exact_elapsed = levels[level].exact_elapsed_us
+            return {"usable": 0, "exclusion": fit, "tested_suffixes": tested}
+        exclusion = _classify_stationarity(
+            fit,
+            "moving",
+            mean_rate_q,
+            half_width_rate_q,
+            schema_revision=schema_revision,
+            drift_bound_min_schema_revision=drift_bound_min_schema_revision,
+        )
+        if exclusion is not None:
+            if selected is not None:
+                selected["tested_suffixes"] = tested
+                return selected
+            return {"usable": 0, "exclusion": exclusion, "tested_suffixes": tested}
         selected = {
             "usable": 1,
             "suffix_len": suffix_len,
@@ -1112,22 +1264,42 @@ def _stationary_suffix(observations: list[VelocityObservation]) -> dict[str, int
             "variance_of_mean_q2": variance,
             "selected_delta_counts": exact_delta,
             "selected_elapsed_us": exact_elapsed,
-            "settled_rate_mean_q": _trunc_div(
-                exact_delta * 1_000_000 * RATE_Q_SCALE, exact_elapsed
-            ),
+            "settled_rate_mean_q": mean_rate_q,
             "tested_suffixes": tested,
-            **metrics,
+            "slope_q": fit["slope_q"],
+            "slope_half_width_q": fit["slope_half_width_q"],
+            "lag_one_q": fit["lag_one_q"],
+            "lag_one_half_width_q": fit["lag_one_half_width_q"],
+            "residual_magnitude_q2": fit["residual_magnitude_q2"],
         }
     return selected or {"usable": 0, "exclusion": 1, "tested_suffixes": tested}
 
 
-def analyze_stationary_tail(observations: list[VelocityObservation]) -> dict[str, int]:
-    """Reconstruct the firmware's nested-dyadic stationary tail from raw samples."""
+def analyze_stationary_tail(
+    observations: list[VelocityObservation],
+    *,
+    schema_revision: int | None = None,
+    drift_bound_min_schema_revision: int | None = None,
+) -> dict[str, int]:
+    """Reconstruct the firmware's nested-dyadic stationary tail from raw samples.
+
+    This entry point takes raw samples only, with no plan or replay context, so
+    it genuinely cannot know which schema recorded them, or which stage's
+    schema namespace that revision belongs to; callers that know both should
+    pass `schema_revision` and the matching
+    `STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION` or
+    `STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION` explicitly. `None` defaults to
+    the legacy significance-based moving gate (see `_classify_stationarity`).
+    """
     if not observations:
         raise ValueError("stationary-tail analysis requires raw observations")
     if any(item.elapsed_us <= 0 for item in observations):
         raise ValueError("elapsed_us must be positive")
-    return _stationary_suffix(observations[-256:])
+    return _stationary_suffix(
+        observations[-256:],
+        schema_revision=schema_revision,
+        drift_bound_min_schema_revision=drift_bound_min_schema_revision,
+    )
 
 
 def analyze_scored_rest_selection(
@@ -1156,11 +1328,17 @@ def analyze_scored_rest_selection(
         else:
             variance = _q(levels[selection].moments)
             assert variance is not None
-            metrics = _stationarity_metrics(suffix, selection, variance)
-            if isinstance(metrics, int):
-                code = {1: 2, 2: 3, 3: 4, 4: 5}[metrics]
+            mean_rate_q = _trunc_div(
+                levels[selection].exact_delta_counts * 1_000_000 * RATE_Q_SCALE,
+                levels[selection].exact_elapsed_us,
+            )
+            fit = _stationarity_fit(suffix, selection, variance, mean_rate_q)
+            if isinstance(fit, int):
+                exclusion: int | None = fit
             else:
-                code = 0
+                half_width_rate_q = _confidence_half_width(variance, 3)
+                exclusion = _classify_stationarity(fit, "rest", mean_rate_q, half_width_rate_q)
+            code = {1: 2, 2: 3, 3: 4, 4: 5}[exclusion] if exclusion is not None else 0
             if code in (0, 3, 4):
                 mean = _trunc_div(
                     levels[selection].exact_delta_counts * 1_000_000 * RATE_Q_SCALE,
@@ -1648,14 +1826,44 @@ def _compare_fields(
             )
 
 
+# Stage B's wire classification namespace reserves 4..8 for the five
+# StationarityExclusion variants, but `4 + exclusion` collides once
+# ExcessiveDrift (discriminant 5) exists: `4 + 5 == 9`, which is
+# WrongDirectionFault. Mirrors the explicit map firmware's
+# observation_class_report_code uses after hitting the identical collision.
+_STAGE_B_CLASS_CODE = {0: 4, 1: 5, 2: 6, 3: 7, 4: 8, 5: 12}
+
+
 def _reconstruct_observation(
     raw: list[VelocityObservation],
     record: dict[str, object],
     plan: dict[str, object],
     terminal: dict[str, object],
     current_record: dict[str, object] | None = None,
+    *,
+    schema_revision: int | None = None,
 ) -> dict[str, int]:
-    stationarity = _stationary_suffix(raw[-256:])
+    """Reconstruct one Stage B observation from its raw moving samples.
+
+    Stage B's wire "plan" record never carries a schema revision (unlike Stage
+    C's), so callers that know the replay's schema (derived from the evidence
+    stream, e.g. `replay_stage_b_regions`) must pass it explicitly as
+    `schema_revision`, using Stage B's own schema numbering. `None` defaults
+    to the legacy significance-based moving gate, which is also correct for
+    the oldest replay path that predates the `stage_b_terminal` record kind
+    entirely and so has no schema signal of its own to offer.
+
+    This function always compares against
+    `STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION`, never the Stage C threshold:
+    every `schema_revision` reaching this function is a Stage B revision by
+    construction, so the comparison is fixed here rather than left for
+    callers to (mis)supply.
+    """
+    stationarity = _stationary_suffix(
+        raw[-256:],
+        schema_revision=schema_revision,
+        drift_bound_min_schema_revision=STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+    )
     p = int(record["velocity_p"])
     target_velocity_rpm = int(record["target_velocity_rpm"])
     predicted = max(
@@ -1664,7 +1872,7 @@ def _reconstruct_observation(
         int(current_record["moving_pid_output_peak"]) if current_record is not None else 0,
     )
     if not stationarity["usable"]:
-        classification = 4 + stationarity["exclusion"]
+        classification = _STAGE_B_CLASS_CODE[stationarity["exclusion"]]
         return {
             "classification": classification,
             "target_velocity_rpm": target_velocity_rpm,
@@ -3539,6 +3747,7 @@ def replay_stage_b_regions(
             plan,
             terminal,
             current_by_slot.get(key),
+            schema_revision=schema_revision,
         )
     directional_inputs: list[list[dict[str, object]]] = [[], []]
     joint_inputs = []
@@ -4057,6 +4266,7 @@ def _audit_stage_b_velocity_sweep(
             plan,
             terminal,
             current_by_slot.get(key),
+            schema_revision=int(replay["schema_revision"]),
         )
         for name in exact_fields:
             offline.setdefault(name, 0)
@@ -4850,6 +5060,11 @@ def audit_velocity_sweep(
         if not raw:
             mismatches.append(f"observation {key[0]}/{key[1]} has no raw samples")
             continue
+        # This path only runs for captures with no "stage_b_terminal" record at
+        # all (see the dispatch in audit_velocity_sweep above), so it predates
+        # STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION by construction and has no
+        # schema signal of its own to pass. Rely on _reconstruct_observation's
+        # default (legacy significance gate).
         offline = _reconstruct_observation(raw, record, plan, terminal)
         offline.setdefault("suffix_len", 0)
         offline.setdefault("selected_level", 0)

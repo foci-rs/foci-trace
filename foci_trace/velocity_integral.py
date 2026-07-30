@@ -6,6 +6,7 @@ from itertools import combinations
 from typing import Any
 
 from .velocity_measurement import (
+    STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION,
     VelocityObservation,
     _confidence_half_width,
     _encode_rate_values,
@@ -564,7 +565,18 @@ def reconstruct_observation(
     rung_index = int(identity["rung_index"])
     slot = int(identity["slot"])
     direction = slot_direction_index(plan_slot_order(plan), slot)
-    stationarity = _stationary_suffix(raw[-256:])
+    # Stage C's wire plan record always carries schema_revision, but callers in
+    # tests sometimes construct a partial plan without it; treat that as
+    # unknown (legacy gate) rather than raising, matching the fail-safe
+    # default in _classify_stationarity. Always compare against Stage C's own
+    # threshold: schema_revision here is a Stage C revision by construction,
+    # never Stage B's.
+    plan_schema_revision = plan.get("schema_revision")
+    stationarity = _stationary_suffix(
+        raw[-256:],
+        schema_revision=int(plan_schema_revision) if plan_schema_revision is not None else None,
+        drift_bound_min_schema_revision=STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+    )
     predicted = (
         max(item.peak_torque_target_abs or 0 for item in raw)
         if observed_torque_peak_abs is None

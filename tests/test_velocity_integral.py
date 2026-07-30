@@ -1854,6 +1854,59 @@ def test_current_observer_peak_overrides_sparse_trace_peak() -> None:
     assert result["classification"] == 3
 
 
+def test_reconstruct_observation_applies_drift_bound_at_stage_c_schema_thirteen() -> None:
+    """reconstruct_observation is the only production path that can reach the
+    drift bound today (derive_integral_ladder in this module still rejects
+    any full-path Stage C capture outside range(1, 13), so nothing end-to-end
+    can drive this yet -- Task 10's job to widen). A wrong key name or a
+    mis-threaded schema_revision argument here would otherwise be caught by
+    nothing."""
+    from foci_trace.velocity_measurement import STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION
+
+    raw = [VelocityObservation(index, 1_000, 1, 0, 1, None) for index in range(256)]
+    plan = {
+        "family_size": 20,
+        "target_velocity_rpm": 264,
+        "encoder_counts_per_rev": 4_000,
+        "final_p": 1_448,
+        "hard_torque_limit": 1_000,
+        "usable_torque_limit": 900,
+        "schema_revision": STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+    }
+
+    result = reconstruct_observation(raw, {"rung_index": 0, "slot": 0, "i_raw": 0}, plan)
+
+    # This ramp's causal 64-sample tail drifts far more than 200,000 ppm of
+    # its settled rate, so the drift bound rejects it as ExcessiveDrift (5),
+    # giving stationarity_code 6 (5 + 1) -- not 3 (ResolvedSlope, 2 + 1),
+    # which the significance test below would produce for the identical raw
+    # samples.
+    assert result["stationarity_code"] == 6
+
+
+def test_reconstruct_observation_uses_significance_test_below_stage_c_schema_thirteen() -> None:
+    """The sibling of the test above, one schema revision below the Stage C
+    drift-bound floor: the identical raw samples take the legacy significance
+    test instead and reject for a different reason (ResolvedSlope, not
+    ExcessiveDrift)."""
+    from foci_trace.velocity_measurement import STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION
+
+    raw = [VelocityObservation(index, 1_000, 1, 0, 1, None) for index in range(256)]
+    plan = {
+        "family_size": 20,
+        "target_velocity_rpm": 264,
+        "encoder_counts_per_rev": 4_000,
+        "final_p": 1_448,
+        "hard_torque_limit": 1_000,
+        "usable_torque_limit": 900,
+        "schema_revision": STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION - 1,
+    }
+
+    result = reconstruct_observation(raw, {"rung_index": 0, "slot": 0, "i_raw": 0}, plan)
+
+    assert result["stationarity_code"] == 3
+
+
 def test_delta_subtraction_and_sparse_reproduction_are_exact() -> None:
     assert delta_e((120, 140), (100, 110)) == (10, 40)
     assert delta_e((-140, -120), (-110, -100)) == (-40, -10)

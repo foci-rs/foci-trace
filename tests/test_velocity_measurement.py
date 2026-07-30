@@ -349,8 +349,244 @@ def test_excluded_observation_zeros_unavailable_suffix_metrics() -> None:
 
     result = _reconstruct_observation(observations, record, plan, terminal)
 
+    # No schema_revision is passed here, so this takes the legacy (schema < 14,
+    # or unknown) gate: the significance test, unchanged from before Task 9.
+    # This linear ramp's fitted slope is large and unambiguous, so it still
+    # rejects with ResolvedSlope (discriminant 2), giving Stage B's historical
+    # `4 + 2 = 6` -- not 12, which only an at-or-above-schema-fourteen capture
+    # (asserted separately below) would produce.
     assert result["classification"] == 6
     assert result["tested_suffixes"] == 0
+
+
+def test_excluded_observation_uses_drift_bound_at_stage_b_schema_fourteen_and_above() -> None:
+    """The same ramp, replayed at/above STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION
+    (14), takes the drift bound instead: its bound suffix drifts far more than
+    200,000 ppm of its settled rate, so it rejects as ExcessiveDrift
+    (discriminant 5), which Stage B's explicit map sends to wire code 12."""
+    from foci_trace.velocity_measurement import (
+        STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+        _reconstruct_observation,
+    )
+
+    observations = [_observation(index) for index in range(256)]
+    record = {"velocity_p": 32, "target_velocity_rpm": 8, "slot": 0}
+    plan = {"hard_torque_limit": 2_816, "usable_torque_limit": 2_534}
+    terminal = {"encoder_counts_per_rev": 4_000, "f_pwm_hz": 25_000}
+
+    result = _reconstruct_observation(
+        observations,
+        record,
+        plan,
+        terminal,
+        schema_revision=STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+    )
+
+    assert result["classification"] == 12
+    assert result["tested_suffixes"] == 0
+
+
+def test_stage_b_schema_thirteen_still_uses_the_legacy_gate() -> None:
+    """Stage B revision 13 predates the drift bound -- it was live firmware
+    until Task 7 bumped COMBINED_STAGE_B_SCHEMA_REVISION to 14 -- even though
+    13 is Stage C's post-bump floor. This pins the namespace split: if Stage
+    B's and Stage C's thresholds were ever collapsed back into one shared
+    constant of 13, this would incorrectly take the drift bound (classification
+    12) instead of the legacy gate (classification 6)."""
+    from foci_trace.velocity_measurement import _reconstruct_observation
+
+    observations = [_observation(index) for index in range(256)]
+    record = {"velocity_p": 32, "target_velocity_rpm": 8, "slot": 0}
+    plan = {"hard_torque_limit": 2_816, "usable_torque_limit": 2_534}
+    terminal = {"encoder_counts_per_rev": 4_000, "f_pwm_hz": 25_000}
+
+    result = _reconstruct_observation(observations, record, plan, terminal, schema_revision=13)
+
+    assert result["classification"] == 6
+    assert result["tested_suffixes"] == 0
+
+
+def test_host_drift_ratio_matches_firmware_exactly() -> None:
+    """The host mirror must be integer, not another _f32 mirror. A float
+    reimplementation reintroduces exactly the one-ppm boundary disagreement the
+    integer form exists to remove."""
+    from foci_trace.velocity_measurement import _drift_ratio_ppm
+
+    assert _drift_ratio_ppm(1_000_000, 4_000_000, 20_000_000) == 100_000
+    assert _drift_ratio_ppm(200_000, 2_000_000, 1_000_000) == 200_000
+    assert _drift_ratio_ppm(200_001, 2_000_000, 1_000_000) == 200_001
+    assert _drift_ratio_ppm(1, 3, 1_000_000) == 1
+    # This is the case that actually proves ceiling division: floor division
+    # gives 38_502.
+    assert _drift_ratio_ppm(-8_823_529, 2 * 60_000, 13_750_000) == 38_503
+
+
+def test_rest_mode_keeps_the_significance_gate() -> None:
+    """At rest the zero-slope null is correct, and a drift bound relative to
+    the mean would collapse with it: keep the significance test unchanged."""
+    from foci_trace.velocity_measurement import (
+        _classify_stationarity,
+        _q,
+        _select_level,
+        _stationarity_fit,
+        _Level,
+        _observe,
+        _trunc_div,
+        RATE_Q_SCALE,
+    )
+
+    # A steady linear ramp: the fitted slope is large and unambiguous, so the
+    # significance test must reject it at rest even though its magnitude is
+    # far too small to trip the moving-mode drift bound.
+    observations = [_observation(index) for index in range(64)]
+    levels = [_Level() for _ in range(5)]
+    for observation in observations:
+        _observe(levels, observation)
+    selection = _select_level(levels)
+    assert selection is not None
+    variance = _q(levels[selection].moments)
+    assert variance is not None
+    mean_rate_q = _trunc_div(
+        levels[selection].exact_delta_counts * 1_000_000 * RATE_Q_SCALE,
+        levels[selection].exact_elapsed_us,
+    )
+    fit = _stationarity_fit(observations, selection, variance, mean_rate_q)
+    assert isinstance(fit, dict)
+
+    assert _classify_stationarity(fit, "rest", mean_rate_q, 0) == 2
+
+
+def test_moving_mode_bypasses_drift_bound_when_settled_interval_contains_zero() -> None:
+    """The Inert condition (settled interval containing zero) bypasses the
+    drift bound entirely rather than reporting a ratio against a near-zero
+    denominator, exactly as firmware's classify_moving_metrics does.
+
+    The drift bound only applies at or above the stage-qualified threshold
+    (see test_moving_gate_is_schema_gated below for the legacy side of that
+    split), so this test must pass a schema_revision and its matching
+    threshold to exercise it at all.
+    """
+    from foci_trace.velocity_measurement import (
+        STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+        _classify_stationarity,
+    )
+
+    fit = {
+        "drift_ratio_ppm": 999_999_999,
+        "slope_passed": False,
+        "lag_one_passed": True,
+    }
+
+    # mean_rate_q's magnitude is within half_width_rate_q, so the interval
+    # contains zero: bypass fires even though the drift ratio is enormous.
+    assert (
+        _classify_stationarity(
+            fit,
+            "moving",
+            mean_rate_q=5,
+            half_width_rate_q=10,
+            schema_revision=STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+            drift_bound_min_schema_revision=STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+        )
+        is None
+    )
+
+
+def test_moving_mode_rejects_excessive_drift_outside_the_inert_interval() -> None:
+    from foci_trace.velocity_measurement import (
+        STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+        _classify_stationarity,
+    )
+
+    fit = {
+        "drift_ratio_ppm": 200_001,
+        "slope_passed": False,
+        "lag_one_passed": True,
+    }
+
+    assert (
+        _classify_stationarity(
+            fit,
+            "moving",
+            mean_rate_q=100,
+            half_width_rate_q=10,
+            schema_revision=STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+            drift_bound_min_schema_revision=STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+        )
+        == 5
+    )
+
+
+def test_moving_gate_is_schema_gated() -> None:
+    """Below the stage-qualified threshold (and when the revision is
+    unknown), moving mode falls back to the significance test instead of the
+    drift bound, matching firmware that never ran the drift bound at all."""
+    from foci_trace.velocity_measurement import (
+        STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+        _classify_stationarity,
+    )
+
+    # A huge drift ratio would reject under the new gate, but a passing
+    # significance test must accept it under the legacy gate.
+    passing_fit = {
+        "drift_ratio_ppm": 999_999_999,
+        "slope_passed": True,
+        "lag_one_passed": True,
+    }
+    assert (
+        _classify_stationarity(
+            passing_fit,
+            "moving",
+            mean_rate_q=100,
+            half_width_rate_q=10,
+            schema_revision=STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION - 1,
+            drift_bound_min_schema_revision=STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+        )
+        is None
+    )
+    assert (
+        _classify_stationarity(
+            passing_fit, "moving", mean_rate_q=100, half_width_rate_q=10, schema_revision=None
+        )
+        is None
+    )
+
+    # A tiny drift ratio would pass under the new gate, but a failing
+    # significance test must still reject it under the legacy gate.
+    failing_fit = {
+        "drift_ratio_ppm": 1,
+        "slope_passed": False,
+        "lag_one_passed": True,
+    }
+    assert (
+        _classify_stationarity(
+            failing_fit,
+            "moving",
+            mean_rate_q=100,
+            half_width_rate_q=10,
+            schema_revision=STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION - 1,
+            drift_bound_min_schema_revision=STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+        )
+        == 2
+    )
+    assert (
+        _classify_stationarity(
+            failing_fit, "moving", mean_rate_q=100, half_width_rate_q=10, schema_revision=None
+        )
+        == 2
+    )
+
+
+def test_classify_stationarity_requires_stage_qualified_threshold_with_schema_revision() -> None:
+    """A schema_revision without its matching threshold is a caller bug, not a
+    silently-picked default -- there are two namespaces and no safe single
+    choice."""
+    from foci_trace.velocity_measurement import _classify_stationarity
+
+    fit = {"drift_ratio_ppm": 0, "slope_passed": True, "lag_one_passed": True}
+
+    with pytest.raises(ValueError, match="drift_bound_min_schema_revision"):
+        _classify_stationarity(fit, "moving", mean_rate_q=0, half_width_rate_q=0, schema_revision=1)
 
 
 def test_scored_rest_selection_recomputes_all_suffixes_independently() -> None:
@@ -436,7 +672,7 @@ def test_sweep_confidence_width_matches_firmware_single_precision(monkeypatch) -
     monkeypatch.setattr(
         measurement,
         "_stationary_suffix",
-        lambda _raw: {
+        lambda _raw, **_kwargs: {
             "usable": 1,
             "selected_delta_counts": 0,
             "selected_elapsed_us": 256_000,
