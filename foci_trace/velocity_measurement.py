@@ -3768,20 +3768,38 @@ def replay_stage_b_regions(
     # Stage B's wire "plan" record carries no schema revision and firmware
     # publishes STAGE_B_EVIDENCE_SCHEMA_REVISION only in the Klipper constant
     # block, which trace captures do not contain -- so the revision has to be
-    # derived from what the evidence stream itself shows. The trailing
-    # drift_ratio_ppm u32 on the Stage B observation record was added by the
-    # same change that introduced the drift bound, one commit before
-    # COMBINED_STAGE_B_SCHEMA_REVISION went to 14, so a capture reporting it is
-    # schema 14 or newer. Older captures decode the field as None (see
-    # protocol._decode_velocity_sweep_evidence) and keep the ladder below.
-    # Without this arm the derivation topped out at 12 and every real schema-14
-    # capture was replayed against the legacy significance gate while firmware
-    # had applied the drift bound.
+    # derived from what the evidence stream itself shows, one wire marker per
+    # rung. Each rung below only proves a floor: "this capture is schema N or
+    # newer", never an exact match, because an absent marker is also what an
+    # older, unrelated capture looks like. Ordering the rungs highest-first
+    # keeps that sound -- a lower rung only fires when every higher marker was
+    # absent, which bounds it from above by the next rung's threshold.
+    #
+    # The top rung has no such ceiling. The trailing drift_ratio_ppm u32 on the
+    # Stage B observation record was added by the same change that introduced
+    # the drift bound, one commit before COMBINED_STAGE_B_SCHEMA_REVISION went
+    # to 14, so a capture reporting it is schema 14 or newer -- and today,
+    # "or newer" cannot happen, so the value is 14 in practice. Older captures
+    # decode the field as None (see protocol._decode_velocity_sweep_evidence)
+    # and keep the ladder below. Without this arm the derivation topped out at
+    # 12 and every real schema-14 capture was replayed against the legacy
+    # significance gate while firmware had applied the drift bound.
+    #
+    # `schema_revision_floor` is named for exactly this: it is the highest
+    # schema revision this ladder can currently prove a lower bound for, not a
+    # confirmed exact revision. A future Stage B schema bump that changes
+    # gating behavior (the way schema 14 did) needs its own new wire marker
+    # added as a rung above this one. Simply bumping
+    # STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION to 15 without adding that marker
+    # would not teach this function anything: schema-15 captures have no
+    # marker of their own to be recognized by, so they would keep falling into
+    # this same arm and replay against the schema-14 gate -- the identical
+    # failure mode this arm exists to fix, recurring one revision later.
     drift_ratio_reported = any(
         value["record_kind"] == "observation" and value.get("drift_ratio_ppm") is not None
         for _raw, value in evidence_records
     )
-    schema_revision = (
+    schema_revision_floor = (
         STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION
         if drift_ratio_reported
         else 12
@@ -3830,7 +3848,7 @@ def replay_stage_b_regions(
             plan,
             terminal,
             current_by_slot.get(key),
-            schema_revision=schema_revision,
+            schema_revision=schema_revision_floor,
         )
     directional_inputs: list[list[dict[str, object]]] = [[], []]
     joint_inputs = []
@@ -3975,7 +3993,7 @@ def replay_stage_b_regions(
     for regions in directional:
         candidates = (
             [_select_schema8_directional_evidence(regions, provisional_rung=nominated_rung)]
-            if schema_revision >= 8
+            if schema_revision_floor >= 8
             else [region for region in regions if region["kind"] == "valid"]
         )
         selected.append(
@@ -3989,7 +4007,7 @@ def replay_stage_b_regions(
         directional,
         nomination,
         selected,
-        schema_revision=schema_revision,
+        schema_revision=schema_revision_floor,
     )
     structured_boundaries = {}
     for key, observation in reconstructed.items():
@@ -4043,7 +4061,10 @@ def replay_stage_b_regions(
         "gains": gains,
         "structured_boundaries": structured_boundaries,
         "slot_count": slot_count,
-        "schema_revision": schema_revision,
+        # Key name is unchanged for existing callers, but the value is a
+        # floor (see schema_revision_floor's derivation above), not a
+        # confirmed exact schema revision.
+        "schema_revision": schema_revision_floor,
         "combined_response_selected": combined_response_selected,
         "combined_selection_projection": combined_projection,
     }
