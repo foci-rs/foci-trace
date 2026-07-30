@@ -18,7 +18,7 @@ from foci_trace.velocity_integral import (
     derive_integral_ladder,
     integral_deficit_reaches_target,
     integral_numerator_for_build,
-    _PLAN_MIRRORED_SLOT_ORDER,
+    _PLAN_SLOT_ORDER_SHIFT,
     integral_plan_digest,
     recovery_quantization_exposed,
     reconstruct_observation,
@@ -1802,5 +1802,23 @@ def test_mirrored_slot_order_is_reported_and_hashed_only_when_set() -> None:
         unmirrored = _plan(schema_revision)
         unmirrored["flags"] = 0
         mirrored = _plan(schema_revision)
-        mirrored["flags"] = _PLAN_MIRRORED_SLOT_ORDER
+        mirrored["flags"] = 1 << _PLAN_SLOT_ORDER_SHIFT
         assert integral_plan_digest(mirrored) != integral_plan_digest(unmirrored)
+
+
+def test_every_slot_order_is_decoded_and_separates_the_digest() -> None:
+    """The plan flags carry the slot order as a two-bit field in bits 2 and 3.
+
+    Forward-first is all-zero so plans predating the field decode unchanged, and
+    the single-bit mirrored encoding stays valid.
+    """
+    digests = {}
+    for slot_order, flags in ((0, 0b0000), (1, 0b0100), (2, 0b1000)):
+        plan = _plan()
+        plan["flags"] = flags
+        digests[slot_order] = integral_plan_digest(plan)
+    assert len(set(digests.values())) == 3, "each order must have its own identity"
+    # Forward-first must hash as it did before the field existed.
+    bare = _plan()
+    bare["flags"] = 0
+    assert digests[0] == integral_plan_digest(bare)

@@ -771,9 +771,10 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             )
             if cursor.offset < len(payload):
                 decoded["flags"] = cursor.take("B")
-                # Bit 2 records the mirrored observation slot order. Captures made
-                # before it existed leave it clear, which is forward-first.
-                decoded["slot_order"] = (int(decoded["flags"]) >> 2) & 1
+                # Bits 2 and 3 carry the observation slot order. Captures made
+                # before the field existed leave them clear, which is
+                # forward-first.
+                decoded["slot_order"] = (int(decoded["flags"]) >> 2) & 0b11
             decoded["record_kind"] = "integral_plan_recovery"
         else:
             raise DecodeError(f"unknown velocity-integral plan fragment {fragment}")
