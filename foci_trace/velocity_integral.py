@@ -258,7 +258,7 @@ def derive_integral_ladder(
     build_revision: int | None,
 ) -> dict[str, object]:
     """Reconstruct the cap-only whole-octave positive-I ladder."""
-    if schema_revision not in range(1, 13):
+    if schema_revision not in range(1, 14):
         raise ValueError("unsupported Stage-C evidence schema")
     if shortest_suffix_us < 2:
         raise ValueError("shortest suffix must contain at least two microseconds")
@@ -923,6 +923,13 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
         known_flags = _PLAN_RECOVERY_QUANTIZATION_EXPOSED
         if schema_revision >= 7:
             known_flags |= _PLAN_PROBE_CONSTRAINED_TEST_POINT
+        if schema_revision >= 12:
+            # Mirrored and paired plans already exist at schema 12 (Stage C's
+            # current revision is 13, one ahead of the slot-order rollout), so
+            # every affected capture -- including the ones the drift-bound
+            # replay depends on -- was taken at schema 12. Gating this at 13
+            # would preserve the defect for exactly those captures.
+            known_flags |= _PLAN_SLOT_ORDER_MASK
         if flags < 0 or flags & ~known_flags:
             mismatches.append("plan recovery flags contain reserved bits")
         else:

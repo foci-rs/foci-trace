@@ -1752,6 +1752,26 @@ def test_schema_six_rejects_reserved_plan_recovery_flags() -> None:
     assert "plan recovery flags contain reserved bits" in mismatches
 
 
+@pytest.mark.parametrize("schema_revision", (12, 13))
+@pytest.mark.parametrize("slot_order", (0, 1, 2))
+def test_every_slot_order_passes_the_plan_flag_whitelist(
+    schema_revision: int, slot_order: int
+) -> None:
+    """Bits 2-3 carry the slot order. They were never added to the whitelist, so
+    every mirrored and paired capture since the slot-order rollout has reported
+    reserved bits. Those captures are schema 12, so 12 must be covered."""
+    plan = _plan(schema_revision=schema_revision)
+    plan["flags"] = int(plan.get("flags", 0)) | (slot_order << _PLAN_SLOT_ORDER_SHIFT)
+    plan["plan_digest"] = integral_plan_digest(plan)
+    mismatches: list[str] = []
+
+    from foci_trace.velocity_integral import _validate_plan
+
+    _validate_plan(plan, mismatches)
+
+    assert "plan recovery flags contain reserved bits" not in mismatches
+
+
 def test_schema_four_sufficiency_requires_both_closing_bookends() -> None:
     from foci_trace.velocity_integral import _stage_c_run_sufficient
 
@@ -1763,7 +1783,7 @@ def test_schema_four_sufficiency_requires_both_closing_bookends() -> None:
     assert _stage_c_run_sufficient(3, opening, [None, None], masks) is True
 
 
-@pytest.mark.parametrize("schema_revision", [0, 13])
+@pytest.mark.parametrize("schema_revision", [0, 14])
 def test_integral_ladder_rejects_unsupported_schema(schema_revision: int) -> None:
     with pytest.raises(ValueError, match="unsupported Stage-C evidence schema"):
         derive_integral_ladder(
