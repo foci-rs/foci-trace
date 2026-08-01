@@ -2832,3 +2832,91 @@ def test_event_151_is_verified_against_its_causal_raw_suffixes() -> None:
 
     assert report["rest_selection_verified_count"] == 1
     assert report["matches_firmware"] is True
+
+
+def test_analyze_capture_reconstructs_a_breakaway_campaign_from_ftrc_frames() -> None:
+    """End-to-end: raw FTRC frames through `analyze_capture` reconstruct a
+    breakaway campaign, including the marker-adjacency decode that resolves
+    the tag-1/`integral_plan_marker` collision (see
+    `protocol.decode_breakaway_record`'s docstring).
+    """
+    from foci_trace.velocity_measurement import (
+        breakaway_build_search_grid,
+        breakaway_probe_plan_digest,
+    )
+
+    p_start_raw, p_top_raw = 2, 8
+    search_grid = breakaway_build_search_grid(p_start_raw, p_top_raw)
+    family_size = 16
+    max_observations = 8
+    probe_digest = breakaway_probe_plan_digest(search_grid, family_size, max_observations)
+
+    def bw_event_payload(event_id: int, sequence: int) -> bytes:
+        # Matches `request_commission_event`'s real wire packing:
+        # args = [source_index, engine_kind, event.payload[0], event.payload[1]],
+        # so a breakaway marker's `evidence_sequence` rides in args[2], not
+        # args[0] (see `assemble_breakaway_ticks`'s docstring).
+        return struct.pack(
+            "<BBHBxxxiiii", 1, SUBSYSTEM_COMMISSIONING, event_id, 4, 0, 1, sequence, 0
+        )
+
+    probe_planned = bytes([0]) + struct.pack(
+        "<IHQHBBHH",
+        7,
+        1,
+        probe_digest,
+        family_size,
+        max_observations,
+        len(search_grid),
+        p_start_raw,
+        p_top_raw,
+    )
+    probe_terminal = bytes([2]) + struct.pack("<IHQHBB", 7, 2, probe_digest, family_size, 1, 0)
+    campaign_terminal = bytes([12]) + struct.pack("<IHBBBQ", 7, 3, 0, 1, 0, 0)
+
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+    writer.write_firmware_frame(
+        0,
+        1_000,
+        _header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, probe_planned, 1, 1_000, 1, 0) + probe_planned,
+    )
+    marker_plan = bw_event_payload(152, 1)
+    writer.write_firmware_frame(
+        0, 1_100, _header(FRAME_TYPE_EVENT, marker_plan, 2, 1_100, 255, 255) + marker_plan
+    )
+    writer.write_firmware_frame(
+        0,
+        2_000,
+        _header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, probe_terminal, 3, 2_000, 1, 0)
+        + probe_terminal,
+    )
+    marker_probe_terminal = bw_event_payload(154, 2)
+    writer.write_firmware_frame(
+        0,
+        2_100,
+        _header(FRAME_TYPE_EVENT, marker_probe_terminal, 4, 2_100, 255, 255)
+        + marker_probe_terminal,
+    )
+    writer.write_firmware_frame(
+        0,
+        3_000,
+        _header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, campaign_terminal, 5, 3_000, 1, 0)
+        + campaign_terminal,
+    )
+    marker_campaign_terminal = bw_event_payload(159, 3)
+    writer.write_firmware_frame(
+        0,
+        3_100,
+        _header(FRAME_TYPE_EVENT, marker_campaign_terminal, 6, 3_100, 255, 255)
+        + marker_campaign_terminal,
+    )
+
+    analysis = analyze_capture(io.BytesIO(output.getvalue()), steady_after_s=0)
+
+    assert len(analysis.breakaway_campaign_audits) == 1
+    audit = analysis.breakaway_campaign_audits[0]
+    assert audit["matches_firmware"] is True
+    assert audit["phase_sequence"] == ["probe_plan", "probe_terminal", "campaign_terminal"]
+    assert audit["confirmation_accepted"] is False

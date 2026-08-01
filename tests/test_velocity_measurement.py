@@ -1,15 +1,27 @@
 import json
+import struct
 from pathlib import Path
 
 import pytest
 
+from foci_trace.protocol import decode_breakaway_record
 from foci_trace.velocity_measurement import (
     AccuracyDecision,
     VelocityObservation,
     analyze_velocity_observations,
     analyze_stationary_tail,
+    audit_breakaway_campaign,
     audit_rung_origin_recovery,
     audit_selected_recovery_rest,
+    breakaway_build_search_grid,
+    breakaway_confirmation_plan_digest,
+    breakaway_discovery_plan_digest,
+    breakaway_discovery_rung_margin,
+    breakaway_plan_additive_discovery_ladder,
+    breakaway_probe_plan_digest,
+    breakaway_realize_candidate_additive_ladder,
+    breakaway_replay_binary_search,
+    breakaway_required_relative_se_permille,
     classify_absolute_rate,
     plan_rung_origin_recovery,
     project_recovery_authority,
@@ -2929,3 +2941,625 @@ def test_schema_nine_combined_capture_replays_response_selected_stage_b() -> Non
     assert stage_c["matches_firmware"] is True
     assert stage_c["plan"]["combined_selected_response"] is True
     assert stage_c["terminal"]["cause"] == 47
+
+
+# --- Breakaway-seeded P ladder --------------------------------------------
+
+
+def _bw_tag(tag: int, fmt: str, *values: object) -> bytes:
+    return bytes([tag]) + struct.pack("<" + fmt, *values)
+
+
+def _bw_record(raw: bytes) -> tuple[bytes, dict[str, object]]:
+    return raw, decode_breakaway_record(raw)
+
+
+class _BreakawayCampaignBuilder:
+    """Assembles a self-consistent, digest-chained synthetic breakaway campaign.
+
+    Every field defaults to a value independently reconstructible by the
+    `breakaway_*` functions under test, so a fresh builder's `.ticks()` always
+    passes `audit_breakaway_campaign` with `matches_firmware=True`; each test
+    then mutates exactly the field(s) relevant to what it's checking.
+    """
+
+    def __init__(self) -> None:
+        self.run_sequence = 7
+        self.p_start_raw = 2
+        self.p_top_raw = 1_088
+        self.search_grid = breakaway_build_search_grid(self.p_start_raw, self.p_top_raw)
+        self.family_size = 16
+        self.max_observations = 8
+        self.probe_digest = breakaway_probe_plan_digest(
+            self.search_grid, self.family_size, self.max_observations
+        )
+
+        self.floor_raw = 181
+        self.breakaway_raw = 256
+        self.ceiling_raw = 1_088
+        self.observations_per_direction = 4
+        self.workflow_envelope_ms = 400_000
+        self.ladder = breakaway_plan_additive_discovery_ladder(
+            self.floor_raw,
+            self.breakaway_raw,
+            self.ceiling_raw,
+            self.observations_per_direction,
+            self.workflow_envelope_ms,
+        )
+        assert self.ladder is not None
+        self.discovery_digest = breakaway_discovery_plan_digest(
+            self.ladder["gains"],
+            self.observations_per_direction,
+            self.ladder["confidence_family_size"],
+            self.probe_digest,
+        )
+        self.candidate_p_raw = self.ladder["gains"][
+            self.ladder["gains"].index(self.breakaway_raw) + 1
+        ]
+        self.confirmation_digest = breakaway_confirmation_plan_digest(
+            self.discovery_digest, self.candidate_p_raw, 0, 8, 4, 70, 80, 0
+        )
+        self.required_se = breakaway_required_relative_se_permille()
+
+    def moving_index(self) -> int:
+        return self.search_grid.index(self.breakaway_raw)
+
+    def probe_strokes(self) -> int:
+        return breakaway_replay_binary_search(len(self.search_grid), self.moving_index())
+
+    def probe_plan_tick(self, *, sequence: int = 1, plan_digest: int | None = None) -> dict:
+        digest = self.probe_digest if plan_digest is None else plan_digest
+        raw = _bw_tag(
+            0,
+            "IHQHBBHH",
+            self.run_sequence,
+            sequence,
+            digest,
+            self.family_size,
+            self.max_observations,
+            len(self.search_grid),
+            self.p_start_raw,
+            self.p_top_raw,
+        )
+        return {
+            "event_id": 152,
+            "timestamp_ticks": 1_000,
+            "sequence": sequence,
+            "records": [_bw_record(raw)],
+        }
+
+    def probe_derived_tick(
+        self,
+        *,
+        sequence: int = 2,
+        plan_digest: int | None = None,
+        observations: int | None = None,
+    ) -> dict:
+        digest = self.probe_digest if plan_digest is None else plan_digest
+        strokes = self.probe_strokes() if observations is None else observations
+        forward = _bw_tag(
+            1,
+            "IHQBBHHB",
+            self.run_sequence,
+            sequence,
+            digest,
+            0,
+            1,
+            self.floor_raw,
+            self.breakaway_raw,
+            strokes,
+        )
+        reverse = _bw_tag(
+            1,
+            "IHQBBHHB",
+            self.run_sequence,
+            sequence,
+            digest,
+            1,
+            1,
+            self.floor_raw,
+            self.breakaway_raw,
+            strokes,
+        )
+        return {
+            "event_id": 153,
+            "timestamp_ticks": 2_000,
+            "sequence": sequence,
+            "records": [_bw_record(forward), _bw_record(reverse)],
+        }
+
+    def discovery_plan_tick(
+        self,
+        *,
+        sequence: int = 3,
+        plan_digest: int | None = None,
+        prior_plan_digest: int | None = None,
+    ) -> dict:
+        digest = self.discovery_digest if plan_digest is None else plan_digest
+        prior = self.probe_digest if prior_plan_digest is None else prior_plan_digest
+        first_step = (
+            self.ladder["gains"][self.ladder["gains"].index(self.breakaway_raw) + 1]
+            - self.breakaway_raw
+        )
+        planned = _bw_tag(
+            3,
+            "IHQQHBHHBHHII",
+            self.run_sequence,
+            sequence,
+            digest,
+            prior,
+            self.ladder["confidence_family_size"],
+            self.ladder["rung_count"],
+            self.observations_per_direction,
+            self.floor_raw,
+            1,
+            self.breakaway_raw,
+            self.ceiling_raw,
+            first_step,
+            self.workflow_envelope_ms,
+        )
+        ceiling_source = _bw_tag(4, "IHQB", self.run_sequence, sequence, digest, 0)
+        rungs = [
+            _bw_tag(5, "IHQBH", self.run_sequence, sequence, digest, index, gain)
+            for index, gain in enumerate(self.ladder["gains"])
+        ]
+        return {
+            "event_id": 155,
+            "timestamp_ticks": 3_000,
+            "sequence": sequence,
+            "records": [
+                _bw_record(planned),
+                _bw_record(ceiling_source),
+                *[_bw_record(r) for r in rungs],
+            ],
+        }
+
+    def discovery_terminal_tick(
+        self,
+        *,
+        sequence: int = 4,
+        plan_digest: int | None = None,
+        prior_plan_digest: int | None = None,
+        terminal_cause: int = 0,
+        margins: list[tuple[int, int, int]] | None = None,
+    ) -> dict:
+        digest = self.discovery_digest if plan_digest is None else plan_digest
+        prior = self.probe_digest if prior_plan_digest is None else prior_plan_digest
+        if margins is None:
+            margins = [(0, 71_000, 76_000), (1, 74_000, 79_000)]
+        margin_records = []
+        previous_mid: int | None = None
+        for collected_index, lower, upper in margins:
+            margin, half_width = breakaway_discovery_rung_margin(lower, upper)
+            mid = (lower + upper) // 2
+            step = 0 if previous_mid is None else mid - previous_mid
+            previous_mid = mid
+            p_raw = self.ladder["gains"][
+                collected_index + self.ladder["gains"].index(self.breakaway_raw)
+            ]
+            margin_records.append(
+                _bw_tag(
+                    7,
+                    "IHQBHiiiii",
+                    self.run_sequence,
+                    sequence,
+                    digest,
+                    collected_index,
+                    p_raw,
+                    lower,
+                    upper,
+                    margin,
+                    half_width,
+                    step,
+                )
+            )
+        terminal = _bw_tag(
+            6,
+            "IHQQHBBB",
+            self.run_sequence,
+            sequence,
+            digest,
+            prior,
+            self.ladder["confidence_family_size"],
+            terminal_cause,
+            len(margins),
+            0,
+        )
+        return {
+            "event_id": 156,
+            "timestamp_ticks": 4_000,
+            "sequence": sequence,
+            "records": [*[_bw_record(r) for r in margin_records], _bw_record(terminal)],
+        }
+
+    def confirmation_plan_tick(
+        self,
+        *,
+        sequence: int = 5,
+        plan_digest: int | None = None,
+        prior_plan_digest: int | None = None,
+        family_size: int = 8,
+    ) -> dict:
+        digest = self.confirmation_digest if plan_digest is None else plan_digest
+        prior = self.discovery_digest if prior_plan_digest is None else prior_plan_digest
+        raw = _bw_tag(
+            9,
+            "IHQQHHHBBBBi",
+            self.run_sequence,
+            sequence,
+            digest,
+            prior,
+            family_size,
+            self.observations_per_direction,
+            self.candidate_p_raw,
+            70,
+            80,
+            0,
+            0,
+            1_500,
+        )
+        return {
+            "event_id": 157,
+            "timestamp_ticks": 5_000,
+            "sequence": sequence,
+            "records": [_bw_record(raw)],
+        }
+
+    def confirmation_terminal_tick(
+        self,
+        *,
+        sequence: int = 6,
+        plan_digest: int | None = None,
+        prior_plan_digest: int | None = None,
+        accepted: int = 1,
+        terminal_cause: int = 21,
+        masks: tuple[int, int, int, int, int, int] = (0b1111,) * 6,
+        observation_count: int = 8,
+        relative_ses: list[int] | None = None,
+    ) -> dict:
+        digest = self.confirmation_digest if plan_digest is None else plan_digest
+        prior = self.discovery_digest if prior_plan_digest is None else prior_plan_digest
+        if relative_ses is None:
+            relative_ses = [10, 12, 15, 9, 11, 13, 8, 14][:observation_count]
+        observations = []
+        for slot in range(observation_count):
+            direction = 0 if slot < 4 else 1
+            observations.append(
+                _bw_tag(
+                    11,
+                    "IHQBBiiH",
+                    self.run_sequence,
+                    sequence,
+                    digest,
+                    slot,
+                    direction,
+                    71_000,
+                    79_000,
+                    relative_ses[slot],
+                )
+            )
+        max_se = max(relative_ses) if relative_ses else 0
+        terminal = _bw_tag(
+            10,
+            "IHQQHBBBBBBBBHHHB",
+            self.run_sequence,
+            sequence,
+            digest,
+            prior,
+            8,
+            terminal_cause,
+            *masks,
+            accepted,
+            self.candidate_p_raw if accepted else 0,
+            max_se,
+            self.required_se,
+            0,
+        )
+        return {
+            "event_id": 158,
+            "timestamp_ticks": 6_000,
+            "sequence": sequence,
+            "records": [*[_bw_record(r) for r in observations], _bw_record(terminal)],
+        }
+
+    def campaign_terminal_tick(
+        self,
+        *,
+        sequence: int = 7,
+        timestamp_ticks: int = 7_000,
+        phase: int = 2,
+        terminal_cause: int = 21,
+        accepted: int = 1,
+        stage_c_plan_digest: int = 0xDEAD_BEEF,
+    ) -> dict:
+        raw = _bw_tag(
+            12,
+            "IHBBBQ",
+            self.run_sequence,
+            sequence,
+            phase,
+            terminal_cause,
+            accepted,
+            stage_c_plan_digest,
+        )
+        return {
+            "event_id": 159,
+            "timestamp_ticks": timestamp_ticks,
+            "sequence": sequence,
+            "records": [_bw_record(raw)],
+        }
+
+    def accepted_campaign_ticks(self) -> list[dict]:
+        return [
+            self.probe_plan_tick(),
+            self.probe_derived_tick(),
+            self.discovery_plan_tick(),
+            self.discovery_terminal_tick(),
+            self.confirmation_plan_tick(),
+            self.confirmation_terminal_tick(),
+            self.campaign_terminal_tick(),
+        ]
+
+
+def test_breakaway_build_search_grid_matches_the_spec_representative_geometry() -> None:
+    """Spec section 5's worked example: floor 181, breakaway 256, ceiling 1088."""
+    grid = breakaway_build_search_grid(2, 1_088)
+    assert 181 in grid
+    assert 256 in grid
+    assert grid.index(256) == grid.index(181) + 1
+    assert grid[-1] == 1_088
+
+
+def test_breakaway_realize_candidate_additive_ladder_matches_the_spec_worked_example() -> None:
+    """Spec section 5's exact representative ladder (32 rungs, step 28)."""
+    step, gains, first_additive_gain = breakaway_realize_candidate_additive_ladder(
+        32, 181, 256, 1_088
+    )
+    assert step == 28
+    assert len(gains) == 32
+    assert gains[:4] == [181, 256, 284, 312]
+    assert gains[-1] == 1_088
+    assert first_additive_gain == 284
+
+
+def test_breakaway_plan_additive_discovery_ladder_chooses_the_spec_worked_example() -> None:
+    best = breakaway_plan_additive_discovery_ladder(181, 256, 1_088, 4, 400_000)
+    assert best is not None
+    assert best["rung_count"] == 32
+    assert best["confidence_family_size"] == 128
+    # Exact worked-example ladder from spec section 5.
+    assert best["gains"] == [
+        181,
+        256,
+        284,
+        312,
+        340,
+        368,
+        396,
+        424,
+        452,
+        480,
+        508,
+        536,
+        564,
+        592,
+        620,
+        648,
+        676,
+        704,
+        732,
+        760,
+        788,
+        816,
+        844,
+        872,
+        900,
+        928,
+        956,
+        984,
+        1_012,
+        1_040,
+        1_068,
+        1_088,
+    ]
+
+
+def test_breakaway_replay_binary_search_reproduces_the_worst_case_stroke_count() -> None:
+    """A 32-boundary grid needs at most 6 bisections plus 2 bracket repeats (spec section 4)."""
+    grid = breakaway_build_search_grid(1, 32_768)
+    assert len(grid) <= 33
+    for moving_index in range(len(grid)):
+        strokes = breakaway_replay_binary_search(len(grid), moving_index)
+        assert strokes <= 8
+
+
+def test_audit_breakaway_campaign_accepts_a_self_consistent_campaign() -> None:
+    builder = _BreakawayCampaignBuilder()
+    result = audit_breakaway_campaign(
+        builder.accepted_campaign_ticks(), motion_timestamps=[1_500, 2_500], clock_hz=1_000_000
+    )
+    assert result["matches_firmware"] is True
+    assert result["mismatches"] == []
+    assert result["confirmation_accepted"] is True
+    assert result["search_grid"][:4] == [2, 3, 4, 6]
+    assert result["discovery_planned"]["rung_count"] == 32
+    assert result["workflow_duration_ticks"] == 6_000
+    assert result["workflow_duration_ms"] == pytest.approx(6.0)
+
+
+def test_audit_breakaway_campaign_flags_a_workflow_duration_over_its_reserved_budget() -> None:
+    builder = _BreakawayCampaignBuilder()
+    ticks = [
+        builder.probe_plan_tick(),
+        builder.probe_derived_tick(),
+        builder.discovery_plan_tick(),
+        builder.discovery_terminal_tick(),
+        builder.confirmation_plan_tick(),
+        builder.confirmation_terminal_tick(),
+        # 500,000,000 ticks at 1 MHz is 500 s, past the 400 s reserved envelope.
+        builder.campaign_terminal_tick(timestamp_ticks=500_001_000),
+    ]
+    result = audit_breakaway_campaign(ticks, clock_hz=1_000_000)
+    assert result["matches_firmware"] is False
+    assert any(
+        "exceeds the reserved maximum_workflow_ms" in mismatch for mismatch in result["mismatches"]
+    )
+
+
+def test_audit_breakaway_campaign_rejects_reordered_phases() -> None:
+    builder = _BreakawayCampaignBuilder()
+    ticks = [
+        builder.probe_plan_tick(),
+        builder.discovery_plan_tick(),
+        builder.probe_derived_tick(),  # probe after discovery: reordered
+        builder.discovery_terminal_tick(),
+        builder.confirmation_plan_tick(),
+        builder.confirmation_terminal_tick(),
+        builder.campaign_terminal_tick(),
+    ]
+    with pytest.raises(ValueError, match="reordered"):
+        audit_breakaway_campaign(ticks)
+
+
+def test_audit_breakaway_campaign_rejects_motion_before_a_plan() -> None:
+    builder = _BreakawayCampaignBuilder()
+    ticks = builder.accepted_campaign_ticks()
+    with pytest.raises(ValueError, match="motion"):
+        audit_breakaway_campaign(ticks, motion_timestamps=[500])
+
+
+def test_audit_breakaway_campaign_rejects_a_digest_chain_break() -> None:
+    builder = _BreakawayCampaignBuilder()
+    ticks = [
+        builder.probe_plan_tick(),
+        builder.probe_derived_tick(),
+        builder.discovery_plan_tick(prior_plan_digest=0xBAD_D1CE57),
+        builder.discovery_terminal_tick(),
+        builder.confirmation_plan_tick(),
+        builder.confirmation_terminal_tick(),
+        builder.campaign_terminal_tick(),
+    ]
+    with pytest.raises(ValueError, match="chain"):
+        audit_breakaway_campaign(ticks)
+
+
+def test_audit_breakaway_campaign_rejects_a_family_four_one_rung_confirmation() -> None:
+    builder = _BreakawayCampaignBuilder()
+    ticks = [
+        builder.probe_plan_tick(),
+        builder.probe_derived_tick(),
+        builder.discovery_plan_tick(),
+        builder.discovery_terminal_tick(),
+        builder.confirmation_plan_tick(family_size=4),
+        builder.confirmation_terminal_tick(),
+        builder.campaign_terminal_tick(),
+    ]
+    with pytest.raises(ValueError, match="family_size"):
+        audit_breakaway_campaign(ticks)
+
+
+def test_audit_breakaway_campaign_rejects_an_accepted_confirmation_with_incomplete_masks() -> None:
+    builder = _BreakawayCampaignBuilder()
+    ticks = [
+        builder.probe_plan_tick(),
+        builder.probe_derived_tick(),
+        builder.discovery_plan_tick(),
+        builder.discovery_terminal_tick(),
+        builder.confirmation_plan_tick(),
+        builder.confirmation_terminal_tick(masks=(0b0111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111)),
+        builder.campaign_terminal_tick(),
+    ]
+    with pytest.raises(ValueError, match="incomplete"):
+        audit_breakaway_campaign(ticks)
+
+
+def test_audit_breakaway_campaign_rejects_a_second_candidate_after_failure() -> None:
+    builder = _BreakawayCampaignBuilder()
+    ticks = [
+        builder.probe_plan_tick(),
+        builder.probe_derived_tick(),
+        builder.discovery_plan_tick(),
+        builder.discovery_terminal_tick(),
+        builder.confirmation_plan_tick(sequence=5),
+        builder.confirmation_terminal_tick(sequence=6, accepted=0, terminal_cause=15),
+        builder.confirmation_plan_tick(sequence=8),
+        builder.confirmation_terminal_tick(sequence=9, accepted=0, terminal_cause=15),
+        builder.campaign_terminal_tick(accepted=0, terminal_cause=15, stage_c_plan_digest=0),
+    ]
+    with pytest.raises(ValueError, match="second confirmation candidate"):
+        audit_breakaway_campaign(ticks)
+
+
+def test_audit_breakaway_campaign_rejects_stage_c_after_unsuccessful_confirmation() -> None:
+    builder = _BreakawayCampaignBuilder()
+    ticks = [
+        builder.probe_plan_tick(),
+        builder.probe_derived_tick(),
+        builder.discovery_plan_tick(),
+        builder.discovery_terminal_tick(),
+        builder.confirmation_plan_tick(),
+        builder.confirmation_terminal_tick(accepted=0, terminal_cause=15),
+        # Campaign terminal falsely claims accept despite the failed confirmation.
+        builder.campaign_terminal_tick(accepted=1, terminal_cause=21),
+    ]
+    with pytest.raises(ValueError, match="does not trace back to an accepted confirmation"):
+        audit_breakaway_campaign(ticks)
+
+
+def test_audit_breakaway_campaign_flags_a_wrong_reported_digest_as_a_mismatch_not_a_raise() -> None:
+    """A single wrong-but-well-formed digest is a firmware-math mismatch, not a refusal."""
+    builder = _BreakawayCampaignBuilder()
+    ticks = [
+        builder.probe_plan_tick(plan_digest=builder.probe_digest ^ 0xFF),
+        builder.probe_derived_tick(plan_digest=builder.probe_digest ^ 0xFF),
+        builder.discovery_plan_tick(prior_plan_digest=builder.probe_digest ^ 0xFF),
+        builder.discovery_terminal_tick(prior_plan_digest=builder.probe_digest ^ 0xFF),
+        builder.confirmation_plan_tick(),
+        builder.confirmation_terminal_tick(),
+        builder.campaign_terminal_tick(),
+    ]
+    result = audit_breakaway_campaign(ticks)
+    assert result["matches_firmware"] is False
+    assert any("probe plan_digest" in mismatch for mismatch in result["mismatches"])
+
+
+def test_audit_breakaway_campaign_reports_additive_ladder_resolution_budget_exceeded_as_zero_plan() -> (
+    None
+):
+    """`AdditiveLadderResolutionBudgetExceeded` is a planning refusal before motion.
+
+    It has no discovery plan at all -- distinct from `TargetBandSkipped`,
+    which is a genuine discovery result and requires a real discovery
+    terminal.
+    """
+    builder = _BreakawayCampaignBuilder()
+    ticks = [
+        builder.probe_plan_tick(),
+        builder.probe_derived_tick(),
+        builder.campaign_terminal_tick(
+            phase=1, terminal_cause=10, accepted=0, stage_c_plan_digest=0
+        ),
+    ]
+    result = audit_breakaway_campaign(ticks)
+    assert result["additive_ladder_resolution_budget_exceeded"] is True
+    assert result["discovery_target_band_skipped"] is False
+    assert result["discovery_planned"] is None
+
+
+def test_audit_breakaway_campaign_reports_target_band_skipped_from_a_real_discovery_terminal() -> (
+    None
+):
+    builder = _BreakawayCampaignBuilder()
+    ticks = [
+        builder.probe_plan_tick(),
+        builder.probe_derived_tick(),
+        builder.discovery_plan_tick(),
+        builder.discovery_terminal_tick(terminal_cause=7, margins=[]),
+        builder.campaign_terminal_tick(
+            phase=1, terminal_cause=7, accepted=0, stage_c_plan_digest=0
+        ),
+    ]
+    result = audit_breakaway_campaign(ticks)
+    assert result["discovery_target_band_skipped"] is True
+    assert result["additive_ladder_resolution_budget_exceeded"] is False
+    assert result["discovery_planned"] is not None

@@ -2179,3 +2179,593 @@ def test_rejects_an_unusable_packed_order_byte() -> None:
         payload = _matrix_plan_core(order_byte)
         with pytest.raises(DecodeError):
             decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+
+# --- Breakaway-seeded P ladder: canonical evidence records ------------------
+#
+# Every payload below reproduces, byte for byte, the fixture values used by
+# the firmware's own golden tests
+# (`breakaway_trace_reporting_tests.rs::encode_*_has_stable_frame_layout`,
+# schema-15 Stage B / schema-14 Stage C per `task-7b-report.md`). A field
+# reorder, width change, or dropped field in either `decode_breakaway_record`
+# or the firmware encoder breaks these tests -- that is the point of pinning
+# the exact hex literals rather than round-tripping through the decoder
+# itself.
+
+_BW_RUN_SEQUENCE = 0x1020_3040
+_BW_EVIDENCE_SEQUENCE = 0x5060
+_BW_PLAN_DIGEST = 0x1122_3344_5566_7788
+_BW_PRIOR_PLAN_DIGEST = 0x99AA_BBCC_DDEE_FF00
+
+
+def _bw_probe_planned() -> bytes:
+    return bytes([0]) + struct.pack(
+        "<IHQHBBHH",
+        _BW_RUN_SEQUENCE,
+        _BW_EVIDENCE_SEQUENCE,
+        _BW_PLAN_DIGEST,
+        0x0910,
+        0x11,
+        0x12,
+        0x1314,
+        0x1516,
+    )
+
+
+def _bw_directional_breakaway() -> bytes:
+    return bytes([1]) + struct.pack(
+        "<IHQBBHHB",
+        _BW_RUN_SEQUENCE,
+        _BW_EVIDENCE_SEQUENCE,
+        _BW_PLAN_DIGEST,
+        1,
+        1,
+        0x0910,
+        0x1112,
+        6,
+    )
+
+
+def _bw_probe_terminal() -> bytes:
+    return bytes([2]) + struct.pack(
+        "<IHQHBB",
+        _BW_RUN_SEQUENCE,
+        _BW_EVIDENCE_SEQUENCE,
+        _BW_PLAN_DIGEST,
+        0x0910,
+        1,
+        0,
+    )
+
+
+def _bw_discovery_planned() -> bytes:
+    return bytes([3]) + struct.pack(
+        "<IHQQHBHHBHHII",
+        _BW_RUN_SEQUENCE,
+        _BW_EVIDENCE_SEQUENCE,
+        _BW_PLAN_DIGEST,
+        _BW_PRIOR_PLAN_DIGEST,
+        0x0910,
+        8,
+        4,
+        0x1112,
+        1,
+        0x1314,
+        0x1516,
+        0x1718_1920,
+        0x2122_2324,
+    )
+
+
+def _bw_ceiling_source() -> bytes:
+    return bytes([4]) + struct.pack(
+        "<IHQB",
+        _BW_RUN_SEQUENCE,
+        _BW_EVIDENCE_SEQUENCE,
+        _BW_PLAN_DIGEST,
+        1,
+    )
+
+
+def _bw_ladder_rung() -> bytes:
+    return bytes([5]) + struct.pack(
+        "<IHQBH",
+        _BW_RUN_SEQUENCE,
+        _BW_EVIDENCE_SEQUENCE,
+        _BW_PLAN_DIGEST,
+        3,
+        0x0910,
+    )
+
+
+def _bw_discovery_terminal() -> bytes:
+    return bytes([6]) + struct.pack(
+        "<IHQQHBBB",
+        _BW_RUN_SEQUENCE,
+        _BW_EVIDENCE_SEQUENCE,
+        _BW_PLAN_DIGEST,
+        _BW_PRIOR_PLAN_DIGEST,
+        0x0910,
+        0,
+        2,
+        0,
+    )
+
+
+def _bw_discovery_rung_margin() -> bytes:
+    return bytes([7]) + struct.pack(
+        "<IHQBHiiiii",
+        _BW_RUN_SEQUENCE,
+        _BW_EVIDENCE_SEQUENCE,
+        _BW_PLAN_DIGEST,
+        1,
+        0x0910,
+        70_500,
+        79_500,
+        500,
+        4_500,
+        -1_200,
+    )
+
+
+def _bw_rung_zero_diagnostic() -> bytes:
+    return bytes([8]) + struct.pack(
+        "<IHQBB",
+        _BW_RUN_SEQUENCE,
+        _BW_EVIDENCE_SEQUENCE,
+        _BW_PLAN_DIGEST,
+        1,
+        0,
+    )
+
+
+def _bw_confirmation_planned() -> bytes:
+    return bytes([9]) + struct.pack(
+        "<IHQQHHHBBBBi",
+        _BW_RUN_SEQUENCE,
+        _BW_EVIDENCE_SEQUENCE,
+        _BW_PLAN_DIGEST,
+        _BW_PRIOR_PLAN_DIGEST,
+        8,
+        4,
+        0x0910,
+        70,
+        80,
+        0,
+        0,
+        1_500,
+    )
+
+
+def _bw_confirmation_terminal() -> bytes:
+    return bytes([10]) + struct.pack(
+        "<IHQQHBBBBBBBBHHHB",
+        _BW_RUN_SEQUENCE,
+        _BW_EVIDENCE_SEQUENCE,
+        _BW_PLAN_DIGEST,
+        _BW_PRIOR_PLAN_DIGEST,
+        8,
+        21,
+        0b1111,
+        0b1111,
+        0b1111,
+        0b1111,
+        0b1111,
+        0b1111,
+        1,
+        0x0910,
+        20,
+        67,
+        0,
+    )
+
+
+def _bw_confirmation_observation() -> bytes:
+    return bytes([11]) + struct.pack(
+        "<IHQBBiiH",
+        _BW_RUN_SEQUENCE,
+        _BW_EVIDENCE_SEQUENCE,
+        _BW_PLAN_DIGEST,
+        3,
+        1,
+        70_800,
+        79_200,
+        18,
+    )
+
+
+def _bw_campaign_terminal() -> bytes:
+    return bytes([12]) + struct.pack(
+        "<IHBBBQ",
+        _BW_RUN_SEQUENCE,
+        _BW_EVIDENCE_SEQUENCE,
+        2,
+        21,
+        1,
+        _BW_PLAN_DIGEST,
+    )
+
+
+def test_decode_breakaway_probe_planned_matches_the_firmware_golden_bytes() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    payload = _bw_probe_planned()
+    assert len(payload) == 23
+    decoded = decode_breakaway_record(payload)
+    assert decoded["record_kind"] == "breakaway_probe_planned"
+    assert decoded["tag"] == 0
+    assert decoded["run_sequence"] == _BW_RUN_SEQUENCE
+    assert decoded["evidence_sequence"] == _BW_EVIDENCE_SEQUENCE
+    assert decoded["plan_digest"] == _BW_PLAN_DIGEST
+    assert decoded["family_size"] == 0x0910
+    assert decoded["max_observations"] == 0x11
+    assert decoded["search_count"] == 0x12
+    assert decoded["p_start_raw"] == 0x1314
+    assert decoded["p_top_raw"] == 0x1516
+
+
+def test_decode_breakaway_directional_breakaway_matches_the_firmware_golden_bytes() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    payload = _bw_directional_breakaway()
+    assert len(payload) == 22
+    decoded = decode_breakaway_record(payload)
+    assert decoded["record_kind"] == "breakaway_directional_breakaway"
+    assert decoded["direction"] == 1
+    assert decoded["inert_present"] == 1
+    assert decoded["inert_p_raw"] == 0x0910
+    assert decoded["moving_p_raw"] == 0x1112
+    assert decoded["observations"] == 6
+
+
+def test_decode_breakaway_probe_terminal_matches_the_firmware_golden_bytes() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    payload = _bw_probe_terminal()
+    assert len(payload) == 19
+    decoded = decode_breakaway_record(payload)
+    assert decoded["record_kind"] == "breakaway_probe_terminal"
+    assert decoded["family_size"] == 0x0910
+    assert decoded["terminal_cause"] == 1
+    assert decoded["has_safety_fault"] == 0
+
+
+def test_decode_breakaway_discovery_planned_matches_the_firmware_golden_bytes() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    payload = _bw_discovery_planned()
+    assert len(payload) == 43
+    decoded = decode_breakaway_record(payload)
+    assert decoded["record_kind"] == "breakaway_discovery_planned"
+    assert decoded["plan_digest"] == _BW_PLAN_DIGEST
+    assert decoded["prior_plan_digest"] == _BW_PRIOR_PLAN_DIGEST
+    assert decoded["family_size"] == 0x0910
+    assert decoded["rung_count"] == 8
+    assert decoded["observations_per_direction"] == 4
+    assert decoded["floor_p_raw"] == 0x1112
+    assert decoded["floor_origin"] == 1
+    assert decoded["breakaway_p_raw"] == 0x1314
+    assert decoded["ceiling_p_raw"] == 0x1516
+    assert decoded["first_additive_step_raw"] == 0x1718_1920
+    assert decoded["maximum_workflow_ms"] == 0x2122_2324
+
+
+def test_decode_breakaway_ceiling_source_matches_the_firmware_golden_bytes() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    payload = _bw_ceiling_source()
+    assert len(payload) == 16
+    decoded = decode_breakaway_record(payload)
+    assert decoded["record_kind"] == "breakaway_ceiling_source"
+    assert decoded["binding_source"] == 1
+
+
+def test_decode_breakaway_ladder_rung_matches_the_firmware_golden_bytes() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    payload = _bw_ladder_rung()
+    assert len(payload) == 18
+    decoded = decode_breakaway_record(payload)
+    assert decoded["record_kind"] == "breakaway_ladder_rung"
+    assert decoded["rung_index"] == 3
+    assert decoded["p_raw"] == 0x0910
+
+
+def test_decode_breakaway_discovery_terminal_matches_the_firmware_golden_bytes() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    payload = _bw_discovery_terminal()
+    assert len(payload) == 28
+    decoded = decode_breakaway_record(payload)
+    assert decoded["record_kind"] == "breakaway_discovery_terminal"
+    assert decoded["plan_digest"] == _BW_PLAN_DIGEST
+    assert decoded["prior_plan_digest"] == _BW_PRIOR_PLAN_DIGEST
+    assert decoded["family_size"] == 0x0910
+    assert decoded["terminal_cause"] == 0
+    assert decoded["collected_count"] == 2
+    assert decoded["has_safety_fault"] == 0
+
+
+def test_decode_breakaway_discovery_rung_margin_matches_the_firmware_golden_bytes() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    payload = _bw_discovery_rung_margin()
+    assert len(payload) == 38
+    decoded = decode_breakaway_record(payload)
+    assert decoded["record_kind"] == "breakaway_discovery_rung_margin"
+    assert decoded["collected_index"] == 1
+    assert decoded["p_raw"] == 0x0910
+    assert decoded["lower_percent_milli"] == 70_500
+    assert decoded["upper_percent_milli"] == 79_500
+    assert decoded["margin_percent_milli"] == 500
+    assert decoded["half_width_percent_milli"] == 4_500
+    assert decoded["adjacent_rate_step_permille"] == -1_200
+
+
+def test_decode_breakaway_rung_zero_diagnostic_matches_the_firmware_golden_bytes() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    payload = _bw_rung_zero_diagnostic()
+    assert len(payload) == 17
+    decoded = decode_breakaway_record(payload)
+    assert decoded["record_kind"] == "breakaway_rung_zero_diagnostic"
+    assert decoded["forward_moved"] == 1
+    assert decoded["reverse_moved"] == 0
+
+
+def test_decode_breakaway_confirmation_planned_matches_the_firmware_golden_bytes() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    payload = _bw_confirmation_planned()
+    assert len(payload) == 37
+    decoded = decode_breakaway_record(payload)
+    assert decoded["record_kind"] == "breakaway_confirmation_planned"
+    assert decoded["plan_digest"] == _BW_PLAN_DIGEST
+    assert decoded["prior_plan_digest"] == _BW_PRIOR_PLAN_DIGEST
+    assert decoded["family_size"] == 8
+    assert decoded["observations_per_direction"] == 4
+    assert decoded["candidate_p_raw"] == 0x0910
+    assert decoded["band_lower_percent"] == 70
+    assert decoded["band_upper_percent"] == 80
+    assert decoded["capture_profile"] == 0
+    assert decoded["acceptance_rule"] == 0
+    assert decoded["nominated_margin_percent_milli"] == 1_500
+
+
+def test_decode_breakaway_confirmation_terminal_matches_the_firmware_golden_bytes() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    payload = _bw_confirmation_terminal()
+    assert len(payload) == 40
+    decoded = decode_breakaway_record(payload)
+    assert decoded["record_kind"] == "breakaway_confirmation_terminal"
+    assert decoded["terminal_cause"] == 21
+    assert decoded["forward_collected_mask"] == 0b1111
+    assert decoded["forward_eligible_mask"] == 0b1111
+    assert decoded["forward_included_mask"] == 0b1111
+    assert decoded["reverse_collected_mask"] == 0b1111
+    assert decoded["reverse_eligible_mask"] == 0b1111
+    assert decoded["reverse_included_mask"] == 0b1111
+    assert decoded["accepted"] == 1
+    assert decoded["confirmed_p_raw"] == 0x0910
+    assert decoded["max_relative_se_permille"] == 20
+    assert decoded["required_relative_se_permille"] == 67
+    assert decoded["has_safety_fault"] == 0
+
+
+def test_decode_breakaway_confirmation_observation_matches_the_firmware_golden_bytes() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    payload = _bw_confirmation_observation()
+    assert len(payload) == 27
+    decoded = decode_breakaway_record(payload)
+    assert decoded["record_kind"] == "breakaway_confirmation_observation"
+    assert decoded["slot_index"] == 3
+    assert decoded["direction"] == 1
+    assert decoded["response_lower_percent_milli"] == 70_800
+    assert decoded["response_upper_percent_milli"] == 79_200
+    assert decoded["relative_standard_error_permille"] == 18
+
+
+def test_decode_breakaway_campaign_terminal_matches_the_firmware_golden_bytes() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    payload = _bw_campaign_terminal()
+    assert len(payload) == 18
+    decoded = decode_breakaway_record(payload)
+    assert decoded["record_kind"] == "breakaway_campaign_terminal"
+    assert decoded["phase"] == 2
+    assert decoded["terminal_cause"] == 21
+    assert decoded["accepted"] == 1
+    assert decoded["stage_c_plan_digest"] == _BW_PLAN_DIGEST
+
+
+def test_breakaway_event_ids_match_the_firmware_trace_events_table() -> None:
+    from foci_trace.protocol import (
+        BREAKAWAY_CAMPAIGN_EVENT_IDS,
+        EVENT_COMMISSION_BREAKAWAY_CAMPAIGN_TERMINAL,
+        EVENT_COMMISSION_BREAKAWAY_CONFIRMATION_PLAN,
+        EVENT_COMMISSION_BREAKAWAY_CONFIRMATION_TERMINAL,
+        EVENT_COMMISSION_BREAKAWAY_DISCOVERY_PLAN,
+        EVENT_COMMISSION_BREAKAWAY_DISCOVERY_TERMINAL,
+        EVENT_COMMISSION_BREAKAWAY_PROBE_DERIVED,
+        EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN,
+        EVENT_COMMISSION_BREAKAWAY_PROBE_TERMINAL,
+        EVENT_COMMISSION_REST_SELECTION_DIAGNOSTIC,
+    )
+
+    assert EVENT_COMMISSION_REST_SELECTION_DIAGNOSTIC == 151
+    assert EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN == 152
+    assert EVENT_COMMISSION_BREAKAWAY_PROBE_DERIVED == 153
+    assert EVENT_COMMISSION_BREAKAWAY_PROBE_TERMINAL == 154
+    assert EVENT_COMMISSION_BREAKAWAY_DISCOVERY_PLAN == 155
+    assert EVENT_COMMISSION_BREAKAWAY_DISCOVERY_TERMINAL == 156
+    assert EVENT_COMMISSION_BREAKAWAY_CONFIRMATION_PLAN == 157
+    assert EVENT_COMMISSION_BREAKAWAY_CONFIRMATION_TERMINAL == 158
+    assert EVENT_COMMISSION_BREAKAWAY_CAMPAIGN_TERMINAL == 159
+    assert BREAKAWAY_CAMPAIGN_EVENT_IDS == (
+        EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN,
+        EVENT_COMMISSION_BREAKAWAY_PROBE_DERIVED,
+        EVENT_COMMISSION_BREAKAWAY_PROBE_TERMINAL,
+        EVENT_COMMISSION_BREAKAWAY_DISCOVERY_PLAN,
+        EVENT_COMMISSION_BREAKAWAY_DISCOVERY_TERMINAL,
+        EVENT_COMMISSION_BREAKAWAY_CONFIRMATION_PLAN,
+        EVENT_COMMISSION_BREAKAWAY_CONFIRMATION_TERMINAL,
+        EVENT_COMMISSION_BREAKAWAY_CAMPAIGN_TERMINAL,
+    )
+
+
+def test_decode_breakaway_record_rejects_an_unknown_tag() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    with pytest.raises(DecodeError, match="unknown breakaway evidence tag"):
+        decode_breakaway_record(bytes([13, 0, 0, 0, 0]))
+
+
+def test_decode_breakaway_record_rejects_a_length_mismatch_for_a_known_tag() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    with pytest.raises(DecodeError, match="unknown breakaway evidence tag"):
+        decode_breakaway_record(_bw_probe_planned() + b"\x00")
+
+
+def test_the_only_breakaway_tag_that_collides_with_a_legacy_wire_shape_is_tag_one() -> None:
+    """`decode_frame`'s generic decoder recovers every breakaway tag except one.
+
+    Tags 0 and 2-12 fail every existing `(kind, length)` branch in
+    `_decode_velocity_sweep_evidence` and raise, so `_decode_payload` falls
+    back to `decode_breakaway_record` and recovers the correct interpretation
+    with no extra context needed. Tag 1 (`directional_breakaway`, 22 bytes)
+    is the one genuine collision: it is byte-for-byte identical in shape to
+    the legacy 22-byte `integral_plan_marker` record, so the generic decoder
+    "succeeds" with the wrong interpretation. Resolving that one case needs
+    the marker-adjacency context `assemble_breakaway_ticks` provides -- this
+    test pins the collision so a future change to either wire shape doesn't
+    silently make it worse or silently fix it unnoticed.
+    """
+    for builder in (
+        _bw_probe_planned,
+        _bw_probe_terminal,
+        _bw_discovery_planned,
+        _bw_ceiling_source,
+        _bw_ladder_rung,
+        _bw_discovery_terminal,
+        _bw_discovery_rung_margin,
+        _bw_rung_zero_diagnostic,
+        _bw_confirmation_planned,
+        _bw_confirmation_terminal,
+        _bw_confirmation_observation,
+        _bw_campaign_terminal,
+    ):
+        payload = builder()
+        frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+        assert str(frame.payload["record_kind"]).startswith("breakaway_")
+
+    collided_payload = _bw_directional_breakaway()
+    collided_frame = decode_frame(
+        _header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, collided_payload) + collided_payload
+    )
+    assert collided_frame.payload["record_kind"] == "integral_plan_marker"
+
+
+def test_assemble_breakaway_ticks_bundles_records_by_marker() -> None:
+    from foci_trace.protocol import (
+        EVENT_COMMISSION_BREAKAWAY_DISCOVERY_PLAN,
+        EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN,
+        FRAME_TYPE_EVENT,
+        FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
+        assemble_breakaway_ticks,
+    )
+
+    def event_payload(event_id: int, sequence: int) -> dict[str, object]:
+        return {"event_id": event_id, "args": [0, 1, sequence, 0]}
+
+    frames = [
+        (FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, 100, _bw_probe_planned(), None),
+        (FRAME_TYPE_EVENT, 101, b"", event_payload(EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN, 0x5060)),
+        (FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, 200, _bw_discovery_planned(), None),
+        (FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, 200, _bw_ceiling_source(), None),
+        (FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, 200, _bw_ladder_rung(), None),
+        (
+            FRAME_TYPE_EVENT,
+            201,
+            b"",
+            event_payload(EVENT_COMMISSION_BREAKAWAY_DISCOVERY_PLAN, 0x6070),
+        ),
+    ]
+    ticks = assemble_breakaway_ticks(frames)
+    assert len(ticks) == 2
+    assert ticks[0]["event_id"] == EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN
+    assert ticks[0]["sequence"] == 0x5060
+    assert [decoded["record_kind"] for _raw, decoded in ticks[0]["records"]] == [
+        "breakaway_probe_planned"
+    ]
+    assert ticks[1]["event_id"] == EVENT_COMMISSION_BREAKAWAY_DISCOVERY_PLAN
+    assert [decoded["record_kind"] for _raw, decoded in ticks[1]["records"]] == [
+        "breakaway_discovery_planned",
+        "breakaway_ceiling_source",
+        "breakaway_ladder_rung",
+    ]
+
+
+def test_assemble_breakaway_ticks_discards_evidence_claimed_by_a_foreign_marker() -> None:
+    """A non-breakaway marker still claims and clears whatever preceded it.
+
+    An earlier commissioning phase's own evidence must not leak into the
+    first breakaway tick just because that phase's own marker event id isn't
+    tracked here.
+    """
+    from foci_trace.protocol import (
+        EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN,
+        EVENT_COMMISSION_VELOCITY_SWEEP_TERMINAL,
+        FRAME_TYPE_EVENT,
+        FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
+        assemble_breakaway_ticks,
+    )
+
+    def event_payload(event_id: int, sequence: int) -> dict[str, object]:
+        return {"event_id": event_id, "args": [0, 1, sequence, 0]}
+
+    unrelated_evidence = bytes([4]) + struct.pack("<III", 1, 2, 3)
+    frames = [
+        (FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, 50, unrelated_evidence, None),
+        (
+            FRAME_TYPE_EVENT,
+            51,
+            b"",
+            event_payload(EVENT_COMMISSION_VELOCITY_SWEEP_TERMINAL, 1),
+        ),
+        (FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, 100, _bw_probe_planned(), None),
+        (
+            FRAME_TYPE_EVENT,
+            101,
+            b"",
+            event_payload(EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN, 0x5060),
+        ),
+    ]
+    ticks = assemble_breakaway_ticks(frames)
+    assert len(ticks) == 1
+    assert [decoded["record_kind"] for _raw, decoded in ticks[0]["records"]] == [
+        "breakaway_probe_planned"
+    ]
+
+
+def test_assemble_breakaway_ticks_raises_on_a_frame_that_does_not_decode() -> None:
+    from foci_trace.protocol import (
+        EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN,
+        FRAME_TYPE_EVENT,
+        FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
+        assemble_breakaway_ticks,
+    )
+
+    frames = [
+        (FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, 100, b"\xff\x00\x00", None),
+        (
+            FRAME_TYPE_EVENT,
+            101,
+            b"",
+            {"event_id": EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN, "args": [0, 1, 0x5060, 0]},
+        ),
+    ]
+    with pytest.raises(DecodeError):
+        assemble_breakaway_ticks(frames)

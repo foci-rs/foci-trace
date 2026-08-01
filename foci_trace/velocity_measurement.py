@@ -5291,3 +5291,777 @@ def audit_velocity_sweep(
         "mismatches": mismatches,
         "caveats": [],
     }
+
+
+# --- Breakaway-seeded P ladder --------------------------------------------
+#
+# Independent, from-scratch reconstruction of the breakaway campaign's search,
+# planning, discovery, and confirmation math against the canonical evidence
+# records `assemble_breakaway_ticks` bundles (see `protocol.py`). Every
+# constant below is copied from the firmware source it mirrors (cited in each
+# docstring) rather than derived from wire evidence, because none of these
+# fixed planning constants ride the wire -- reconstructing the firmware's
+# decision requires using the same constants the firmware itself used.
+
+# `HALF_OCTAVE_NUM` / `HALF_OCTAVE_DEN_SHIFT` (sweep_plan.rs): half-octave
+# step factor 181/128, used to regenerate the probe's search grid.
+_BW_HALF_OCTAVE_NUM = 181
+_BW_HALF_OCTAVE_DEN_SHIFT = 7
+
+# `MIN_STRUCTURAL_RUNGS` / `MAX_SWEEP_RUNGS` (sweep_plan.rs).
+_BW_MIN_STRUCTURAL_RUNGS = 5
+_BW_MAX_SWEEP_RUNGS = 32
+
+# `MAX_ADDITIVE_GAIN_RATIO_NUM` / `_DEN` (breakaway_plan.rs): provisional
+# additive first-gap resolution guard, 181/128.
+_BW_MAX_ADDITIVE_GAIN_RATIO_NUM = 181
+_BW_MAX_ADDITIVE_GAIN_RATIO_DEN = 128
+
+# `SWEEP_DIRECTION_COUNT` (sweep_plan.rs).
+_BW_SWEEP_DIRECTION_COUNT = 2
+
+# `MAX_CONFIDENCE_FAMILY_SIZE` (autotune/velocity_measurement/decision.rs).
+_BW_MAX_CONFIDENCE_FAMILY_SIZE = 128
+
+# `MOVING_STROKE_US` / `ZERO_SETTLE_US` / `SETTLE_ANALYSIS_BUDGET_US`
+# (sweep_plan.rs): fixed per-primitive duration budget, also spec section 8's
+# verified 1,248,000 us total.
+_BW_MOVING_STROKE_US = 512_000
+_BW_ZERO_SETTLE_US = 500_000
+_BW_SETTLE_ANALYSIS_BUDGET_US = 236_000
+
+# `CONFIRMATION_FAMILY_SIZE` / band edges / capture profile / acceptance rule
+# / slot order (band_confirmation.rs). The predeclared confirmation family is
+# always 8, never `rung_count * observations_per_direction`.
+_BW_CONFIRMATION_FAMILY_SIZE = 8
+_BW_CONFIRMATION_BAND_LOWER_PERCENT = 70
+_BW_CONFIRMATION_BAND_UPPER_PERCENT = 80
+_BW_CONFIRMATION_CAPTURE_PROFILE_EXISTING = 0
+_BW_CONFIRMATION_ACCEPTANCE_RULE_ALL_EIGHT_CONTAINED = 0
+# Four forward observations (direction code 0) then four reverse (code 1).
+_BW_CONFIRMATION_SLOT_ORDER_CODES = (0, 0, 0, 0, 1, 1, 1, 1)
+
+# `CONFIDENCE_MULTIPLIERS_95_DF15[7]` (autotune/velocity_measurement/decision.rs):
+# the two-sided 95% family-wise Bonferroni Student-t critical value at df=15
+# for family size 8, matching spec section 7's `m(8) = 3.177104`.
+_BW_CONFIRMATION_MULTIPLIER_95_DF15 = 3.177104
+
+# `REQUIRED_HALF_WIDTH_FRACTION` (breakaway_reporting.rs): `(80-70)/(80+70)`.
+_BW_REQUIRED_HALF_WIDTH_FRACTION = 1.0 / 15.0
+
+# `BreakawayTerminalCause::Accepted` (breakaway_reporting.rs).
+_BW_TERMINAL_CAUSE_ACCEPTED = 21
+
+BREAKAWAY_EVENT_ID_NAMES = {
+    152: "probe_plan",
+    153: "probe_derived",
+    154: "probe_terminal",
+    155: "discovery_plan",
+    156: "discovery_terminal",
+    157: "confirmation_plan",
+    158: "confirmation_terminal",
+    159: "campaign_terminal",
+}
+
+# Phase rank per marker event id: probe (0) must never follow discovery (1),
+# which must never follow confirmation (2); the campaign terminal (3) is
+# always the campaign's last tick, from any phase.
+_BW_EVENT_PHASE_RANK = {
+    152: 0,
+    153: 0,
+    154: 0,
+    155: 1,
+    156: 1,
+    157: 2,
+    158: 2,
+    159: 3,
+}
+
+
+def _bw_fnv1a_extend(digest: int, value: int, byte_width: int) -> int:
+    """Fold one little-endian field into an FNV-1a digest.
+
+    Mirrors every `BreakawayProbePlan::digest`/`AdditiveDiscoveryPlan::digest`/
+    `BandConfirmationPlan::digest`'s shared `hash_value!` macro
+    (breakaway_plan.rs, band_confirmation.rs): fold each byte of
+    `value.to_le_bytes()`, least-significant first, exactly as `FNV1A64_OFFSET`/
+    `FNV1A64_PRIME` already do for wire-record digests elsewhere in this file.
+    """
+    for shift in range(0, byte_width * 8, 8):
+        digest ^= (value >> shift) & 0xFF
+        digest = (digest * FNV1A64_PRIME) & 0xFFFF_FFFF_FFFF_FFFF
+    return digest
+
+
+def breakaway_build_search_grid(p_start_raw: int, p_top_raw: int) -> list[int]:
+    """Regenerate the probe's post-dedupe half-octave search grid.
+
+    Port of `build_gain_ladder` (sweep_plan.rs): an anchored half-octave
+    ladder from `p_start_raw` to the exact `p_top_raw` ceiling. Integer-exact;
+    no floating point.
+    """
+    if p_start_raw <= 0 or p_start_raw > p_top_raw or p_top_raw > 0xFFFF:
+        raise ValueError("invalid breakaway search-grid span")
+    odd_numerator = p_start_raw * _BW_HALF_OCTAVE_NUM
+    odd_rounding = (1 << _BW_HALF_OCTAVE_DEN_SHIFT) - 1
+    gains: list[int] = []
+    previous = 0
+    for octave in range(16):
+        even_candidate = p_start_raw << octave
+        odd_candidate = ((odd_numerator << octave) + odd_rounding) >> _BW_HALF_OCTAVE_DEN_SHIFT
+        for candidate in (even_candidate, odd_candidate):
+            if candidate > p_top_raw or candidate <= previous:
+                continue
+            gains.append(candidate)
+            previous = candidate
+    if previous != p_top_raw:
+        gains.append(p_top_raw)
+    return gains
+
+
+def breakaway_probe_plan_digest(
+    search_gains: list[int], confidence_family_size: int, maximum_observations: int
+) -> int:
+    """Port of `BreakawayProbePlan::digest` (breakaway_plan.rs)."""
+    digest = FNV1A64_OFFSET
+    digest = _bw_fnv1a_extend(digest, len(search_gains), 1)
+    for gain in search_gains:
+        digest = _bw_fnv1a_extend(digest, gain, 2)
+    digest = _bw_fnv1a_extend(digest, confidence_family_size, 2)
+    digest = _bw_fnv1a_extend(digest, maximum_observations, 1)
+    return digest
+
+
+def breakaway_replay_binary_search(rung_count: int, moving_index: int) -> int:
+    """Replay `BreakawaySearchCursor`'s bisection and return its stroke count.
+
+    Port of `breakaway_search.rs`'s `advance_bisecting`/`advance_confirm_*`:
+    given the grid length and the *known resolved* moving index (recovered by
+    locating `moving_p_raw` in the reconstructed search grid), replay the
+    exact bisection trajectory -- the outcome fed back at each tested index is
+    determined purely by comparing it against `moving_index`, so the
+    trajectory is reproducible without the firmware ever having reported it.
+    Returns the stroke count including the mandatory bracket-confirmation
+    repeat(s) (spec section 4): one inert-confirm stroke when a predecessor
+    grid index exists, plus one moving-confirm stroke, always.
+    """
+    if not 0 <= moving_index < rung_count:
+        raise ValueError("moving index is outside the search grid")
+    lo, hi = 0, rung_count
+    observations = 0
+    while lo < hi:
+        tested = lo + (hi - lo) // 2
+        observations += 1
+        if tested >= moving_index:
+            hi = tested
+        else:
+            lo = tested + 1
+    if lo != moving_index:
+        raise ValueError("bisection did not resolve to the reported moving index")
+    if moving_index > 0:
+        observations += 1  # confirm inert
+    observations += 1  # confirm moving
+    return observations
+
+
+def breakaway_realize_candidate_additive_ladder(
+    rung_count_target: int, floor_raw: int, breakaway_raw: int, ceiling_raw: int
+) -> tuple[int, list[int], int]:
+    """Port of `realize_candidate_additive_ladder` (breakaway_plan.rs).
+
+    Returns `(step, gains, first_additive_gain)`.
+    """
+    remaining_intervals = rung_count_target - 2
+    if remaining_intervals <= 0:
+        raise ValueError("candidate rung count leaves no additive intervals")
+    span = ceiling_raw - breakaway_raw
+    step = -(-span // remaining_intervals)  # ceil division, matches `div_ceil`
+    first_additive_gain = min(breakaway_raw + step, ceiling_raw)
+
+    gains: list[int] = []
+    if floor_raw != breakaway_raw:
+        gains.append(floor_raw)
+    gains.append(breakaway_raw)
+
+    current = breakaway_raw
+    while True:
+        next_gain = current + step
+        if next_gain >= ceiling_raw:
+            if gains[-1] != ceiling_raw:
+                gains.append(ceiling_raw)
+            break
+        gains.append(next_gain)
+        current = next_gain
+    return step, gains, first_additive_gain
+
+
+def breakaway_plan_additive_discovery_ladder(
+    floor_raw: int,
+    breakaway_raw: int,
+    ceiling_raw: int,
+    observations_per_direction: int,
+    workflow_envelope_ms: int,
+) -> dict[str, object] | None:
+    """Port of `plan_additive_discovery_ladder`'s candidate enumeration and
+    selection (breakaway_plan.rs). Returns the chosen candidate's fields, or
+    `None` if no candidate `n` in `MIN_STRUCTURAL_RUNGS..=MAX_SWEEP_RUNGS`
+    survives every guard.
+    """
+    primitive_us = _BW_MOVING_STROKE_US + _BW_ZERO_SETTLE_US + _BW_SETTLE_ANALYSIS_BUDGET_US
+    slot_count = observations_per_direction * _BW_SWEEP_DIRECTION_COUNT
+    best: dict[str, object] | None = None
+    for rung_count_target in range(_BW_MIN_STRUCTURAL_RUNGS, _BW_MAX_SWEEP_RUNGS + 1):
+        step, gains, first_additive_gain = breakaway_realize_candidate_additive_ladder(
+            rung_count_target, floor_raw, breakaway_raw, ceiling_raw
+        )
+        rung_count = len(gains)
+        if rung_count < _BW_MIN_STRUCTURAL_RUNGS:
+            continue
+        confidence_family_size = rung_count * observations_per_direction
+        if confidence_family_size > _BW_MAX_CONFIDENCE_FAMILY_SIZE:
+            continue
+        workflow_us = rung_count * slot_count * primitive_us
+        workflow_ms = -(-workflow_us // 1000)
+        if workflow_ms > workflow_envelope_ms:
+            continue
+        if (
+            first_additive_gain * _BW_MAX_ADDITIVE_GAIN_RATIO_DEN
+            > breakaway_raw * _BW_MAX_ADDITIVE_GAIN_RATIO_NUM
+        ):
+            continue
+        is_better = best is None or (
+            first_additive_gain < best["first_additive_gain"]
+            or (
+                first_additive_gain == best["first_additive_gain"]
+                and rung_count_target > best["rung_count_target"]
+            )
+        )
+        if is_better:
+            best = {
+                "rung_count_target": rung_count_target,
+                "step": step,
+                "gains": gains,
+                "rung_count": rung_count,
+                "confidence_family_size": confidence_family_size,
+                "first_additive_gain": first_additive_gain,
+            }
+    return best
+
+
+def breakaway_discovery_plan_digest(
+    gains: list[int],
+    observations_per_direction: int,
+    confidence_family_size: int,
+    probe_plan_digest: int,
+) -> int:
+    """Port of `AdditiveDiscoveryPlan::digest` (breakaway_plan.rs)."""
+    digest = FNV1A64_OFFSET
+    digest = _bw_fnv1a_extend(digest, len(gains), 1)
+    for gain in gains:
+        digest = _bw_fnv1a_extend(digest, gain, 2)
+    digest = _bw_fnv1a_extend(digest, observations_per_direction, 2)
+    digest = _bw_fnv1a_extend(digest, confidence_family_size, 2)
+    digest = _bw_fnv1a_extend(digest, probe_plan_digest, 8)
+    return digest
+
+
+def breakaway_confirmation_plan_digest(
+    discovery_plan_digest: int,
+    candidate_p_raw: int,
+    capture_profile: int,
+    family_size: int,
+    observations_per_direction: int,
+    band_lower_percent: int,
+    band_upper_percent: int,
+    acceptance_rule: int,
+) -> int:
+    """Port of `BandConfirmationPlan::digest` (band_confirmation.rs).
+
+    Folds three fixed capture-timing constants
+    (`MOVING_STROKE_US`/`ZERO_SETTLE_US`/`SETTLE_ANALYSIS_BUDGET_US`) and the
+    fixed eight-slot direction order that never ride the wire, because
+    `BandConfirmationPlanned` only discloses the fields that vary run to run.
+    """
+    digest = FNV1A64_OFFSET
+    digest = _bw_fnv1a_extend(digest, discovery_plan_digest, 8)
+    digest = _bw_fnv1a_extend(digest, candidate_p_raw, 2)
+    digest = _bw_fnv1a_extend(digest, capture_profile, 1)
+    digest = _bw_fnv1a_extend(digest, family_size, 2)
+    digest = _bw_fnv1a_extend(digest, observations_per_direction, 2)
+    digest = _bw_fnv1a_extend(digest, _BW_MOVING_STROKE_US, 4)
+    digest = _bw_fnv1a_extend(digest, _BW_ZERO_SETTLE_US, 4)
+    digest = _bw_fnv1a_extend(digest, _BW_SETTLE_ANALYSIS_BUDGET_US, 4)
+    digest = _bw_fnv1a_extend(digest, band_lower_percent, 1)
+    digest = _bw_fnv1a_extend(digest, band_upper_percent, 1)
+    digest = _bw_fnv1a_extend(digest, acceptance_rule, 1)
+    for code in _BW_CONFIRMATION_SLOT_ORDER_CODES:
+        digest = _bw_fnv1a_extend(digest, code, 1)
+    return digest
+
+
+def breakaway_discovery_rung_margin(
+    lower_percent_milli: int, upper_percent_milli: int
+) -> tuple[int, int]:
+    """Port of `discovery_rung_margin_report`'s `M_i` and half-width math
+    (breakaway_reporting.rs), from the record's own reported response bounds.
+
+    Returns `(margin_percent_milli, half_width_percent_milli)`, matching spec
+    section 7: `M_i = min(L_i - 70, 80 - U_i)`.
+    """
+    lower_band_milli = _BW_CONFIRMATION_BAND_LOWER_PERCENT * 1_000
+    upper_band_milli = _BW_CONFIRMATION_BAND_UPPER_PERCENT * 1_000
+    margin_percent_milli = min(
+        lower_percent_milli - lower_band_milli, upper_band_milli - upper_percent_milli
+    )
+    half_width_percent_milli = (upper_percent_milli - lower_percent_milli) // 2
+    return margin_percent_milli, half_width_percent_milli
+
+
+def breakaway_required_relative_se_permille() -> int:
+    """Port of `confirmation_evaluated_terminal_report`'s `required_relative_se`
+    (breakaway_reporting.rs): `REQUIRED_HALF_WIDTH_FRACTION / m(8)`, rounded to
+    permille exactly as `relative_se_to_permille` does.
+    """
+    value = _BW_REQUIRED_HALF_WIDTH_FRACTION / _BW_CONFIRMATION_MULTIPLIER_95_DF15
+    scaled = round(value * 1_000)
+    return max(0, min(scaled, 0xFFFF))
+
+
+def _bw_tick_records_by_kind(tick: dict[str, object], record_kind: str) -> list[dict[str, object]]:
+    return [
+        decoded
+        for _raw, decoded in tick["records"]  # type: ignore[union-attr]
+        if decoded["record_kind"] == record_kind
+    ]
+
+
+def _bw_single_record(tick: dict[str, object], record_kind: str) -> dict[str, object]:
+    matches = _bw_tick_records_by_kind(tick, record_kind)
+    if len(matches) != 1:
+        raise ValueError(
+            f"breakaway {BREAKAWAY_EVENT_ID_NAMES.get(tick['event_id'], tick['event_id'])} "
+            f"tick expected exactly one {record_kind} record, found {len(matches)}"
+        )
+    return matches[0]
+
+
+def audit_breakaway_campaign(
+    ticks: list[dict[str, object]],
+    motion_timestamps: list[int] | None = None,
+    clock_hz: int | None = None,
+) -> dict[str, object]:
+    """Independently reconstruct one breakaway campaign and verify every
+    firmware decision against `assemble_breakaway_ticks`'s decoded evidence.
+
+    Raises `ValueError` for a malformed or contradictory capture: reordered
+    phases, motion recorded before the probe plan, a digest-chain break, a
+    family-4 (one-rung) confirmation, an accepted confirmation with an
+    incomplete observation mask, a second confirmation candidate after a
+    failed one, or an accepted campaign terminal that doesn't trace back to an
+    accepted confirmation. These are refusals, not soft mismatches: an offline
+    replay cannot certify a capture whose own internal evidence is
+    inconsistent, regardless of what any individual field claims.
+
+    `clock_hz` (the capturing device's `CLOCK_FREQ`, when known) lets the
+    workflow-duration check convert `workflow_duration_ticks` -- the elapsed
+    time between the probe-plan and campaign-terminal markers, independently
+    measured from the FTRC frame timestamps themselves -- into milliseconds
+    and compare it against `AdditiveDiscoveryPlanned.maximum_workflow_ms`
+    (spec section 8's reserved aggregate envelope). Without it the check is
+    skipped, since the ticks alone carry no clock reference.
+
+    Returns a dict with `matches_firmware`/`mismatches` for genuine
+    *value* discrepancies between the independently recomputed quantities and
+    the firmware's own reported ones -- these indicate a possible firmware
+    bug, not a corrupt capture, and are reported rather than raised.
+    """
+    if not ticks:
+        raise ValueError("empty breakaway campaign: no marker ticks")
+    if ticks[0]["event_id"] != 152:
+        raise ValueError("breakaway campaign does not begin with the probe plan marker")
+    if ticks[-1]["event_id"] != 159:
+        raise ValueError("breakaway campaign does not end with the campaign terminal marker")
+    campaign_terminal_count = sum(1 for tick in ticks if tick["event_id"] == 159)
+    if campaign_terminal_count != 1:
+        raise ValueError(
+            f"breakaway campaign has {campaign_terminal_count} campaign terminal markers, want 1"
+        )
+    previous_rank = -1
+    for tick in ticks[:-1]:
+        rank = _BW_EVENT_PHASE_RANK[tick["event_id"]]
+        if rank < previous_rank:
+            raise ValueError(
+                "breakaway campaign phases are reordered: "
+                f"{BREAKAWAY_EVENT_ID_NAMES[tick['event_id']]} follows a later phase"
+            )
+        previous_rank = rank
+    if motion_timestamps:
+        plan_ticks_time = int(ticks[0]["timestamp_ticks"])  # type: ignore[arg-type]
+        if any(timestamp < plan_ticks_time for timestamp in motion_timestamps):
+            raise ValueError("motion observed before the breakaway probe plan was frozen")
+
+    mismatches: list[str] = []
+
+    probe_planned = _bw_single_record(ticks[0], "breakaway_probe_planned")
+    search_grid = breakaway_build_search_grid(
+        int(probe_planned["p_start_raw"]), int(probe_planned["p_top_raw"])
+    )
+    if len(search_grid) != int(probe_planned["search_count"]):
+        mismatches.append(
+            "probe search_count: firmware=%d offline=%d"
+            % (probe_planned["search_count"], len(search_grid))
+        )
+    expected_probe_digest = breakaway_probe_plan_digest(
+        search_grid[: int(probe_planned["search_count"])],
+        int(probe_planned["family_size"]),
+        int(probe_planned["max_observations"]),
+    )
+    if expected_probe_digest != int(probe_planned["plan_digest"]):
+        mismatches.append(
+            "probe plan_digest: firmware=0x%016x offline=0x%016x"
+            % (probe_planned["plan_digest"], expected_probe_digest)
+        )
+
+    directional_breakaways: list[dict[str, object]] = []
+    for tick in ticks:
+        if tick["event_id"] == 153:
+            directional_breakaways.extend(
+                _bw_tick_records_by_kind(tick, "breakaway_directional_breakaway")
+            )
+            if int(tick["records"][0][1]["plan_digest"]) != int(probe_planned["plan_digest"]):  # type: ignore[index]
+                raise ValueError("breakaway probe-derived record's plan_digest does not chain")
+
+    for breakaway in directional_breakaways:
+        moving_p_raw = int(breakaway["moving_p_raw"])
+        inert_present = int(breakaway["inert_present"])
+        if moving_p_raw not in search_grid:
+            mismatches.append(
+                f"directional breakaway moving_p_raw {moving_p_raw} is not on the search grid"
+            )
+            continue
+        moving_index = search_grid.index(moving_p_raw)
+        if inert_present == 1:
+            inert_p_raw = int(breakaway["inert_p_raw"])
+            if moving_index == 0 or search_grid[moving_index - 1] != inert_p_raw:
+                mismatches.append(
+                    "directional breakaway bracket is not adjacent on the search grid: "
+                    f"inert_p_raw={inert_p_raw} moving_p_raw={moving_p_raw}"
+                )
+        elif moving_index != 0:
+            mismatches.append(
+                "directional breakaway reports no inert endpoint but moving_p_raw "
+                f"{moving_p_raw} is not the grid's smallest rung"
+            )
+        try:
+            expected_observations = breakaway_replay_binary_search(len(search_grid), moving_index)
+        except ValueError as error:
+            mismatches.append(f"directional breakaway bisection replay failed: {error}")
+            continue
+        if expected_observations != int(breakaway["observations"]):
+            mismatches.append(
+                "directional breakaway observations: firmware=%d offline=%d"
+                % (breakaway["observations"], expected_observations)
+            )
+        if int(breakaway["observations"]) > int(probe_planned["max_observations"]):
+            mismatches.append(
+                "directional breakaway observations %d exceeds the planned maximum %d"
+                % (breakaway["observations"], probe_planned["max_observations"])
+            )
+
+    resolved_breakaway_raw = (
+        min(int(item["moving_p_raw"]) for item in directional_breakaways)
+        if directional_breakaways
+        else None
+    )
+
+    discovery_planned_tick = next((tick for tick in ticks if tick["event_id"] == 155), None)
+    discovery_terminal_tick = next((tick for tick in ticks if tick["event_id"] == 156), None)
+    discovery_planned: dict[str, object] | None = None
+    ladder_gains: list[int] = []
+    if discovery_planned_tick is not None:
+        discovery_planned = _bw_single_record(discovery_planned_tick, "breakaway_discovery_planned")
+        if int(discovery_planned["prior_plan_digest"]) != int(probe_planned["plan_digest"]):
+            raise ValueError("breakaway discovery plan does not chain to the probe plan digest")
+        ladder_records = sorted(
+            _bw_tick_records_by_kind(discovery_planned_tick, "breakaway_ladder_rung"),
+            key=lambda record: int(record["rung_index"]),
+        )
+        ladder_gains = [int(record["p_raw"]) for record in ladder_records]
+        if len(ladder_gains) != int(discovery_planned["rung_count"]):
+            mismatches.append(
+                "discovery ladder rung count: firmware=%d offline=%d"
+                % (discovery_planned["rung_count"], len(ladder_gains))
+            )
+        floor_raw = int(discovery_planned["floor_p_raw"])
+        breakaway_raw = int(discovery_planned["breakaway_p_raw"])
+        ceiling_raw = int(discovery_planned["ceiling_p_raw"])
+        if resolved_breakaway_raw is not None and breakaway_raw != resolved_breakaway_raw:
+            mismatches.append(
+                "discovery breakaway_p_raw: reported=%d offline (min directional moving)=%d"
+                % (breakaway_raw, resolved_breakaway_raw)
+            )
+        best = breakaway_plan_additive_discovery_ladder(
+            floor_raw,
+            breakaway_raw,
+            ceiling_raw,
+            int(discovery_planned["observations_per_direction"]),
+            int(discovery_planned["maximum_workflow_ms"]),
+        )
+        if best is None:
+            mismatches.append("no candidate additive ladder survives every planning guard")
+        else:
+            if best["gains"] != ladder_gains:
+                mismatches.append(
+                    "discovery ladder gains: firmware=%s offline=%s" % (ladder_gains, best["gains"])
+                )
+            if int(discovery_planned["family_size"]) != best["confidence_family_size"]:
+                mismatches.append(
+                    "discovery family_size: firmware=%d offline=%d"
+                    % (discovery_planned["family_size"], best["confidence_family_size"])
+                )
+            expected_first_step = (
+                best["gains"][best["gains"].index(breakaway_raw) + 1] - breakaway_raw
+            )
+            if int(discovery_planned["first_additive_step_raw"]) != expected_first_step:
+                mismatches.append(
+                    "discovery first_additive_step_raw: firmware=%d offline=%d"
+                    % (discovery_planned["first_additive_step_raw"], expected_first_step)
+                )
+        expected_discovery_digest = breakaway_discovery_plan_digest(
+            ladder_gains,
+            int(discovery_planned["observations_per_direction"]),
+            int(discovery_planned["family_size"]),
+            int(probe_planned["plan_digest"]),
+        )
+        if expected_discovery_digest != int(discovery_planned["plan_digest"]):
+            mismatches.append(
+                "discovery plan_digest: firmware=0x%016x offline=0x%016x"
+                % (discovery_planned["plan_digest"], expected_discovery_digest)
+            )
+
+    discovery_terminal: dict[str, object] | None = None
+    if discovery_terminal_tick is not None:
+        if discovery_planned is None:
+            raise ValueError("breakaway discovery terminal has no matching discovery plan")
+        discovery_terminal = _bw_single_record(
+            discovery_terminal_tick, "breakaway_discovery_terminal"
+        )
+        if int(discovery_terminal["plan_digest"]) != int(discovery_planned["plan_digest"]):
+            raise ValueError("breakaway discovery terminal does not chain to its own plan digest")
+        if int(discovery_terminal["prior_plan_digest"]) != int(probe_planned["plan_digest"]):
+            raise ValueError("breakaway discovery terminal does not chain to the probe plan digest")
+        margin_records = sorted(
+            _bw_tick_records_by_kind(discovery_terminal_tick, "breakaway_discovery_rung_margin"),
+            key=lambda record: int(record["collected_index"]),
+        )
+        if len(margin_records) != int(discovery_terminal["collected_count"]):
+            mismatches.append(
+                "discovery collected_count: firmware=%d offline=%d"
+                % (discovery_terminal["collected_count"], len(margin_records))
+            )
+        previous_mid: int | None = None
+        for record in margin_records:
+            expected_margin, expected_half_width = breakaway_discovery_rung_margin(
+                int(record["lower_percent_milli"]), int(record["upper_percent_milli"])
+            )
+            if expected_margin != int(record["margin_percent_milli"]):
+                mismatches.append(
+                    "discovery rung margin M_i (collected_index=%d): firmware=%d offline=%d"
+                    % (record["collected_index"], record["margin_percent_milli"], expected_margin)
+                )
+            if expected_half_width != int(record["half_width_percent_milli"]):
+                mismatches.append(
+                    "discovery rung half-width (collected_index=%d): firmware=%d offline=%d"
+                    % (
+                        record["collected_index"],
+                        record["half_width_percent_milli"],
+                        expected_half_width,
+                    )
+                )
+            mid = (int(record["lower_percent_milli"]) + int(record["upper_percent_milli"])) // 2
+            expected_step = 0 if previous_mid is None else mid - previous_mid
+            if expected_step != int(record["adjacent_rate_step_permille"]):
+                mismatches.append(
+                    "discovery adjacent_rate_step_permille (collected_index=%d): "
+                    "firmware=%d offline=%d"
+                    % (
+                        record["collected_index"],
+                        record["adjacent_rate_step_permille"],
+                        expected_step,
+                    )
+                )
+            previous_mid = mid
+
+    confirmation_plan_ticks = [tick for tick in ticks if tick["event_id"] == 157]
+    confirmation_terminal_ticks = [tick for tick in ticks if tick["event_id"] == 158]
+    if len(confirmation_plan_ticks) > 1:
+        raise ValueError("breakaway campaign spent a second confirmation candidate after the first")
+    if len(confirmation_terminal_ticks) > 1:
+        raise ValueError(
+            "breakaway campaign ran a second confirmation block after the first terminated"
+        )
+
+    confirmation_planned: dict[str, object] | None = None
+    confirmation_accepted = False
+    if confirmation_plan_ticks:
+        if discovery_terminal is None:
+            raise ValueError("breakaway confirmation plan has no matching discovery terminal")
+        confirmation_planned = _bw_single_record(
+            confirmation_plan_ticks[0], "breakaway_confirmation_planned"
+        )
+        if int(confirmation_planned["family_size"]) != _BW_CONFIRMATION_FAMILY_SIZE:
+            raise ValueError(
+                "breakaway confirmation family_size=%d, want the fixed family of 8"
+                % confirmation_planned["family_size"]
+            )
+        if int(confirmation_planned["prior_plan_digest"]) != int(discovery_planned["plan_digest"]):  # type: ignore[index]
+            raise ValueError(
+                "breakaway confirmation plan does not chain to the discovery plan digest"
+            )
+        expected_confirmation_digest = breakaway_confirmation_plan_digest(
+            int(discovery_planned["plan_digest"]),  # type: ignore[index]
+            int(confirmation_planned["candidate_p_raw"]),
+            int(confirmation_planned["capture_profile"]),
+            int(confirmation_planned["family_size"]),
+            int(confirmation_planned["observations_per_direction"]),
+            int(confirmation_planned["band_lower_percent"]),
+            int(confirmation_planned["band_upper_percent"]),
+            int(confirmation_planned["acceptance_rule"]),
+        )
+        if expected_confirmation_digest != int(confirmation_planned["plan_digest"]):
+            mismatches.append(
+                "confirmation plan_digest: firmware=0x%016x offline=0x%016x"
+                % (confirmation_planned["plan_digest"], expected_confirmation_digest)
+            )
+
+    if confirmation_terminal_ticks:
+        confirmation_terminal = _bw_single_record(
+            confirmation_terminal_ticks[0], "breakaway_confirmation_terminal"
+        )
+        if confirmation_planned is not None and int(confirmation_terminal["plan_digest"]) != int(
+            confirmation_planned["plan_digest"]
+        ):
+            raise ValueError(
+                "breakaway confirmation terminal does not chain to its own plan digest"
+            )
+        confirmation_accepted = int(confirmation_terminal["accepted"]) == 1
+        observations = sorted(
+            _bw_tick_records_by_kind(
+                confirmation_terminal_ticks[0], "breakaway_confirmation_observation"
+            ),
+            key=lambda record: int(record["slot_index"]),
+        )
+        if confirmation_accepted:
+            for mask_name in (
+                "forward_collected_mask",
+                "forward_eligible_mask",
+                "forward_included_mask",
+                "reverse_collected_mask",
+                "reverse_eligible_mask",
+                "reverse_included_mask",
+            ):
+                if int(confirmation_terminal[mask_name]) != 0b1111:
+                    raise ValueError(
+                        "breakaway confirmation accepted with an incomplete %s: %s"
+                        % (mask_name, format(int(confirmation_terminal[mask_name]), "#06b"))
+                    )
+            if len(observations) != _BW_CONFIRMATION_FAMILY_SIZE:
+                raise ValueError(
+                    "breakaway confirmation accepted with %d observations, want the full family of 8"
+                    % len(observations)
+                )
+        if observations:
+            expected_max_se = max(
+                int(record["relative_standard_error_permille"]) for record in observations
+            )
+            if expected_max_se != int(confirmation_terminal["max_relative_se_permille"]):
+                mismatches.append(
+                    "confirmation max_relative_se_permille: firmware=%d offline=%d"
+                    % (confirmation_terminal["max_relative_se_permille"], expected_max_se)
+                )
+        expected_required_se = breakaway_required_relative_se_permille()
+        if expected_required_se != int(confirmation_terminal["required_relative_se_permille"]):
+            mismatches.append(
+                "confirmation required_relative_se_permille: firmware=%d offline=%d"
+                % (confirmation_terminal["required_relative_se_permille"], expected_required_se)
+            )
+
+    campaign_terminal = _bw_single_record(ticks[-1], "breakaway_campaign_terminal")
+    campaign_accepted = int(campaign_terminal["accepted"]) == 1
+    if campaign_accepted != confirmation_accepted:
+        raise ValueError(
+            "breakaway campaign terminal accepted=%d does not trace back to an accepted "
+            "confirmation (confirmation accepted=%d)"
+            % (campaign_terminal["accepted"], int(confirmation_accepted))
+        )
+    if campaign_accepted:
+        if int(campaign_terminal["terminal_cause"]) != _BW_TERMINAL_CAUSE_ACCEPTED:
+            mismatches.append(
+                "campaign terminal_cause on accept: firmware=%d want=%d"
+                % (campaign_terminal["terminal_cause"], _BW_TERMINAL_CAUSE_ACCEPTED)
+            )
+        if int(campaign_terminal["stage_c_plan_digest"]) == 0:
+            mismatches.append("campaign terminal reports accepted with a zero stage_c_plan_digest")
+    elif int(campaign_terminal["stage_c_plan_digest"]) != 0:
+        mismatches.append("campaign terminal reports no accept but a nonzero stage_c_plan_digest")
+
+    # `TargetBandSkipped` (cause 7) and `AdditiveLadderResolutionBudgetExceeded`
+    # (cause 10) are decoded as distinct `terminal_cause` values already, but
+    # spec section 9 draws a structural line between them that's worth
+    # checking, not just trusting the numeric code: budget-exceeded is a
+    # planning refusal *before motion*, so it can only appear on a zero-plan
+    # campaign terminal (no discovery plan was ever frozen); target-band-
+    # skipped is a genuine discovery *result*, so it requires a real discovery
+    # terminal record reporting that same cause.
+    campaign_cause = int(campaign_terminal["terminal_cause"])
+    additive_ladder_resolution_budget_exceeded = campaign_cause == 10
+    discovery_target_band_skipped = discovery_terminal is not None and (
+        int(discovery_terminal["terminal_cause"]) == 7
+    )
+    if additive_ladder_resolution_budget_exceeded and discovery_planned is not None:
+        mismatches.append(
+            "AdditiveLadderResolutionBudgetExceeded is a planning refusal before motion, "
+            "but a discovery plan was frozen for this campaign"
+        )
+    if discovery_target_band_skipped and campaign_cause != 7:
+        mismatches.append(
+            "discovery TargetBandSkipped did not propagate to the campaign terminal cause "
+            f"(campaign terminal_cause={campaign_cause})"
+        )
+
+    workflow_duration_ticks = int(ticks[-1]["timestamp_ticks"]) - int(  # type: ignore[arg-type]
+        ticks[0]["timestamp_ticks"]  # type: ignore[arg-type]
+    )
+    if workflow_duration_ticks < 0:
+        raise ValueError("breakaway campaign terminal precedes its own probe plan in time")
+    maximum_workflow_ms = (
+        int(discovery_planned["maximum_workflow_ms"]) if discovery_planned is not None else None
+    )
+    workflow_duration_ms: float | None = None
+    if clock_hz:
+        workflow_duration_ms = workflow_duration_ticks * 1_000 / clock_hz
+        if maximum_workflow_ms is not None and workflow_duration_ms > maximum_workflow_ms:
+            mismatches.append(
+                "workflow duration %.1f ms exceeds the reserved maximum_workflow_ms=%d"
+                % (workflow_duration_ms, maximum_workflow_ms)
+            )
+
+    return {
+        "phase_sequence": [BREAKAWAY_EVENT_ID_NAMES[tick["event_id"]] for tick in ticks],
+        "probe_planned": probe_planned,
+        "search_grid": search_grid,
+        "directional_breakaways": directional_breakaways,
+        "resolved_breakaway_p_raw": resolved_breakaway_raw,
+        "discovery_planned": discovery_planned,
+        "discovery_terminal": discovery_terminal,
+        "confirmation_planned": confirmation_planned,
+        "confirmation_accepted": confirmation_accepted,
+        "campaign_terminal": campaign_terminal,
+        "additive_ladder_resolution_budget_exceeded": additive_ladder_resolution_budget_exceeded,
+        "discovery_target_band_skipped": discovery_target_band_skipped,
+        "workflow_duration_ticks": workflow_duration_ticks,
+        "workflow_duration_ms": workflow_duration_ms,
+        "maximum_workflow_ms": maximum_workflow_ms,
+        "matches_firmware": not mismatches,
+        "mismatches": mismatches,
+    }

@@ -64,7 +64,32 @@ EVENT_COMMISSION_ACCEPTANCE_MATRIX_PLAN = 146
 EVENT_COMMISSION_ACCEPTANCE_MATRIX_OBSERVATION = 147
 EVENT_COMMISSION_ACCEPTANCE_MATRIX_AMPLITUDE = 148
 EVENT_COMMISSION_ACCEPTANCE_MATRIX_TERMINAL = 149
+EVENT_COMMISSION_REST_SELECTION_DIAGNOSTIC = 151
+EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN = 152
+EVENT_COMMISSION_BREAKAWAY_PROBE_DERIVED = 153
+EVENT_COMMISSION_BREAKAWAY_PROBE_TERMINAL = 154
+EVENT_COMMISSION_BREAKAWAY_DISCOVERY_PLAN = 155
+EVENT_COMMISSION_BREAKAWAY_DISCOVERY_TERMINAL = 156
+EVENT_COMMISSION_BREAKAWAY_CONFIRMATION_PLAN = 157
+EVENT_COMMISSION_BREAKAWAY_CONFIRMATION_TERMINAL = 158
+EVENT_COMMISSION_BREAKAWAY_CAMPAIGN_TERMINAL = 159
 EVENT_COMMISSION_DIAGNOSTIC_WARNING = 200
+
+# Every breakaway-campaign marker event id (152-159), in phase-emission order.
+# The FTRC marker granularity is one `CommissionTraceEvent` per tick even when
+# a tick's bundle carries several canonical evidence records (spec section
+# 10) -- these ids are what the offline assembler uses to claim the raw
+# velocity-sweep-evidence frames immediately preceding each marker.
+BREAKAWAY_CAMPAIGN_EVENT_IDS = (
+    EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN,
+    EVENT_COMMISSION_BREAKAWAY_PROBE_DERIVED,
+    EVENT_COMMISSION_BREAKAWAY_PROBE_TERMINAL,
+    EVENT_COMMISSION_BREAKAWAY_DISCOVERY_PLAN,
+    EVENT_COMMISSION_BREAKAWAY_DISCOVERY_TERMINAL,
+    EVENT_COMMISSION_BREAKAWAY_CONFIRMATION_PLAN,
+    EVENT_COMMISSION_BREAKAWAY_CONFIRMATION_TERMINAL,
+    EVENT_COMMISSION_BREAKAWAY_CAMPAIGN_TERMINAL,
+)
 
 _LEVEL_NAMES = {
     1: "info",
@@ -115,6 +140,15 @@ _COMMISSIONING_EVENT_NAMES = {
     EVENT_COMMISSION_ACCEPTANCE_MATRIX_OBSERVATION: "commission_acceptance_matrix_observation",
     EVENT_COMMISSION_ACCEPTANCE_MATRIX_AMPLITUDE: "commission_acceptance_matrix_amplitude",
     EVENT_COMMISSION_ACCEPTANCE_MATRIX_TERMINAL: "commission_acceptance_matrix_terminal",
+    EVENT_COMMISSION_REST_SELECTION_DIAGNOSTIC: "commission_rest_selection_diagnostic",
+    EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN: "commission_breakaway_probe_plan",
+    EVENT_COMMISSION_BREAKAWAY_PROBE_DERIVED: "commission_breakaway_probe_derived",
+    EVENT_COMMISSION_BREAKAWAY_PROBE_TERMINAL: "commission_breakaway_probe_terminal",
+    EVENT_COMMISSION_BREAKAWAY_DISCOVERY_PLAN: "commission_breakaway_discovery_plan",
+    EVENT_COMMISSION_BREAKAWAY_DISCOVERY_TERMINAL: "commission_breakaway_discovery_terminal",
+    EVENT_COMMISSION_BREAKAWAY_CONFIRMATION_PLAN: "commission_breakaway_confirmation_plan",
+    EVENT_COMMISSION_BREAKAWAY_CONFIRMATION_TERMINAL: "commission_breakaway_confirmation_terminal",
+    EVENT_COMMISSION_BREAKAWAY_CAMPAIGN_TERMINAL: "commission_breakaway_campaign_terminal",
     EVENT_COMMISSION_DIAGNOSTIC_WARNING: "commission_diagnostic_warning",
 }
 
@@ -292,7 +326,28 @@ def _decode_payload(version: int, frame_type: int, payload: bytes) -> dict[str, 
     if frame_type == FRAME_TYPE_VELOCITY_OBSERVATION:
         return _decode_velocity_observation(version, payload)
     if frame_type == FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE:
-        return _decode_velocity_sweep_evidence(payload)
+        try:
+            return _decode_velocity_sweep_evidence(payload)
+        except DecodeError as legacy_error:
+            # The breakaway-campaign family's local tags (spec section 10) are
+            # scoped to the marker `event_id` (152-159) that follows a bundle
+            # of these records, not globally unique against the older
+            # velocity-sweep-evidence tag space -- see
+            # `breakaway_trace_reporting.rs`'s module doc. Every breakaway tag
+            # except tag 1 (`directional_breakaway`, 22 bytes) fails every
+            # existing (kind, length) branch above and lands here; tag 1
+            # collides byte-for-byte with the legacy 22-byte
+            # `integral_plan_marker` shape and cannot be resolved from bytes
+            # alone (`decode_breakaway_record` doesn't fix that ambiguity --
+            # marker-adjacency context in `velocity_measurement.py`'s
+            # breakaway assembler does, by always re-decoding the raw payload
+            # once the surrounding marker is known). If the breakaway decoder
+            # also rejects the payload, the original legacy error is what
+            # callers see, preserving today's corrupt-payload behavior.
+            try:
+                return decode_breakaway_record(payload)
+            except DecodeError:
+                raise legacy_error from None
     return {"raw": payload}
 
 
@@ -1938,6 +1993,402 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         raise DecodeError(f"unknown velocity-sweep evidence kind {kind}")
     cursor.finish()
     return decoded
+
+
+# Unified wire terminal-cause taxonomy spanning every breakaway probe,
+# discovery, and confirmation terminal variant plus the campaign-level accept
+# outcome (`BreakawayTerminalCause` in
+# `breakaway_reporting.rs`). One shared table, matching the firmware's own
+# rationale for not needing three separate cause enums.
+BREAKAWAY_TERMINAL_CAUSE_NAMES = {
+    0: "none",
+    1: "probe_no_motion_at_authority",
+    2: "probe_unstable_breakaway",
+    3: "probe_directional_breakaway_disagreement",
+    4: "probe_evidence_excluded",
+    5: "probe_authority_failure",
+    6: "probe_safety_fault",
+    7: "discovery_target_band_skipped",
+    8: "discovery_current_headroom_before_band",
+    9: "discovery_insufficient_additive_span",
+    10: "discovery_additive_ladder_resolution_budget_exceeded",
+    11: "discovery_evidence_excluded",
+    12: "discovery_safety_fault",
+    13: "confirmation_target_band_unconfirmable_from_discovery",
+    14: "confirmation_target_band_not_reached_at_authority",
+    15: "confirmation_response_location",
+    16: "confirmation_excessive_uncertainty",
+    17: "confirmation_loss_of_consensus",
+    18: "confirmation_current_authority",
+    19: "confirmation_evidence_excluded",
+    20: "confirmation_safety_fault",
+    21: "accepted",
+}
+
+# `BreakawayPhase` (breakaway_reporting.rs): which of the three campaign
+# drivers owns a `BreakawayCampaignTerminal` closure record.
+BREAKAWAY_PHASE_NAMES = {
+    0: "probe",
+    1: "discovery",
+    2: "confirmation",
+}
+
+# Local wire tags for the breakaway-campaign canonical-record family
+# (`breakaway_trace_reporting.rs`). These are scoped to the surrounding
+# `EVENT_COMMISSION_BREAKAWAY_*` marker, not globally unique against the
+# older velocity-sweep-evidence tag space -- see `decode_breakaway_record`.
+BREAKAWAY_TAG_PROBE_PLANNED = 0
+BREAKAWAY_TAG_DIRECTIONAL_BREAKAWAY = 1
+BREAKAWAY_TAG_PROBE_TERMINAL = 2
+BREAKAWAY_TAG_DISCOVERY_PLANNED = 3
+BREAKAWAY_TAG_CEILING_SOURCE = 4
+BREAKAWAY_TAG_LADDER_RUNG = 5
+BREAKAWAY_TAG_DISCOVERY_TERMINAL = 6
+BREAKAWAY_TAG_DISCOVERY_RUNG_MARGIN = 7
+BREAKAWAY_TAG_RUNG_ZERO_DIAGNOSTIC = 8
+BREAKAWAY_TAG_CONFIRMATION_PLANNED = 9
+BREAKAWAY_TAG_CONFIRMATION_TERMINAL = 10
+BREAKAWAY_TAG_CONFIRMATION_OBSERVATION = 11
+BREAKAWAY_TAG_CAMPAIGN_TERMINAL = 12
+
+
+def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
+    """Decode one breakaway-campaign canonical evidence record.
+
+    Dispatches purely on the record's local tag (`payload[0]`) and exact
+    length, mirroring the firmware's own golden-byte tests
+    (`breakaway_trace_reporting_tests.rs`). Unlike
+    `_decode_velocity_sweep_evidence`, this function is never the sole
+    authority for a `FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE` payload: the local
+    tag space is scoped to the surrounding `EVENT_COMMISSION_BREAKAWAY_*`
+    marker (152-159), not globally unique. Tag 1 (`directional_breakaway`, 22
+    bytes) collides byte-for-byte with the legacy 22-byte
+    `integral_plan_marker` shape decoded by `_decode_velocity_sweep_evidence`;
+    a caller that already knows (from marker adjacency) that a raw payload
+    belongs to a breakaway bundle must call this function directly on
+    `Frame.raw_payload` rather than trust `Frame.payload`.
+    """
+    _require(payload, 1, "breakaway evidence")
+    cursor = _EvidenceCursor(payload)
+    tag = cursor.take("B")
+    if tag == BREAKAWAY_TAG_PROBE_PLANNED and len(payload) == 23:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest", "Q"),
+                ("family_size", "H"),
+                ("max_observations", "B"),
+                ("search_count", "B"),
+                ("p_start_raw", "H"),
+                ("p_top_raw", "H"),
+            ),
+        )
+        decoded["record_kind"] = "breakaway_probe_planned"
+    elif tag == BREAKAWAY_TAG_DIRECTIONAL_BREAKAWAY and len(payload) == 22:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest", "Q"),
+                ("direction", "B"),
+                ("inert_present", "B"),
+                ("inert_p_raw", "H"),
+                ("moving_p_raw", "H"),
+                ("observations", "B"),
+            ),
+        )
+        if decoded["direction"] not in (0, 1):
+            raise DecodeError("breakaway directional-breakaway direction is invalid")
+        if decoded["inert_present"] not in (0, 1):
+            raise DecodeError("breakaway directional-breakaway inert-present flag is invalid")
+        decoded["record_kind"] = "breakaway_directional_breakaway"
+    elif tag == BREAKAWAY_TAG_PROBE_TERMINAL and len(payload) == 19:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest", "Q"),
+                ("family_size", "H"),
+                ("terminal_cause", "B"),
+                ("has_safety_fault", "B"),
+            ),
+        )
+        if decoded["terminal_cause"] not in BREAKAWAY_TERMINAL_CAUSE_NAMES:
+            raise DecodeError("breakaway probe terminal cause is invalid")
+        decoded["record_kind"] = "breakaway_probe_terminal"
+    elif tag == BREAKAWAY_TAG_DISCOVERY_PLANNED and len(payload) == 43:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest", "Q"),
+                ("prior_plan_digest", "Q"),
+                ("family_size", "H"),
+                ("rung_count", "B"),
+                ("observations_per_direction", "H"),
+                ("floor_p_raw", "H"),
+                ("floor_origin", "B"),
+                ("breakaway_p_raw", "H"),
+                ("ceiling_p_raw", "H"),
+                ("first_additive_step_raw", "I"),
+                ("maximum_workflow_ms", "I"),
+            ),
+        )
+        if decoded["floor_origin"] not in (0, 1):
+            raise DecodeError("breakaway discovery floor origin is invalid")
+        decoded["record_kind"] = "breakaway_discovery_planned"
+    elif tag == BREAKAWAY_TAG_CEILING_SOURCE and len(payload) == 16:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest", "Q"),
+                ("binding_source", "B"),
+            ),
+        )
+        if decoded["binding_source"] not in (0, 1):
+            raise DecodeError("breakaway ceiling binding source is invalid")
+        decoded["record_kind"] = "breakaway_ceiling_source"
+    elif tag == BREAKAWAY_TAG_LADDER_RUNG and len(payload) == 18:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest", "Q"),
+                ("rung_index", "B"),
+                ("p_raw", "H"),
+            ),
+        )
+        decoded["record_kind"] = "breakaway_ladder_rung"
+    elif tag == BREAKAWAY_TAG_DISCOVERY_TERMINAL and len(payload) == 28:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest", "Q"),
+                ("prior_plan_digest", "Q"),
+                ("family_size", "H"),
+                ("terminal_cause", "B"),
+                ("collected_count", "B"),
+                ("has_safety_fault", "B"),
+            ),
+        )
+        if decoded["terminal_cause"] not in BREAKAWAY_TERMINAL_CAUSE_NAMES:
+            raise DecodeError("breakaway discovery terminal cause is invalid")
+        decoded["record_kind"] = "breakaway_discovery_terminal"
+    elif tag == BREAKAWAY_TAG_DISCOVERY_RUNG_MARGIN and len(payload) == 38:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest", "Q"),
+                ("collected_index", "B"),
+                ("p_raw", "H"),
+                ("lower_percent_milli", "i"),
+                ("upper_percent_milli", "i"),
+                ("margin_percent_milli", "i"),
+                ("half_width_percent_milli", "i"),
+                ("adjacent_rate_step_permille", "i"),
+            ),
+        )
+        decoded["record_kind"] = "breakaway_discovery_rung_margin"
+    elif tag == BREAKAWAY_TAG_RUNG_ZERO_DIAGNOSTIC and len(payload) == 17:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest", "Q"),
+                ("forward_moved", "B"),
+                ("reverse_moved", "B"),
+            ),
+        )
+        if decoded["forward_moved"] not in (0, 1) or decoded["reverse_moved"] not in (0, 1):
+            raise DecodeError("breakaway rung-zero diagnostic flag is invalid")
+        decoded["record_kind"] = "breakaway_rung_zero_diagnostic"
+    elif tag == BREAKAWAY_TAG_CONFIRMATION_PLANNED and len(payload) == 37:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest", "Q"),
+                ("prior_plan_digest", "Q"),
+                ("family_size", "H"),
+                ("observations_per_direction", "H"),
+                ("candidate_p_raw", "H"),
+                ("band_lower_percent", "B"),
+                ("band_upper_percent", "B"),
+                ("capture_profile", "B"),
+                ("acceptance_rule", "B"),
+                ("nominated_margin_percent_milli", "i"),
+            ),
+        )
+        decoded["record_kind"] = "breakaway_confirmation_planned"
+    elif tag == BREAKAWAY_TAG_CONFIRMATION_TERMINAL and len(payload) == 40:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest", "Q"),
+                ("prior_plan_digest", "Q"),
+                ("family_size", "H"),
+                ("terminal_cause", "B"),
+                ("forward_collected_mask", "B"),
+                ("forward_eligible_mask", "B"),
+                ("forward_included_mask", "B"),
+                ("reverse_collected_mask", "B"),
+                ("reverse_eligible_mask", "B"),
+                ("reverse_included_mask", "B"),
+                ("accepted", "B"),
+                ("confirmed_p_raw", "H"),
+                ("max_relative_se_permille", "H"),
+                ("required_relative_se_permille", "H"),
+                ("has_safety_fault", "B"),
+            ),
+        )
+        if decoded["terminal_cause"] not in BREAKAWAY_TERMINAL_CAUSE_NAMES:
+            raise DecodeError("breakaway confirmation terminal cause is invalid")
+        if decoded["accepted"] not in (0, 1):
+            raise DecodeError("breakaway confirmation accepted flag is invalid")
+        for name in (
+            "forward_collected_mask",
+            "forward_eligible_mask",
+            "forward_included_mask",
+            "reverse_collected_mask",
+            "reverse_eligible_mask",
+            "reverse_included_mask",
+        ):
+            if decoded[name] & ~0xF:
+                raise DecodeError("breakaway confirmation observation mask exceeds four slots")
+        decoded["record_kind"] = "breakaway_confirmation_terminal"
+    elif tag == BREAKAWAY_TAG_CONFIRMATION_OBSERVATION and len(payload) == 27:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest", "Q"),
+                ("slot_index", "B"),
+                ("direction", "B"),
+                ("response_lower_percent_milli", "i"),
+                ("response_upper_percent_milli", "i"),
+                ("relative_standard_error_permille", "H"),
+            ),
+        )
+        if decoded["direction"] not in (0, 1):
+            raise DecodeError("breakaway confirmation observation direction is invalid")
+        if decoded["slot_index"] > 7:
+            raise DecodeError("breakaway confirmation observation slot index is invalid")
+        decoded["record_kind"] = "breakaway_confirmation_observation"
+    elif tag == BREAKAWAY_TAG_CAMPAIGN_TERMINAL and len(payload) == 18:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("phase", "B"),
+                ("terminal_cause", "B"),
+                ("accepted", "B"),
+                ("stage_c_plan_digest", "Q"),
+            ),
+        )
+        if decoded["phase"] not in BREAKAWAY_PHASE_NAMES:
+            raise DecodeError("breakaway campaign terminal phase is invalid")
+        if decoded["terminal_cause"] not in BREAKAWAY_TERMINAL_CAUSE_NAMES:
+            raise DecodeError("breakaway campaign terminal cause is invalid")
+        if decoded["accepted"] not in (0, 1):
+            raise DecodeError("breakaway campaign terminal accepted flag is invalid")
+        decoded["record_kind"] = "breakaway_campaign_terminal"
+    else:
+        raise DecodeError(f"unknown breakaway evidence tag {tag} (length {len(payload)})")
+    cursor.finish()
+    decoded["tag"] = tag
+    return decoded
+
+
+def assemble_breakaway_ticks(
+    frames: list[tuple[int, int, bytes, dict[str, Any] | None]],
+) -> list[dict[str, Any]]:
+    """Assemble breakaway-campaign canonical records into per-marker ticks.
+
+    `frames` is the ordered sequence of `(frame_type, timestamp_ticks,
+    raw_payload, decoded_payload)` tuples for one device/source, restricted to
+    `FRAME_TYPE_EVENT` and `FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE` frames (any
+    other frame type is irrelevant here and must be filtered out by the
+    caller). `decoded_payload` is `Frame.payload` for `FRAME_TYPE_EVENT`
+    frames (read for `event_id`/`args`) and is ignored for
+    `FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE` frames: this function always
+    re-decodes `raw_payload` for those directly through
+    `decode_breakaway_record`, because `Frame.payload` may carry the wrong
+    interpretation for the one colliding tag (see that function's docstring).
+
+    The firmware emits every breakaway canonical record for one campaign
+    transition immediately before exactly one `CommissionTraceEvent` marker
+    (spec section 10; `breakaway_trace_reporting.rs` module doc), so a
+    `FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE` frame is claimed by the next event
+    marker of *any* kind, not only a breakaway one -- an unrelated record
+    family's own marker still owns and clears whatever evidence preceded it,
+    exactly as it does for that family's own decoder. Only markers whose
+    `event_id` is a breakaway id (152-159) become entries in the returned
+    list; every other marker silently discards the frames it claims.
+
+    Returns one dict per breakaway marker event, in stream order:
+    `{"event_id", "timestamp_ticks", "sequence", "records": [(raw, decoded)]}
+    `. `sequence` is the marker's own `evidence_sequence` (event arg 0),
+    which spec section 10 documents as identifying the *transition*, not a
+    strictly increasing per-record counter for these bundles. Raises
+    `DecodeError` if any frame claimed by a breakaway marker fails to decode
+    as a breakaway record -- this also catches a foreign record family's
+    evidence being misrouted into a breakaway bundle by a reordered or
+    corrupt capture, since `decode_breakaway_record` rejects any payload that
+    isn't an exact tag/length match.
+    """
+    ticks: list[dict[str, Any]] = []
+    pending: list[bytes] = []
+    for frame_type, timestamp_ticks, raw_payload, decoded_payload in frames:
+        if frame_type == FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE:
+            pending.append(raw_payload)
+            continue
+        if frame_type != FRAME_TYPE_EVENT:
+            continue
+        if decoded_payload is None:
+            raise DecodeError("breakaway assembly requires a decoded event payload")
+        event_id = int(decoded_payload["event_id"])
+        if event_id not in BREAKAWAY_CAMPAIGN_EVENT_IDS:
+            pending = []
+            continue
+        # `request_commission_event` (usb_trace.rs) packs a commissioning
+        # event's four wire args as `[source_index, engine_kind,
+        # event.payload[0], event.payload[1]]`; for a breakaway marker,
+        # `event.payload[0]` is the `evidence_sequence` this function reports
+        # as `sequence`. This is the same convention `commissioning.py`
+        # already relies on (`source_index = args[0]`) -- the marker's own
+        # frame header carries a fixed "not applicable" source index
+        # (`SOURCE_KIND_BOARD`/`SOURCE_INDEX_NA`), never the real one.
+        args = decoded_payload.get("args") or []
+        sequence = int(args[2]) if len(args) > 2 else 0
+        records = [(raw, decode_breakaway_record(raw)) for raw in pending]
+        pending = []
+        ticks.append(
+            {
+                "event_id": event_id,
+                "timestamp_ticks": timestamp_ticks,
+                "sequence": sequence,
+                "records": records,
+            }
+        )
+    return ticks
 
 
 def _decode_control_detail(payload: bytes) -> dict[str, Any]:

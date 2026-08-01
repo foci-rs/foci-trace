@@ -46,12 +46,14 @@ from .protocol import (
     VELOCITY_OBSERVATION_FLAG_PID_VELOCITY_ACTUAL_VALID,
     VELOCITY_OBSERVATION_FLAG_PPTM_ACTUAL_VALID,
     DecodeError,
+    assemble_breakaway_ticks,
     decode_frame,
 )
 from .velocity_measurement import (
     VelocityMeasurementReport,
     VelocityObservation,
     analyze_velocity_observations,
+    audit_breakaway_campaign,
     audit_stage_b_reproduction_pair,
     audit_velocity_sweep,
     verify_scored_rest_selection,
@@ -337,6 +339,7 @@ class CaptureAnalysis:
     velocity_integral_audits: list[dict[str, object]] = field(default_factory=list)
     acceptance_matrix_audits: list[dict[str, object]] = field(default_factory=list)
     outer_safety_timing_audits: list[dict[str, object]] = field(default_factory=list)
+    breakaway_campaign_audits: list[dict[str, object]] = field(default_factory=list)
     corexy_plus: str | None = None
     corexy_minus: str | None = None
 
@@ -462,6 +465,16 @@ class _DeviceState:
     velocity_observations: list[_VelocityFrameObservation] = field(default_factory=list)
     velocity_sweep_evidence: list[_VelocitySweepEvidenceFrame] = field(default_factory=list)
     outer_safety_timing_markers: list[tuple[int, int, int, int]] = field(default_factory=list)
+    # `(source_index, frame_type, timestamp_ticks, raw_payload, decoded_payload)`
+    # for every `FRAME_TYPE_EVENT`/`FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE` frame,
+    # kept separately from `velocity_sweep_evidence` because breakaway-campaign
+    # records need `assemble_breakaway_ticks`'s marker-adjacency context to
+    # decode correctly (see `protocol.decode_breakaway_record`'s docstring on
+    # the one wire-tag collision) rather than the generic per-frame decode
+    # `velocity_sweep_evidence` already carries.
+    breakaway_frame_log: list[tuple[int, int, int, bytes, dict[str, object] | None]] = field(
+        default_factory=list
+    )
 
 
 @dataclass(frozen=True)
@@ -2251,6 +2264,72 @@ def _acceptance_matrix_audits(states: dict[int, _DeviceState]) -> list[dict[str,
     return audits
 
 
+def _breakaway_campaign_audits(states: dict[int, _DeviceState]) -> list[dict[str, object]]:
+    """Independently reconstruct every breakaway campaign in the capture.
+
+    Splits each source's `breakaway_frame_log` into `assemble_breakaway_ticks`
+    bundles, then partitions those ticks into individual campaigns on
+    `probe_plan` (event id 152, always a campaign's first tick) /
+    `campaign_terminal` (event id 159, always a campaign's last tick)
+    boundaries -- a capture can contain more than one campaign if
+    commissioning ran breakaway more than once. `motion_timestamps` for each
+    campaign's "motion before a plan" check comes from the same source's
+    already-tracked raw velocity observations, restricted to before the
+    campaign's own probe-plan marker (an observation from an *earlier*
+    campaign in the same capture must not be misread as premature motion for
+    a *later* one).
+    """
+    audits: list[dict[str, object]] = []
+    for device_index, state in sorted(states.items()):
+        by_source: dict[int, list[tuple[int, int, bytes, dict[str, object] | None]]] = {}
+        for (
+            source_index,
+            frame_type,
+            timestamp_ticks,
+            raw_payload,
+            decoded_payload,
+        ) in state.breakaway_frame_log:
+            by_source.setdefault(source_index, []).append(
+                (frame_type, timestamp_ticks, raw_payload, decoded_payload)
+            )
+        for source_index, frames in sorted(by_source.items()):
+            ticks = assemble_breakaway_ticks(frames)
+            campaigns: list[list[dict[str, object]]] = []
+            current: list[dict[str, object]] = []
+            for tick in ticks:
+                if tick["event_id"] == 152 and current:
+                    campaigns.append(current)
+                    current = []
+                current.append(tick)
+                if tick["event_id"] == 159:
+                    campaigns.append(current)
+                    current = []
+            if current:
+                campaigns.append(current)
+            for campaign_ticks in campaigns:
+                # `motion_timestamps` is deliberately left unset here rather
+                # than derived from `state.velocity_observations`: those
+                # observations aren't tagged with which commissioning phase
+                # produced them, and every phase before breakaway (velocity
+                # sweep, position tune, ...) legitimately moves the same
+                # source and predates this campaign's own probe plan. Without
+                # a verified phase-start boundary to bound the search, a
+                # naive "before this campaign's probe plan" filter would flag
+                # entirely legitimate prior-phase motion as a violation on
+                # every real multi-phase capture. The check itself is fully
+                # implemented and unit-tested in `audit_breakaway_campaign`
+                # (see `test_audit_breakaway_campaign_rejects_motion_before_a_plan`)
+                # for callers that can supply a correctly scoped window.
+                result = audit_breakaway_campaign(
+                    campaign_ticks, motion_timestamps=None, clock_hz=state.clock_hz
+                )
+                result["device_index"] = device_index
+                result["source_index"] = source_index
+                result["serial"] = state.report.serial or state.report.metadata_serial
+                audits.append(result)
+    return audits
+
+
 def _outer_safety_timing_audits(states: dict[int, _DeviceState]) -> list[dict[str, object]]:
     audits: list[dict[str, object]] = []
     for device_index, state in sorted(states.items()):
@@ -2412,6 +2491,15 @@ def analyze_capture(
                     payload=frame.payload,
                 )
             )
+            state.breakaway_frame_log.append(
+                (
+                    header.source_index,
+                    FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
+                    header.timestamp_ticks,
+                    frame.raw_payload,
+                    None,
+                )
+            )
         elif header.frame_type == FRAME_TYPE_CONTROL_DETAIL:
             _observe_control_detail(
                 state,
@@ -2439,6 +2527,23 @@ def analyze_capture(
                         int(args[3]),  # type: ignore[index]
                     )
                 )
+            # An event frame's own header carries a fixed "not applicable"
+            # source index (`SOURCE_KIND_BOARD`/`SOURCE_INDEX_NA` in
+            # usb_trace.rs); the real per-motor source index commissioning
+            # events are tied to rides in `args[0]` instead (the same
+            # convention `commissioning.py`'s `observe_event` already
+            # relies on).
+            event_args = frame.payload.get("args") or []
+            event_source_index = int(event_args[0]) if event_args else header.source_index
+            state.breakaway_frame_log.append(
+                (
+                    event_source_index,
+                    FRAME_TYPE_EVENT,
+                    header.timestamp_ticks,
+                    frame.raw_payload,
+                    frame.payload,
+                )
+            )
             commissioning.observe_event(record.device_index, header, frame.payload)
 
     decoupling_config = (
@@ -2496,6 +2601,7 @@ def analyze_capture(
         velocity_integral_audits=_velocity_integral_audits(states),
         acceptance_matrix_audits=_acceptance_matrix_audits(states),
         outer_safety_timing_audits=_outer_safety_timing_audits(states),
+        breakaway_campaign_audits=_breakaway_campaign_audits(states),
         corexy_plus=corexy_plus,
         corexy_minus=corexy_minus,
     )
