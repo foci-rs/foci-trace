@@ -73,13 +73,17 @@ EVENT_COMMISSION_BREAKAWAY_DISCOVERY_TERMINAL = 156
 EVENT_COMMISSION_BREAKAWAY_CONFIRMATION_PLAN = 157
 EVENT_COMMISSION_BREAKAWAY_CONFIRMATION_TERMINAL = 158
 EVENT_COMMISSION_BREAKAWAY_CAMPAIGN_TERMINAL = 159
+EVENT_COMMISSION_BREAKAWAY_RAW_OBSERVATION = 160
+EVENT_COMMISSION_BREAKAWAY_DISCOVERY_MARGIN = 161
 EVENT_COMMISSION_DIAGNOSTIC_WARNING = 200
 
-# Every breakaway-campaign marker event id (152-159), in phase-emission order.
-# The FTRC marker granularity is one `CommissionTraceEvent` per tick even when
-# a tick's bundle carries several canonical evidence records (spec section
-# 10) -- these ids are what the offline assembler uses to claim the raw
-# velocity-sweep-evidence frames immediately preceding each marker.
+# Every breakaway-campaign marker event id (152-161), in phase-emission order.
+# The FTRC marker granularity is one `CommissionTraceEvent` per tick -- these
+# ids are what the offline assembler uses to claim the raw velocity-sweep-
+# evidence frames immediately preceding each marker. Per-observation and
+# per-margin evidence stream on their own dedicated markers (160 raw
+# observation, 161 discovery margin), one record per tick, so the assembler must
+# recognize those markers or it silently discards the streamed records.
 BREAKAWAY_CAMPAIGN_EVENT_IDS = (
     EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN,
     EVENT_COMMISSION_BREAKAWAY_PROBE_DERIVED,
@@ -89,6 +93,8 @@ BREAKAWAY_CAMPAIGN_EVENT_IDS = (
     EVENT_COMMISSION_BREAKAWAY_CONFIRMATION_PLAN,
     EVENT_COMMISSION_BREAKAWAY_CONFIRMATION_TERMINAL,
     EVENT_COMMISSION_BREAKAWAY_CAMPAIGN_TERMINAL,
+    EVENT_COMMISSION_BREAKAWAY_RAW_OBSERVATION,
+    EVENT_COMMISSION_BREAKAWAY_DISCOVERY_MARGIN,
 )
 
 _LEVEL_NAMES = {

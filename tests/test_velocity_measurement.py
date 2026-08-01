@@ -3178,7 +3178,7 @@ class _BreakawayCampaignBuilder:
             ],
         }
 
-    def discovery_terminal_tick(
+    def discovery_ticks(
         self,
         *,
         sequence: int = 4,
@@ -3188,8 +3188,13 @@ class _BreakawayCampaignBuilder:
         margins: list[tuple[int, float, float]] | None = None,
         collected_count: int | None = None,
         omit_raw_evidence: bool = False,
-    ) -> dict:
-        """Build a discovery-terminal tick from `margins`.
+    ) -> list[dict]:
+        """Build the streamed discovery evidence ticks from `margins`.
+
+        Returns the wire-order tick sequence a real capture produces: each raw
+        observation on its own marker-160 tick, then each margin on its own
+        marker-161 tick, then the discovery-terminal tick (marker 156). The
+        per-observation and per-margin records no longer ride the terminal tick.
 
         `margins` is `(collected_index, response_percent, relative_se)`
         tuples in collection order. For each entry this generates a
@@ -3302,16 +3307,37 @@ class _BreakawayCampaignBuilder:
             collected_count,
             0,
         )
-        return {
-            "event_id": 156,
-            "timestamp_ticks": 4_000,
-            "sequence": sequence,
-            "records": [
-                *[_bw_record(r) for r in raw_records],
-                *[_bw_record(r) for r in margin_records],
-                _bw_record(terminal),
-            ],
-        }
+        # Each streamed record on its own marker tick, in wire order: raw
+        # observations (marker 160) as the walk collects each stroke, then the
+        # margins (marker 161) from StreamMargins, then the terminal (marker 156).
+        ticks: list[dict] = []
+        for raw in raw_records:
+            ticks.append(
+                {
+                    "event_id": 160,
+                    "timestamp_ticks": 3_500,
+                    "sequence": sequence,
+                    "records": [_bw_record(raw)],
+                }
+            )
+        for margin in margin_records:
+            ticks.append(
+                {
+                    "event_id": 161,
+                    "timestamp_ticks": 3_800,
+                    "sequence": sequence,
+                    "records": [_bw_record(margin)],
+                }
+            )
+        ticks.append(
+            {
+                "event_id": 156,
+                "timestamp_ticks": 4_000,
+                "sequence": sequence,
+                "records": [_bw_record(terminal)],
+            }
+        )
+        return ticks
 
     def confirmation_plan_tick(
         self,
@@ -3346,7 +3372,7 @@ class _BreakawayCampaignBuilder:
             "records": [_bw_record(raw)],
         }
 
-    def confirmation_terminal_tick(
+    def confirmation_ticks(
         self,
         *,
         sequence: int = 6,
@@ -3361,8 +3387,14 @@ class _BreakawayCampaignBuilder:
         direction_overrides: dict[int, int] | None = None,
         confirmed_p_raw_override: int | None = None,
         omit_raw_evidence: bool = False,
-    ) -> dict:
-        """Build a confirmation-terminal tick.
+    ) -> list[dict]:
+        """Build the confirmation evidence ticks.
+
+        Returns the wire-order tick sequence: each held-out stroke's raw
+        observation on its own marker-160 tick (phase == Confirmation), then the
+        confirmation-terminal tick (marker 158) carrying the reported
+        BandConfirmationObservation records and the terminal itself (these stay
+        bundled, as firmware emits them, and eight-plus-one fits the queue).
 
         Each of `observation_count` held-out strokes' raw evidence (a
         synthetic atom at `response_percent`, with a relative SE close to
@@ -3479,16 +3511,28 @@ class _BreakawayCampaignBuilder:
             self.required_se,
             0,
         )
-        return {
-            "event_id": 158,
-            "timestamp_ticks": 6_000,
-            "sequence": sequence,
-            "records": [
-                *[_bw_record(r) for r in raw_records],
-                *[_bw_record(r) for r in observations],
-                _bw_record(terminal),
-            ],
-        }
+        ticks: list[dict] = []
+        for raw in raw_records:
+            ticks.append(
+                {
+                    "event_id": 160,
+                    "timestamp_ticks": 5_800,
+                    "sequence": sequence,
+                    "records": [_bw_record(raw)],
+                }
+            )
+        ticks.append(
+            {
+                "event_id": 158,
+                "timestamp_ticks": 6_000,
+                "sequence": sequence,
+                "records": [
+                    *[_bw_record(r) for r in observations],
+                    _bw_record(terminal),
+                ],
+            }
+        )
+        return ticks
 
     def campaign_terminal_tick(
         self,
@@ -3522,9 +3566,9 @@ class _BreakawayCampaignBuilder:
             self.probe_plan_tick(),
             self.probe_derived_tick(),
             self.discovery_plan_tick(),
-            self.discovery_terminal_tick(),
+            *self.discovery_ticks(),
             self.confirmation_plan_tick(),
-            self.confirmation_terminal_tick(),
+            *self.confirmation_ticks(),
             self.campaign_terminal_tick(),
         ]
 
@@ -3635,7 +3679,7 @@ def test_audit_breakaway_campaign_accepts_a_non_nominatable_rung_leaving_a_colle
         builder.probe_plan_tick(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
-        builder.discovery_terminal_tick(
+        *builder.discovery_ticks(
             margins=[
                 (0, 71_000, 76_000),
                 (1, 74_000, 79_000),
@@ -3644,20 +3688,57 @@ def test_audit_breakaway_campaign_accepts_a_non_nominatable_rung_leaving_a_colle
             collected_count=4,
         ),
         builder.confirmation_plan_tick(),
-        builder.confirmation_terminal_tick(),
+        *builder.confirmation_ticks(),
         builder.campaign_terminal_tick(),
     ]
     result = audit_breakaway_campaign(ticks)
     assert result["matches_firmware"] is True, result["mismatches"]
-    discovery_terminal_tick = next(tick for tick in ticks if tick["event_id"] == 156)
     margin_records = [
         decoded
-        for _raw, decoded in discovery_terminal_tick["records"]
+        for tick in ticks
+        if tick["event_id"] == 161
+        for _raw, decoded in tick["records"]
         if decoded["record_kind"] == "breakaway_discovery_rung_margin"
     ]
     by_collected_index = {int(record["collected_index"]): record for record in margin_records}
     assert set(by_collected_index) == {0, 1, 3}
     assert by_collected_index[3]["adjacent_rate_step_permille"] == 0
+
+
+def _bw_raw_observation_tick(
+    builder: "_BreakawayCampaignBuilder", phase: int, *, sequence: int = 99
+) -> dict:
+    """A single streamed raw-observation marker-160 tick for `phase` (1 =
+    discovery, 2 = confirmation)."""
+    atom = _bw_synthetic_atom(75.0, 0.01, 0)
+    digest = builder.discovery_digest if phase == 1 else builder.confirmation_digest
+    raw = _bw_raw_observation(builder.run_sequence, sequence, digest, phase, 0, 0, 0, *atom)
+    return {
+        "event_id": 160,
+        "timestamp_ticks": 5_500,
+        "sequence": sequence,
+        "records": [_bw_record(raw)],
+    }
+
+
+def test_audit_breakaway_campaign_ranks_a_raw_observation_marker_by_its_phase() -> None:
+    """The shared raw-observation marker (160) is ranked from its record's phase,
+    not a fixed table entry: a discovery-phase stroke arriving after the
+    confirmation plan is a phase reordering. (A confirmation-phase stroke there is
+    normal, as the accepted-campaign fixtures already exercise.)"""
+    builder = _BreakawayCampaignBuilder()
+    ticks = [
+        builder.probe_plan_tick(),
+        builder.probe_derived_tick(),
+        builder.discovery_plan_tick(),
+        *builder.discovery_ticks(),
+        builder.confirmation_plan_tick(),
+        _bw_raw_observation_tick(builder, 1),  # a discovery stroke, out of order
+        *builder.confirmation_ticks(),
+        builder.campaign_terminal_tick(),
+    ]
+    with pytest.raises(ValueError, match="phases are reordered"):
+        audit_breakaway_campaign(ticks)
 
 
 def test_audit_breakaway_campaign_flags_a_workflow_duration_over_its_reserved_budget() -> None:
@@ -3666,9 +3747,9 @@ def test_audit_breakaway_campaign_flags_a_workflow_duration_over_its_reserved_bu
         builder.probe_plan_tick(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
-        builder.discovery_terminal_tick(),
+        *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
-        builder.confirmation_terminal_tick(),
+        *builder.confirmation_ticks(),
         # 500,000,000 ticks at 1 MHz is 500 s, past the 400 s reserved envelope.
         builder.campaign_terminal_tick(timestamp_ticks=500_001_000),
     ]
@@ -3685,9 +3766,9 @@ def test_audit_breakaway_campaign_rejects_reordered_phases() -> None:
         builder.probe_plan_tick(),
         builder.discovery_plan_tick(),
         builder.probe_derived_tick(),  # probe after discovery: reordered
-        builder.discovery_terminal_tick(),
+        *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
-        builder.confirmation_terminal_tick(),
+        *builder.confirmation_ticks(),
         builder.campaign_terminal_tick(),
     ]
     with pytest.raises(ValueError, match="reordered"):
@@ -3707,9 +3788,9 @@ def test_audit_breakaway_campaign_rejects_a_digest_chain_break() -> None:
         builder.probe_plan_tick(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(prior_plan_digest=0xBAD_D1CE57),
-        builder.discovery_terminal_tick(),
+        *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
-        builder.confirmation_terminal_tick(),
+        *builder.confirmation_ticks(),
         builder.campaign_terminal_tick(),
     ]
     with pytest.raises(ValueError, match="chain"):
@@ -3722,9 +3803,9 @@ def test_audit_breakaway_campaign_rejects_a_family_four_one_rung_confirmation() 
         builder.probe_plan_tick(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
-        builder.discovery_terminal_tick(),
+        *builder.discovery_ticks(),
         builder.confirmation_plan_tick(family_size=4),
-        builder.confirmation_terminal_tick(),
+        *builder.confirmation_ticks(),
         builder.campaign_terminal_tick(),
     ]
     with pytest.raises(ValueError, match="family_size"):
@@ -3737,9 +3818,9 @@ def test_audit_breakaway_campaign_rejects_an_accepted_confirmation_with_incomple
         builder.probe_plan_tick(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
-        builder.discovery_terminal_tick(),
+        *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
-        builder.confirmation_terminal_tick(masks=(0b0111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111)),
+        *builder.confirmation_ticks(masks=(0b0111, 0b1111, 0b1111, 0b1111, 0b1111, 0b1111)),
         builder.campaign_terminal_tick(),
     ]
     with pytest.raises(ValueError, match="incomplete"):
@@ -3767,9 +3848,9 @@ def test_audit_breakaway_campaign_rejects_an_accepted_confirmation_with_a_raw_in
         builder.probe_plan_tick(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
-        builder.discovery_terminal_tick(),
+        *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
-        builder.confirmation_terminal_tick(response_percent=69.0),
+        *builder.confirmation_ticks(response_percent=69.0),
         builder.campaign_terminal_tick(),
     ]
     result = audit_breakaway_campaign(ticks)
@@ -3790,9 +3871,9 @@ def test_audit_breakaway_campaign_rejects_a_confirmed_p_that_does_not_match_the_
         builder.probe_plan_tick(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
-        builder.discovery_terminal_tick(),
+        *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
-        builder.confirmation_terminal_tick(confirmed_p_raw_override=builder.candidate_p_raw + 1),
+        *builder.confirmation_ticks(confirmed_p_raw_override=builder.candidate_p_raw + 1),
         builder.campaign_terminal_tick(),
     ]
     result = audit_breakaway_campaign(ticks)
@@ -3814,9 +3895,9 @@ def test_audit_breakaway_campaign_rejects_a_wrong_confirmation_slot_schedule() -
         builder.probe_plan_tick(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
-        builder.discovery_terminal_tick(),
+        *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
-        builder.confirmation_terminal_tick(direction_overrides={0: 1}),
+        *builder.confirmation_ticks(direction_overrides={0: 1}),
         builder.campaign_terminal_tick(),
     ]
     result = audit_breakaway_campaign(ticks)
@@ -3836,9 +3917,9 @@ def test_audit_breakaway_campaign_rejects_an_accepted_confirmation_missing_raw_e
         builder.probe_plan_tick(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
-        builder.discovery_terminal_tick(),
+        *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
-        builder.confirmation_terminal_tick(omit_raw_evidence=True),
+        *builder.confirmation_ticks(omit_raw_evidence=True),
         builder.campaign_terminal_tick(),
     ]
     result = audit_breakaway_campaign(ticks)
@@ -3852,11 +3933,11 @@ def test_audit_breakaway_campaign_rejects_a_second_candidate_after_failure() -> 
         builder.probe_plan_tick(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
-        builder.discovery_terminal_tick(),
+        *builder.discovery_ticks(),
         builder.confirmation_plan_tick(sequence=5),
-        builder.confirmation_terminal_tick(sequence=6, accepted=0, terminal_cause=15),
+        *builder.confirmation_ticks(sequence=6, accepted=0, terminal_cause=15),
         builder.confirmation_plan_tick(sequence=8),
-        builder.confirmation_terminal_tick(sequence=9, accepted=0, terminal_cause=15),
+        *builder.confirmation_ticks(sequence=9, accepted=0, terminal_cause=15),
         builder.campaign_terminal_tick(accepted=0, terminal_cause=15, stage_c_plan_digest=0),
     ]
     with pytest.raises(ValueError, match="second confirmation candidate"):
@@ -3869,9 +3950,9 @@ def test_audit_breakaway_campaign_rejects_stage_c_after_unsuccessful_confirmatio
         builder.probe_plan_tick(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
-        builder.discovery_terminal_tick(),
+        *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
-        builder.confirmation_terminal_tick(accepted=0, terminal_cause=15),
+        *builder.confirmation_ticks(accepted=0, terminal_cause=15),
         # Campaign terminal falsely claims accept despite the failed confirmation.
         builder.campaign_terminal_tick(accepted=1, terminal_cause=21),
     ]
@@ -3886,9 +3967,9 @@ def test_audit_breakaway_campaign_flags_a_wrong_reported_digest_as_a_mismatch_no
         builder.probe_plan_tick(plan_digest=builder.probe_digest ^ 0xFF),
         builder.probe_derived_tick(plan_digest=builder.probe_digest ^ 0xFF),
         builder.discovery_plan_tick(prior_plan_digest=builder.probe_digest ^ 0xFF),
-        builder.discovery_terminal_tick(prior_plan_digest=builder.probe_digest ^ 0xFF),
+        *builder.discovery_ticks(prior_plan_digest=builder.probe_digest ^ 0xFF),
         builder.confirmation_plan_tick(),
-        builder.confirmation_terminal_tick(),
+        *builder.confirmation_ticks(),
         builder.campaign_terminal_tick(),
     ]
     result = audit_breakaway_campaign(ticks)
@@ -3927,7 +4008,7 @@ def test_audit_breakaway_campaign_reports_target_band_skipped_from_a_real_discov
         builder.probe_plan_tick(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
-        builder.discovery_terminal_tick(terminal_cause=7, margins=[]),
+        *builder.discovery_ticks(terminal_cause=7, margins=[]),
         builder.campaign_terminal_tick(
             phase=1, terminal_cause=7, accepted=0, stage_c_plan_digest=0
         ),

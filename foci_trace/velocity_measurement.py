@@ -5529,11 +5529,16 @@ BREAKAWAY_EVENT_ID_NAMES = {
     157: "confirmation_plan",
     158: "confirmation_terminal",
     159: "campaign_terminal",
+    160: "raw_observation",
+    161: "discovery_rung_margin",
 }
 
 # Phase rank per marker event id: probe (0) must never follow discovery (1),
 # which must never follow confirmation (2); the campaign terminal (3) is
-# always the campaign's last tick, from any phase.
+# always the campaign's last tick, from any phase. The raw-observation marker
+# (160) is shared by discovery and confirmation strokes, so its rank is not
+# fixed here -- `_bw_tick_phase_rank` resolves it from the streamed record's own
+# `phase` field. The discovery-margin marker (161) is discovery-only.
 _BW_EVENT_PHASE_RANK = {
     152: 0,
     153: 0,
@@ -5543,7 +5548,50 @@ _BW_EVENT_PHASE_RANK = {
     157: 2,
     158: 2,
     159: 3,
+    161: 1,
 }
+
+# Raw-observation record `phase` field values (BreakawayPhase as u8): the
+# streamed marker-160 tick belongs to whichever phase its record names.
+_BW_RAW_OBSERVATION_PHASE_DISCOVERY = 1
+_BW_RAW_OBSERVATION_PHASE_CONFIRMATION = 2
+
+
+def _bw_tick_phase_rank(tick: dict[str, object]) -> int:
+    """Phase rank of one marker tick, resolving the shared raw-observation
+    marker (160) from its record's `phase` field: a discovery stroke ranks with
+    discovery (1), a confirmation stroke with confirmation (2)."""
+    event_id = tick["event_id"]
+    if event_id == 160:
+        observations = _bw_tick_records_by_kind(tick, "breakaway_raw_observation")
+        phase = int(observations[0]["phase"]) if observations else 0
+        return 2 if phase == _BW_RAW_OBSERVATION_PHASE_CONFIRMATION else 1
+    return _BW_EVENT_PHASE_RANK[event_id]
+
+
+def _bw_collect_raw_observations(
+    ticks: list[dict[str, object]], phase: int
+) -> list[dict[str, object]]:
+    """Every streamed raw observation of one phase, in stream order, gathered
+    across the dedicated marker-160 ticks (one record per tick)."""
+    return [
+        record
+        for tick in ticks
+        if tick["event_id"] == 160
+        for record in _bw_tick_records_by_kind(tick, "breakaway_raw_observation")
+        if int(record["phase"]) == phase
+    ]
+
+
+def _bw_collect_margins(ticks: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Every streamed discovery rung margin, in stream order, gathered across
+    the dedicated marker-161 ticks (one record per tick)."""
+    return [
+        record
+        for tick in ticks
+        if tick["event_id"] == 161
+        for record in _bw_tick_records_by_kind(tick, "breakaway_discovery_rung_margin")
+    ]
 
 
 def _bw_fnv1a_extend(digest: int, value: int, byte_width: int) -> int:
@@ -5862,7 +5910,7 @@ def audit_breakaway_campaign(
         )
     previous_rank = -1
     for tick in ticks[:-1]:
-        rank = _BW_EVENT_PHASE_RANK[tick["event_id"]]
+        rank = _bw_tick_phase_rank(tick)
         if rank < previous_rank:
             raise ValueError(
                 "breakaway campaign phases are reordered: "
@@ -6033,8 +6081,11 @@ def audit_breakaway_campaign(
             raise ValueError("breakaway discovery terminal does not chain to its own plan digest")
         if int(discovery_terminal["prior_plan_digest"]) != int(probe_planned["plan_digest"]):
             raise ValueError("breakaway discovery terminal does not chain to the probe plan digest")
+        # Margins stream one per tick on their own marker (161), not bundled
+        # into this terminal tick; gather them across the campaign and order by
+        # collected index.
         margin_records = sorted(
-            _bw_tick_records_by_kind(discovery_terminal_tick, "breakaway_discovery_rung_margin"),
+            _bw_collect_margins(ticks),
             key=lambda record: int(record["collected_index"]),
         )
         # `rung_nomination_bounds` (band_confirmation.rs:306-325) can return
@@ -6059,23 +6110,19 @@ def audit_breakaway_campaign(
         # evidence -- the `breakaway_discovery_rung_margin` check just above
         # only verifies `M_i`/half-width are correctly *derived from* those
         # reported bounds, never that the bounds themselves are honest. Group
-        # this tick's raw `BreakawayRawObservation` records (streamed one per
-        # collected stroke, phase == Discovery) by ladder rung_index, fold
-        # each rung's octet through the SAME nomination formula the firmware
-        # uses (multiplier m(8), `NOMINATION_SCREEN_C_SIGMA`, outward
-        # rounding -- see `_bw_rung_response_bounds_percent`'s own doc comment
-        # for the one modeling gap, depth-three `included_mask` exclusion,
-        # this cannot replicate), and compare the recomputed bounds against
-        # the firmware-reported ones. A rung whose p_raw doesn't land on the
-        # independently regenerated ladder, or whose raw evidence disagrees
+        # the streamed discovery `BreakawayRawObservation` records (one per
+        # collected stroke on marker 160, phase == Discovery) by ladder
+        # rung_index, fold each rung's octet through the SAME nomination formula
+        # the firmware uses (multiplier m(8), `NOMINATION_SCREEN_C_SIGMA`,
+        # outward rounding -- see `_bw_rung_response_bounds_percent`'s own doc
+        # comment for the one modeling gap, depth-three `included_mask`
+        # exclusion, this cannot replicate), and compare the recomputed bounds
+        # against the firmware-reported ones. A rung whose p_raw doesn't land on
+        # the independently regenerated ladder, or whose raw evidence disagrees
         # with the reported bounds, is a mismatch.
-        raw_discovery_observations = [
-            decoded
-            for decoded in _bw_tick_records_by_kind(
-                discovery_terminal_tick, "breakaway_raw_observation"
-            )
-            if int(decoded["phase"]) == 1
-        ]
+        raw_discovery_observations = _bw_collect_raw_observations(
+            ticks, _BW_RAW_OBSERVATION_PHASE_DISCOVERY
+        )
         for observation in raw_discovery_observations:
             if int(observation["plan_digest"]) != int(discovery_planned["plan_digest"]):
                 raise ValueError(
@@ -6287,10 +6334,9 @@ def audit_breakaway_campaign(
         # `matches_firmware=True`. It cannot now.
         raw_confirmation_observations = {
             int(decoded["slot_index"]): decoded
-            for decoded in _bw_tick_records_by_kind(
-                confirmation_terminal_ticks[0], "breakaway_raw_observation"
+            for decoded in _bw_collect_raw_observations(
+                ticks, _BW_RAW_OBSERVATION_PHASE_CONFIRMATION
             )
-            if int(decoded["phase"]) == 2
         }
         for observation in raw_confirmation_observations.values():
             if int(observation["plan_digest"]) != int(confirmation_terminal["plan_digest"]):
