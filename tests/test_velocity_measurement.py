@@ -3122,18 +3122,46 @@ class _BreakawayCampaignBuilder:
         prior_plan_digest: int | None = None,
         terminal_cause: int = 0,
         margins: list[tuple[int, int, int]] | None = None,
+        collected_count: int | None = None,
     ) -> dict:
+        """Build a discovery-terminal tick from `margins`.
+
+        `margins` is `(collected_index, lower_percent_milli,
+        upper_percent_milli)` tuples in collection order. A gap in
+        `collected_index` (e.g. `[(0, ...), (1, ...), (3, ...)]`, skipping 2)
+        is realistic firmware behavior, not a test-only shape: `rung_
+        nomination_bounds` (band_confirmation.rs:306-325) can mark a
+        genuinely in-band, genuinely collected rung `nominatable: false`, and
+        `discovery_rung_margin_report` (breakaway_reporting.rs:416-417) then
+        emits no wire record for it at all -- so `collected_count` (passed
+        separately here; defaults to `len(margins)` when every collected
+        rung was nominatable) can legitimately exceed the number of emitted
+        margin records. `adjacent_rate_step_permille` mirrors firmware's own
+        rule exactly (breakaway_reporting.rs:426-439): nonzero only when this
+        record's `collected_index` is the IMMEDIATE successor of the
+        previous *emitted* record's `collected_index`; a gap resets it to 0
+        rather than stepping across the missing rung.
+        """
         digest = self.discovery_digest if plan_digest is None else plan_digest
         prior = self.probe_digest if prior_plan_digest is None else prior_plan_digest
         if margins is None:
             margins = [(0, 71_000, 76_000), (1, 74_000, 79_000)]
+        if collected_count is None:
+            collected_count = len(margins)
         margin_records = []
         previous_mid: int | None = None
+        previous_collected_index: int | None = None
         for collected_index, lower, upper in margins:
             margin, half_width = breakaway_discovery_rung_margin(lower, upper)
             mid = (lower + upper) // 2
-            step = 0 if previous_mid is None else mid - previous_mid
+            step = (
+                mid - previous_mid
+                if previous_collected_index is not None
+                and collected_index == previous_collected_index + 1
+                else 0
+            )
             previous_mid = mid
+            previous_collected_index = collected_index
             p_raw = self.ladder["gains"][
                 collected_index + self.ladder["gains"].index(self.breakaway_raw)
             ]
@@ -3162,7 +3190,7 @@ class _BreakawayCampaignBuilder:
             prior,
             self.ladder["confidence_family_size"],
             terminal_cause,
-            len(margins),
+            collected_count,
             0,
         )
         return {
@@ -3385,6 +3413,51 @@ def test_audit_breakaway_campaign_accepts_a_self_consistent_campaign() -> None:
     assert result["discovery_planned"]["rung_count"] == 32
     assert result["workflow_duration_ticks"] == 6_000
     assert result["workflow_duration_ms"] == pytest.approx(6.0)
+
+
+def test_audit_breakaway_campaign_accepts_a_non_nominatable_rung_leaving_a_collected_index_gap() -> (
+    None
+):
+    """A genuinely in-band rung that isn't nominatable emits no wire record at
+    all (`discovery_rung_margin_report`, breakaway_reporting.rs:416-417), so
+    `collected_index` can skip a value while `collected_count`
+    (breakaway_reporting.rs:521) still counts it. That is real firmware
+    behavior, not a corrupt capture, and must not be reported as a mismatch.
+
+    Four rungs were collected in-band (collected_count=4); rung at
+    collected_index 2 was in-band but not nominatable and so is absent from
+    the wire. The record at collected_index 3 must show `adjacent_rate_step_
+    permille == 0`, because its immediate predecessor position (2) is the
+    missing one -- not a step measured against collected_index 1.
+    """
+    builder = _BreakawayCampaignBuilder()
+    ticks = [
+        builder.probe_plan_tick(),
+        builder.probe_derived_tick(),
+        builder.discovery_plan_tick(),
+        builder.discovery_terminal_tick(
+            margins=[
+                (0, 71_000, 76_000),
+                (1, 74_000, 79_000),
+                (3, 73_000, 78_000),
+            ],
+            collected_count=4,
+        ),
+        builder.confirmation_plan_tick(),
+        builder.confirmation_terminal_tick(),
+        builder.campaign_terminal_tick(),
+    ]
+    result = audit_breakaway_campaign(ticks)
+    assert result["matches_firmware"] is True, result["mismatches"]
+    discovery_terminal_tick = next(tick for tick in ticks if tick["event_id"] == 156)
+    margin_records = [
+        decoded
+        for _raw, decoded in discovery_terminal_tick["records"]
+        if decoded["record_kind"] == "breakaway_discovery_rung_margin"
+    ]
+    by_collected_index = {int(record["collected_index"]): record for record in margin_records}
+    assert set(by_collected_index) == {0, 1, 3}
+    assert by_collected_index[3]["adjacent_rate_step_permille"] == 0
 
 
 def test_audit_breakaway_campaign_flags_a_workflow_duration_over_its_reserved_budget() -> None:

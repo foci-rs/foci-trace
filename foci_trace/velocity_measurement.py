@@ -5621,6 +5621,12 @@ def breakaway_required_relative_se_permille() -> int:
     """Port of `confirmation_evaluated_terminal_report`'s `required_relative_se`
     (breakaway_reporting.rs): `REQUIRED_HALF_WIDTH_FRACTION / m(8)`, rounded to
     permille exactly as `relative_se_to_permille` does.
+
+    Latent precision note: firmware rounds with `libm::roundf` (round-half-
+    away-from-zero, `f32`); this uses Python's `round()` (banker's rounding,
+    `f64`). For this specific value (~0.020991, nowhere near a `x.5`
+    boundary) the two cannot disagree, but a future constant landing exactly
+    on a half-permille boundary could expose the difference.
     """
     value = _BW_REQUIRED_HALF_WIDTH_FRACTION / _BW_CONFIRMATION_MULTIPLIER_95_DF15
     scaled = round(value * 1_000)
@@ -5854,12 +5860,23 @@ def audit_breakaway_campaign(
             _bw_tick_records_by_kind(discovery_terminal_tick, "breakaway_discovery_rung_margin"),
             key=lambda record: int(record["collected_index"]),
         )
-        if len(margin_records) != int(discovery_terminal["collected_count"]):
+        # `rung_nomination_bounds` (band_confirmation.rs:306-325) can return
+        # `nominatable: false` for a genuinely in-band rung (either
+        # direction's pooled interval isn't judgeable); `discovery_rung_
+        # margin_report` (breakaway_reporting.rs:416-417) then emits no wire
+        # record for that `collected_index` at all, while `collected_count`
+        # (breakaway_reporting.rs:521) still counts it. So a gap in
+        # `collected_index` is normal, wire-invisible firmware behavior, not
+        # a capture defect: the wire evidence alone cannot distinguish "N
+        # collected, all nominatable" from "N+k collected, k not
+        # nominatable" -- only `<=` is checkable, not exact equality.
+        if len(margin_records) > int(discovery_terminal["collected_count"]):
             mismatches.append(
-                "discovery collected_count: firmware=%d offline=%d"
+                "discovery collected_count: firmware=%d offline has more margin records (%d)"
                 % (discovery_terminal["collected_count"], len(margin_records))
             )
         previous_mid: int | None = None
+        previous_collected_index: int | None = None
         for record in margin_records:
             expected_margin, expected_half_width = breakaway_discovery_rung_margin(
                 int(record["lower_percent_milli"]), int(record["upper_percent_milli"])
@@ -5879,7 +5896,20 @@ def audit_breakaway_campaign(
                     )
                 )
             mid = (int(record["lower_percent_milli"]) + int(record["upper_percent_milli"])) // 2
-            expected_step = 0 if previous_mid is None else mid - previous_mid
+            collected_index = int(record["collected_index"])
+            # `discovery_rung_margin_report` (breakaway_reporting.rs:426-439)
+            # only computes a nonzero step against the IMMEDIATE predecessor
+            # position (`collected_index - 1`); when that specific
+            # predecessor wasn't nominatable (a wire-invisible gap, see
+            # above) it defaults to 0, even though a nominatable rung exists
+            # further back. Comparing against the previous *emitted* record
+            # unconditionally would compute a step across the gap instead.
+            expected_step = (
+                mid - previous_mid
+                if previous_collected_index is not None
+                and collected_index == previous_collected_index + 1
+                else 0
+            )
             if expected_step != int(record["adjacent_rate_step_permille"]):
                 mismatches.append(
                     "discovery adjacent_rate_step_permille (collected_index=%d): "
@@ -5891,6 +5921,7 @@ def audit_breakaway_campaign(
                     )
                 )
             previous_mid = mid
+            previous_collected_index = collected_index
 
     confirmation_plan_ticks = [tick for tick in ticks if tick["event_id"] == 157]
     confirmation_terminal_ticks = [tick for tick in ticks if tick["event_id"] == 158]

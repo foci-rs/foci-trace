@@ -2920,3 +2920,193 @@ def test_analyze_capture_reconstructs_a_breakaway_campaign_from_ftrc_frames() ->
     assert audit["matches_firmware"] is True
     assert audit["phase_sequence"] == ["probe_plan", "probe_terminal", "campaign_terminal"]
     assert audit["confirmation_accepted"] is False
+
+
+def test_analyze_capture_rejects_in_phase_motion_before_the_breakaway_probe_plan() -> None:
+    """Motion inside the campaign's own commissioning phase, before its probe
+    plan, is refused end to end -- not just at the `audit_breakaway_campaign`
+    unit level.
+    """
+    from foci_trace.velocity_measurement import breakaway_probe_plan_digest
+
+    search_grid = [2, 3, 4, 6, 8]
+    family_size = 16
+    max_observations = 8
+    probe_digest = breakaway_probe_plan_digest(search_grid, family_size, max_observations)
+
+    def bw_event_payload(event_id: int, sequence: int) -> bytes:
+        return struct.pack(
+            "<BBHBxxxiiii", 1, SUBSYSTEM_COMMISSIONING, event_id, 4, 0, 1, sequence, 0
+        )
+
+    probe_planned = bytes([0]) + struct.pack(
+        "<IHQHBBHH", 7, 1, probe_digest, family_size, max_observations, len(search_grid), 2, 8
+    )
+    probe_terminal = bytes([2]) + struct.pack("<IHQHBB", 7, 2, probe_digest, family_size, 1, 0)
+    campaign_terminal = bytes([12]) + struct.pack("<IHBBBQ", 7, 3, 0, 1, 0, 0)
+
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+
+    engine_start = _commission_event_payload(
+        EVENT_COMMISSION_ENGINE_START, source_index=0, engine_kind=4, arg2=0, arg3=1
+    )
+    writer.write_firmware_frame(
+        0, 100, _header(FRAME_TYPE_EVENT, engine_start, 1, 100, 255, 255) + engine_start
+    )
+    phase_start = _commission_event_payload(
+        EVENT_COMMISSION_PHASE_START, source_index=0, engine_kind=4, arg2=10, arg3=1
+    )
+    writer.write_firmware_frame(
+        0, 200, _header(FRAME_TYPE_EVENT, phase_start, 2, 200, 255, 255) + phase_start
+    )
+
+    # Motion inside the same phase, before the probe plan below.
+    feedback = _velocity_observation_payload(11, 6, elapsed_us=1_000, stroke_index=0, direction=1)
+    writer.write_firmware_frame(
+        0, 300, _header(FRAME_TYPE_VELOCITY_OBSERVATION, feedback, 3, 300, 1, 0) + feedback
+    )
+
+    writer.write_firmware_frame(
+        0,
+        1_000,
+        _header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, probe_planned, 4, 1_000, 1, 0) + probe_planned,
+    )
+    marker_plan = bw_event_payload(152, 1)
+    writer.write_firmware_frame(
+        0, 1_100, _header(FRAME_TYPE_EVENT, marker_plan, 5, 1_100, 255, 255) + marker_plan
+    )
+    writer.write_firmware_frame(
+        0,
+        2_000,
+        _header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, probe_terminal, 6, 2_000, 1, 0)
+        + probe_terminal,
+    )
+    marker_probe_terminal = bw_event_payload(154, 2)
+    writer.write_firmware_frame(
+        0,
+        2_100,
+        _header(FRAME_TYPE_EVENT, marker_probe_terminal, 7, 2_100, 255, 255)
+        + marker_probe_terminal,
+    )
+    writer.write_firmware_frame(
+        0,
+        3_000,
+        _header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, campaign_terminal, 8, 3_000, 1, 0)
+        + campaign_terminal,
+    )
+    marker_campaign_terminal = bw_event_payload(159, 3)
+    writer.write_firmware_frame(
+        0,
+        3_100,
+        _header(FRAME_TYPE_EVENT, marker_campaign_terminal, 9, 3_100, 255, 255)
+        + marker_campaign_terminal,
+    )
+
+    with pytest.raises(ValueError, match="motion"):
+        analyze_capture(io.BytesIO(output.getvalue()), steady_after_s=0)
+
+
+def test_analyze_capture_does_not_flag_prior_phase_motion_as_premature() -> None:
+    """Motion in an earlier commissioning phase must not be misread as
+    premature motion for a later breakaway campaign in the same capture --
+    the false-positive risk the phase-scoped bound (see
+    `_breakaway_campaign_phase_start_ticks`) exists specifically to avoid.
+    """
+    from foci_trace.velocity_measurement import breakaway_probe_plan_digest
+
+    search_grid = [2, 3, 4, 6, 8]
+    family_size = 16
+    max_observations = 8
+    probe_digest = breakaway_probe_plan_digest(search_grid, family_size, max_observations)
+
+    def bw_event_payload(event_id: int, sequence: int) -> bytes:
+        return struct.pack(
+            "<BBHBxxxiiii", 1, SUBSYSTEM_COMMISSIONING, event_id, 4, 0, 1, sequence, 0
+        )
+
+    probe_planned = bytes([0]) + struct.pack(
+        "<IHQHBBHH", 7, 1, probe_digest, family_size, max_observations, len(search_grid), 2, 8
+    )
+    probe_terminal = bytes([2]) + struct.pack("<IHQHBB", 7, 2, probe_digest, family_size, 1, 0)
+    campaign_terminal = bytes([12]) + struct.pack("<IHBBBQ", 7, 3, 0, 1, 0, 0)
+
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+
+    engine_start = _commission_event_payload(
+        EVENT_COMMISSION_ENGINE_START, source_index=0, engine_kind=4, arg2=0, arg3=1
+    )
+    writer.write_firmware_frame(
+        0, 10, _header(FRAME_TYPE_EVENT, engine_start, 1, 10, 255, 255) + engine_start
+    )
+    earlier_phase_start = _commission_event_payload(
+        EVENT_COMMISSION_PHASE_START, source_index=0, engine_kind=4, arg2=9, arg3=1
+    )
+    writer.write_firmware_frame(
+        0, 20, _header(FRAME_TYPE_EVENT, earlier_phase_start, 2, 20, 255, 255) + earlier_phase_start
+    )
+
+    # Legitimate motion during the earlier phase (e.g. mechanical id).
+    feedback = _velocity_observation_payload(11, 6, elapsed_us=1_000, stroke_index=0, direction=1)
+    writer.write_firmware_frame(
+        0, 50, _header(FRAME_TYPE_VELOCITY_OBSERVATION, feedback, 3, 50, 1, 0) + feedback
+    )
+
+    earlier_phase_end = _commission_event_payload(
+        EVENT_COMMISSION_PHASE_END, source_index=0, engine_kind=4, arg2=9, arg3=0
+    )
+    writer.write_firmware_frame(
+        0, 90, _header(FRAME_TYPE_EVENT, earlier_phase_end, 4, 90, 255, 255) + earlier_phase_end
+    )
+    breakaway_phase_start = _commission_event_payload(
+        EVENT_COMMISSION_PHASE_START, source_index=0, engine_kind=4, arg2=10, arg3=2
+    )
+    writer.write_firmware_frame(
+        0,
+        100,
+        _header(FRAME_TYPE_EVENT, breakaway_phase_start, 5, 100, 255, 255) + breakaway_phase_start,
+    )
+
+    writer.write_firmware_frame(
+        0,
+        1_000,
+        _header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, probe_planned, 6, 1_000, 1, 0) + probe_planned,
+    )
+    marker_plan = bw_event_payload(152, 1)
+    writer.write_firmware_frame(
+        0, 1_100, _header(FRAME_TYPE_EVENT, marker_plan, 7, 1_100, 255, 255) + marker_plan
+    )
+    writer.write_firmware_frame(
+        0,
+        2_000,
+        _header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, probe_terminal, 8, 2_000, 1, 0)
+        + probe_terminal,
+    )
+    marker_probe_terminal = bw_event_payload(154, 2)
+    writer.write_firmware_frame(
+        0,
+        2_100,
+        _header(FRAME_TYPE_EVENT, marker_probe_terminal, 9, 2_100, 255, 255)
+        + marker_probe_terminal,
+    )
+    writer.write_firmware_frame(
+        0,
+        3_000,
+        _header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, campaign_terminal, 10, 3_000, 1, 0)
+        + campaign_terminal,
+    )
+    marker_campaign_terminal = bw_event_payload(159, 3)
+    writer.write_firmware_frame(
+        0,
+        3_100,
+        _header(FRAME_TYPE_EVENT, marker_campaign_terminal, 11, 3_100, 255, 255)
+        + marker_campaign_terminal,
+    )
+
+    analysis = analyze_capture(io.BytesIO(output.getvalue()), steady_after_s=0)
+
+    assert len(analysis.breakaway_campaign_audits) == 1
+    assert analysis.breakaway_campaign_audits[0]["matches_firmware"] is True

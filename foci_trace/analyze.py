@@ -2264,7 +2264,39 @@ def _acceptance_matrix_audits(states: dict[int, _DeviceState]) -> list[dict[str,
     return audits
 
 
-def _breakaway_campaign_audits(states: dict[int, _DeviceState]) -> list[dict[str, object]]:
+def _breakaway_campaign_phase_start_ticks(
+    commissioning_report: CommissioningCaptureReport,
+    device_index: int,
+    source_index: int,
+    probe_plan_ticks: int,
+) -> int | None:
+    """Find the start of the commissioning phase containing `probe_plan_ticks`.
+
+    Every phase before breakaway (velocity sweep, position tune, ...)
+    legitimately moves the same source and predates the campaign's own probe
+    plan, so bounding a "motion before a plan" search to "anything before
+    this timestamp" would flag ordinary prior-phase motion. Scoping it to
+    *this campaign's own phase* instead (found via `CommissioningRun.phases`,
+    each an observed `[start_ticks, end_ticks)` span) avoids that: only
+    motion inside the same phase the campaign itself ran in can be "before
+    its plan." Returns `None` when no containing phase span is found (an
+    incomplete or unusual capture) so the caller can fall back to skipping
+    the check rather than guessing a bound.
+    """
+    for run in commissioning_report.runs:
+        if run.device_index != device_index or run.source_index != source_index:
+            continue
+        for phase in run.phases:
+            end_ticks = phase.end_ticks if phase.end_ticks is not None else probe_plan_ticks
+            if phase.start_ticks <= probe_plan_ticks <= end_ticks:
+                return phase.start_ticks
+    return None
+
+
+def _breakaway_campaign_audits(
+    states: dict[int, _DeviceState],
+    commissioning_report: CommissioningCaptureReport,
+) -> list[dict[str, object]]:
     """Independently reconstruct every breakaway campaign in the capture.
 
     Splits each source's `breakaway_frame_log` into `assemble_breakaway_ticks`
@@ -2273,11 +2305,10 @@ def _breakaway_campaign_audits(states: dict[int, _DeviceState]) -> list[dict[str
     `campaign_terminal` (event id 159, always a campaign's last tick)
     boundaries -- a capture can contain more than one campaign if
     commissioning ran breakaway more than once. `motion_timestamps` for each
-    campaign's "motion before a plan" check comes from the same source's
-    already-tracked raw velocity observations, restricted to before the
-    campaign's own probe-plan marker (an observation from an *earlier*
-    campaign in the same capture must not be misread as premature motion for
-    a *later* one).
+    campaign's "motion before a plan" check is bounded to the campaign's own
+    commissioning phase (see `_breakaway_campaign_phase_start_ticks`), not the
+    whole capture, so an earlier phase's legitimate motion is never
+    misread as premature motion for this campaign.
     """
     audits: list[dict[str, object]] = []
     for device_index, state in sorted(states.items()):
@@ -2307,21 +2338,29 @@ def _breakaway_campaign_audits(states: dict[int, _DeviceState]) -> list[dict[str
             if current:
                 campaigns.append(current)
             for campaign_ticks in campaigns:
-                # `motion_timestamps` is deliberately left unset here rather
-                # than derived from `state.velocity_observations`: those
-                # observations aren't tagged with which commissioning phase
-                # produced them, and every phase before breakaway (velocity
-                # sweep, position tune, ...) legitimately moves the same
-                # source and predates this campaign's own probe plan. Without
-                # a verified phase-start boundary to bound the search, a
-                # naive "before this campaign's probe plan" filter would flag
-                # entirely legitimate prior-phase motion as a violation on
-                # every real multi-phase capture. The check itself is fully
-                # implemented and unit-tested in `audit_breakaway_campaign`
-                # (see `test_audit_breakaway_campaign_rejects_motion_before_a_plan`)
-                # for callers that can supply a correctly scoped window.
+                probe_plan_ticks = int(campaign_ticks[0]["timestamp_ticks"])
+                phase_start_ticks = _breakaway_campaign_phase_start_ticks(
+                    commissioning_report, device_index, source_index, probe_plan_ticks
+                )
+                # Bounded to the campaign's own commissioning phase (see
+                # `_breakaway_campaign_phase_start_ticks`): an earlier phase's
+                # legitimate motion must not be misread as premature motion
+                # for this campaign. When no containing phase span is found
+                # (an incomplete or unusual capture), skip the check rather
+                # than guess a bound -- `None` disables it in
+                # `audit_breakaway_campaign`.
+                motion_timestamps = (
+                    [
+                        item.timestamp_ticks
+                        for item in state.velocity_observations
+                        if item.source_index == source_index
+                        and phase_start_ticks <= item.timestamp_ticks < probe_plan_ticks
+                    ]
+                    if phase_start_ticks is not None
+                    else None
+                )
                 result = audit_breakaway_campaign(
-                    campaign_ticks, motion_timestamps=None, clock_hz=state.clock_hz
+                    campaign_ticks, motion_timestamps=motion_timestamps, clock_hz=state.clock_hz
                 )
                 result["device_index"] = device_index
                 result["source_index"] = source_index
@@ -2601,7 +2640,7 @@ def analyze_capture(
         velocity_integral_audits=_velocity_integral_audits(states),
         acceptance_matrix_audits=_acceptance_matrix_audits(states),
         outer_safety_timing_audits=_outer_safety_timing_audits(states),
-        breakaway_campaign_audits=_breakaway_campaign_audits(states),
+        breakaway_campaign_audits=_breakaway_campaign_audits(states, commissioning_report),
         corexy_plus=corexy_plus,
         corexy_minus=corexy_minus,
     )
