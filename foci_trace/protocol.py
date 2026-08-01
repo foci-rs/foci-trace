@@ -2189,7 +2189,7 @@ def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
         if decoded["binding_source"] not in (0, 1):
             raise DecodeError("breakaway ceiling binding source is invalid")
         decoded["record_kind"] = "breakaway_ceiling_source"
-    elif tag == BREAKAWAY_TAG_RAW_OBSERVATION and len(payload) == 51:
+    elif tag == BREAKAWAY_TAG_RAW_OBSERVATION and len(payload) == 99:
         decoded = _take_fields(
             cursor,
             (
@@ -2203,12 +2203,29 @@ def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
                 ("mean_rate_q", "q"),
                 ("variance_of_mean_q2", "U"),
                 ("target_rate_q", "q"),
+                # Frozen classify/consensus inputs so the
+                # decoder derives the consensus masks itself.
+                ("stationarity_code", "B"),
+                ("settled_rate_low_q", "q"),
+                ("settled_rate_high_q", "q"),
+                ("deficit_low_q", "q"),
+                ("deficit_high_q", "q"),
+                ("predicted_torque_target_abs", "H"),
+                ("usable_torque_limit", "H"),
+                ("hard_torque_limit", "H"),
+                ("disturbance_present", "B"),
+                ("disturbance_low_q16", "i"),
+                ("disturbance_high_q16", "i"),
             ),
         )
         if decoded["phase"] not in (1, 2):
             raise DecodeError("breakaway raw observation phase is invalid")
         if decoded["direction"] not in (0, 1):
             raise DecodeError("breakaway raw observation direction is invalid")
+        if decoded["stationarity_code"] > 6:
+            raise DecodeError("breakaway raw observation stationarity code is invalid")
+        if decoded["disturbance_present"] not in (0, 1):
+            raise DecodeError("breakaway raw observation disturbance flag is invalid")
         decoded["record_kind"] = "breakaway_raw_observation"
     elif tag == BREAKAWAY_TAG_DISCOVERY_TERMINAL and len(payload) == 28:
         decoded = _take_fields(

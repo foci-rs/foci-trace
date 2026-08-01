@@ -2291,7 +2291,24 @@ def _bw_raw_observation() -> bytes:
             -0x0102_0304_0506_0708,
         )
         + _BW_RAW_OBSERVATION_VARIANCE_OF_MEAN_Q2.to_bytes(16, "little")
-        + struct.pack("<q", 0x2122_2324_2526_2728)
+        # target_rate_q, then the frozen classify/consensus
+        # inputs: stationarity_code, settled-rate low/high, deficit low/high,
+        # predicted/usable/hard torque, disturbance present + Q16.16 bounds.
+        + struct.pack(
+            "<qBqqqqHHHBii",
+            0x2122_2324_2526_2728,
+            4,
+            -0x3132_3334_3536_3738,
+            0x4142_4344_4546_4748,
+            -0x5152_5354_5556_5758,
+            0x6162_6364_6566_6768,
+            0x7172,
+            0x8182,
+            0x9192,
+            1,
+            -0x0102_0304,
+            0x0506_0708,
+        )
     )
 
 
@@ -2482,7 +2499,7 @@ def test_decode_breakaway_raw_observation_matches_the_firmware_golden_bytes() ->
     from foci_trace.protocol import decode_breakaway_record
 
     payload = _bw_raw_observation()
-    assert len(payload) == 51
+    assert len(payload) == 99
     decoded = decode_breakaway_record(payload)
     assert decoded["record_kind"] == "breakaway_raw_observation"
     assert decoded["plan_digest"] == _BW_PLAN_DIGEST
@@ -2493,6 +2510,17 @@ def test_decode_breakaway_raw_observation_matches_the_firmware_golden_bytes() ->
     assert decoded["mean_rate_q"] == -0x0102_0304_0506_0708
     assert decoded["variance_of_mean_q2"] == _BW_RAW_OBSERVATION_VARIANCE_OF_MEAN_Q2
     assert decoded["target_rate_q"] == 0x2122_2324_2526_2728
+    assert decoded["stationarity_code"] == 4
+    assert decoded["settled_rate_low_q"] == -0x3132_3334_3536_3738
+    assert decoded["settled_rate_high_q"] == 0x4142_4344_4546_4748
+    assert decoded["deficit_low_q"] == -0x5152_5354_5556_5758
+    assert decoded["deficit_high_q"] == 0x6162_6364_6566_6768
+    assert decoded["predicted_torque_target_abs"] == 0x7172
+    assert decoded["usable_torque_limit"] == 0x8182
+    assert decoded["hard_torque_limit"] == 0x9192
+    assert decoded["disturbance_present"] == 1
+    assert decoded["disturbance_low_q16"] == -0x0102_0304
+    assert decoded["disturbance_high_q16"] == 0x0506_0708
 
 
 def test_decode_breakaway_raw_observation_rejects_an_invalid_phase() -> None:

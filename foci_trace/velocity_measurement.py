@@ -5475,28 +5475,155 @@ def _bw_observation_interval_percent(
     return low_raw, high_raw
 
 
+# Depth-three triples over the four per-direction slots (sweep_consensus.rs:12).
+_BW_CONSENSUS_TRIPLES = (0b0111, 0b1011, 0b1101, 0b1110)
+
+
+def _bw_classify_is_eligible(observation: dict[str, object]) -> bool:
+    """Port of `classify_velocity_observation` (sweep_evidence.rs:663), reduced
+    to the one verdict the consensus needs: a stroke is `Eligible` iff it passes
+    every gate the firmware cascade checks before its `else` arm. Reproduced from
+    the frozen inputs the raw-observation record now carries."""
+    settled_low = int(observation["settled_rate_low_q"])
+    settled_high = int(observation["settled_rate_high_q"])
+    deficit_low = int(observation["deficit_low_q"])
+    deficit_high = int(observation["deficit_high_q"])
+    usable = int(observation["usable_torque_limit"])
+    hard = int(observation["hard_torque_limit"])
+    predicted = int(observation["predicted_torque_target_abs"])
+    forward = int(observation["direction"]) == 0
+
+    valid_intervals = settled_low <= settled_high and deficit_low <= deficit_high and usable <= hard
+    if not valid_intervals:
+        return False  # InvalidEvidenceFault
+    if predicted >= hard:
+        return False  # HardClipFault
+    wrong_direction = settled_high < 0 if forward else settled_low > 0
+    if wrong_direction:
+        return False  # WrongDirectionFault
+    if int(observation["stationarity_code"]) != 0:
+        return False  # StationarityExcluded
+    moving = settled_low > 0 if forward else settled_high < 0
+    if not moving:
+        return False  # Inert
+    if predicted >= usable:
+        return False  # CurrentHeadroom
+    deficit_resolved = deficit_low > 0 if forward else deficit_high < 0
+    if not deficit_resolved:
+        return False  # DeficitUnresolved
+    if int(observation["disturbance_present"]) == 0:
+        return False  # InvalidEvidenceFault (no representable disturbance)
+    return True  # Eligible
+
+
+def _bw_directional_included_mask(direction_observations: list[dict[str, object]]) -> int:
+    """Port of `depth_three_consensus` (sweep_consensus.rs:67) over one
+    direction's four slots. Derives `collected_mask` from the received slots,
+    `eligible_mask` from the ported classification, and `included_mask` from the
+    triple-intersection depth-three consensus over the streamed disturbance
+    intervals. Returns the `included_mask` (0 when the direction reaches no
+    single-component eligible consensus)."""
+    by_slot = {int(obs["slot_index"]): obs for obs in direction_observations}
+    collected_mask = 0
+    eligible_mask = 0
+    intervals: dict[int, tuple[int, int]] = {}
+    for slot, obs in by_slot.items():
+        if not 0 <= slot < 4:
+            continue
+        collected_mask |= 1 << slot
+        if _bw_classify_is_eligible(obs):
+            eligible_mask |= 1 << slot
+        if int(obs["disturbance_present"]) == 1:
+            intervals[slot] = (
+                int(obs["disturbance_low_q16"]),
+                int(obs["disturbance_high_q16"]),
+            )
+    if collected_mask != 0b1111:
+        return 0  # IncompleteRung
+    if bin(eligible_mask).count("1") < 3:
+        return 0  # InsufficientConsensus
+    intersections: list[tuple[int, int]] = []
+    for triple in _BW_CONSENSUS_TRIPLES:
+        if triple & eligible_mask != triple:
+            continue
+        low = None
+        high = None
+        complete = True
+        for slot in range(4):
+            if triple & (1 << slot) == 0:
+                continue
+            interval = intervals.get(slot)
+            if interval is None:
+                complete = False
+                break
+            low = interval[0] if low is None else max(low, interval[0])
+            high = interval[1] if high is None else min(high, interval[1])
+        if not complete or low is None or high is None:
+            continue
+        if low <= high:
+            intersections.append((low, high))
+    intersections.sort()
+    components: list[list[int]] = []
+    for low, high in intersections:
+        if components and low <= components[-1][1]:
+            components[-1][1] = max(components[-1][1], high)
+        else:
+            components.append([low, high])
+    if len(components) != 1:
+        return 0  # zero (Insufficient) or multiple (Ambiguous) components
+    comp_low, comp_high = components[0]
+    included_mask = 0
+    for slot in range(4):
+        if eligible_mask & (1 << slot) == 0:
+            continue
+        interval = intervals.get(slot)
+        if interval is None:
+            continue
+        if interval[0] <= comp_high and comp_low <= interval[1]:
+            included_mask |= 1 << slot
+    return included_mask
+
+
+def _bw_included_observations(
+    direction_observations: list[dict[str, object]], included_mask: int
+) -> list[dict[str, object]]:
+    """The direction's observations whose slot is set in `included_mask`."""
+    return [obs for obs in direction_observations if included_mask & (1 << int(obs["slot_index"]))]
+
+
+def _bw_rung_response_bounds_from_consensus(
+    forward: list[dict[str, object]],
+    reverse: list[dict[str, object]],
+    multiplier: float,
+    c_sigma: float,
+    round_outward: bool,
+) -> tuple[float, float] | None:
+    """Reconstruct a rung's nomination bounds from exactly the observations the
+    firmware's depth-three consensus includes, derived independently here (not
+    read from firmware's masks). A direction with no single-component eligible
+    consensus makes the rung non-nominatable (`None`)."""
+    forward_included = _bw_directional_included_mask(forward)
+    reverse_included = _bw_directional_included_mask(reverse)
+    if forward_included == 0 or reverse_included == 0:
+        return None
+    included = _bw_included_observations(forward, forward_included) + _bw_included_observations(
+        reverse, reverse_included
+    )
+    return _bw_rung_response_bounds_percent(included, multiplier, c_sigma, round_outward)
+
+
 def _bw_rung_response_bounds_percent(
     observations: list[dict[str, object]], multiplier: float, c_sigma: float, round_outward: bool
 ) -> tuple[float, float] | None:
-    """Port of `rung_response_bounds_percent` (band_confirmation.rs): fold a
-    rung's raw observations into one combined percent-response interval by
-    taking the min of every included observation's lower bound and the max of
-    every included observation's upper bound.
+    """Port of `rung_response_bounds_percent` (band_confirmation.rs): fold the
+    passed observations into one combined percent-response interval by taking the
+    min of every observation's lower bound and the max of every observation's
+    upper bound.
 
-    Known gap: the firmware's own fold only includes observations selected by
-    each direction's depth-three `included_mask` (`sweep_consensus.rs`), which
-    can be a strict subset of the four collected observations per direction
-    when the consensus algorithm excludes an outlier. `included_mask` does not
-    ride the wire on `BreakawayRawObservation`, and reconstructing it would
-    require replaying the full stationarity/depth-three-consensus
-    classification pipeline from evidence this record does not carry. This
-    function instead folds every observation passed in unconditionally
-    (assumed fully included). Because folding MORE observations can only
-    widen -- never narrow -- the min/max envelope, this assumption is
-    conservative: a genuine firmware exclusion makes this function's own
-    recomputed bound wider (a larger interval, not a falsely tighter one), so
-    the failure mode is an over-cautious mismatch report, never a silently
-    accepted narrower-than-true bound.
+    The caller passes exactly the observations the depth-three `included_mask`
+    selects (see `_bw_rung_response_bounds_from_consensus`), derived
+    independently from the streamed classify/consensus inputs, so this reproduces
+    the firmware fold exactly rather than folding every collected observation.
     """
     lower: float | None = None
     upper: float | None = None
@@ -6175,8 +6302,9 @@ def audit_breakaway_campaign(
                         % (record["collected_index"], p_raw, len(forward), len(reverse))
                     )
                 else:
-                    recomputed = _bw_rung_response_bounds_percent(
-                        forward + reverse,
+                    recomputed = _bw_rung_response_bounds_from_consensus(
+                        forward,
+                        reverse,
                         nomination_multiplier,
                         _BW_NOMINATION_SCREEN_C_SIGMA,
                         True,

@@ -10,6 +10,8 @@ from foci_trace.velocity_measurement import (
     VelocityObservation,
     _BW_NOMINATION_SCREEN_C_SIGMA,
     _BW_STAGE_B_SCHEMA_REVISION,
+    _bw_classify_is_eligible,
+    _bw_directional_included_mask,
     _bw_observation_interval_percent,
     _bw_observation_statistic,
     _bw_percent_to_milli,
@@ -2972,14 +2974,40 @@ def _bw_raw_observation(
     mean_rate_q: int,
     variance_of_mean_q2: int,
     target_rate_q: int,
+    *,
+    stationarity_code: int = 0,
+    settled_rate_low_q: int | None = None,
+    settled_rate_high_q: int | None = None,
+    deficit_low_q: int | None = None,
+    deficit_high_q: int | None = None,
+    predicted_torque_target_abs: int = 100,
+    usable_torque_limit: int = 500,
+    hard_torque_limit: int = 1000,
+    disturbance_present: int = 1,
+    disturbance_low_q16: int = 0,
+    disturbance_high_q16: int = 1000,
 ) -> bytes:
     """Build a tag-5 `BreakawayRawObservation` record's raw bytes.
 
+    The classify/consensus inputs default (per direction) to a value the ported
+    classifier judges Eligible with a single-component, fully-included disturbance
+    consensus, so a fresh fixture's derived masks include every collected slot and
+    the recomputed nomination bounds match the fixture's own reported bounds. Tests
+    override individual inputs to exercise exclusion.
+
     `struct.pack` has no native 128-bit format code, so `variance_of_mean_q2`
-    is appended as its own 16-byte little-endian span rather than folded into
-    a single `struct.pack` call, mirroring `_EvidenceCursor._take_u128` and
-    the firmware's own `push_u128` (`breakaway_trace_reporting.rs`).
+    is appended as its own 16-byte little-endian span, mirroring the firmware's
+    own `push_u128`.
     """
+    forward = direction == 0
+    if settled_rate_low_q is None:
+        settled_rate_low_q = 100 if forward else -200
+    if settled_rate_high_q is None:
+        settled_rate_high_q = 200 if forward else -100
+    if deficit_low_q is None:
+        deficit_low_q = 10 if forward else -20
+    if deficit_high_q is None:
+        deficit_high_q = 20 if forward else -10
     head = struct.pack(
         "<BIHQBBBBq",
         5,
@@ -2993,8 +3021,103 @@ def _bw_raw_observation(
         mean_rate_q,
     )
     variance_bytes = (variance_of_mean_q2 & ((1 << 128) - 1)).to_bytes(16, "little")
-    tail = struct.pack("<q", target_rate_q)
+    tail = struct.pack(
+        "<qBqqqqHHHBii",
+        target_rate_q,
+        stationarity_code,
+        settled_rate_low_q,
+        settled_rate_high_q,
+        deficit_low_q,
+        deficit_high_q,
+        predicted_torque_target_abs,
+        usable_torque_limit,
+        hard_torque_limit,
+        disturbance_present,
+        disturbance_low_q16,
+        disturbance_high_q16,
+    )
     return head + variance_bytes + tail
+
+
+def _bw_classifier_obs(slot: int, direction: int, **overrides) -> dict:
+    """A decoded raw-observation dict whose frozen classify/consensus inputs
+    default to Eligible with an overlapping disturbance interval. Tests override
+    fields to force exclusion."""
+    forward = direction == 0
+    base = {
+        "slot_index": slot,
+        "direction": direction,
+        "settled_rate_low_q": 100 if forward else -200,
+        "settled_rate_high_q": 200 if forward else -100,
+        "deficit_low_q": 10 if forward else -20,
+        "deficit_high_q": 20 if forward else -10,
+        "predicted_torque_target_abs": 100,
+        "usable_torque_limit": 500,
+        "hard_torque_limit": 1000,
+        "stationarity_code": 0,
+        "disturbance_present": 1,
+        "disturbance_low_q16": 0,
+        "disturbance_high_q16": 1000,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_bw_classify_is_eligible_reproduces_the_firmware_cascade():
+    # Default is Eligible.
+    assert _bw_classify_is_eligible(_bw_classifier_obs(0, 0)) is True
+    # Each gate independently excludes.
+    assert _bw_classify_is_eligible(_bw_classifier_obs(0, 0, stationarity_code=3)) is False
+    assert _bw_classify_is_eligible(_bw_classifier_obs(0, 0, disturbance_present=0)) is False
+    # predicted >= usable -> CurrentHeadroom.
+    assert (
+        _bw_classify_is_eligible(_bw_classifier_obs(0, 0, predicted_torque_target_abs=500)) is False
+    )
+    # Not moving (forward settled interval no longer strictly positive) -> Inert.
+    assert _bw_classify_is_eligible(_bw_classifier_obs(0, 0, settled_rate_low_q=0)) is False
+    # Deficit unresolved (forward deficit low not > 0).
+    assert _bw_classify_is_eligible(_bw_classifier_obs(0, 0, deficit_low_q=0)) is False
+    # A reverse stroke with a mirrored eligible interval.
+    assert _bw_classify_is_eligible(_bw_classifier_obs(1, 1)) is True
+
+
+def test_bw_directional_included_mask_reproduces_depth_three_exclusion():
+    # Four eligible, overlapping intervals -> all included.
+    full = [_bw_classifier_obs(slot, 0) for slot in range(4)]
+    assert _bw_directional_included_mask(full) == 0b1111
+
+    # One stationarity-excluded stroke -> three eligible, the single eligible
+    # triple forms one component, the three are included (the outlier is not).
+    three_eligible = [
+        _bw_classifier_obs(0, 0, stationarity_code=4),
+        _bw_classifier_obs(1, 0),
+        _bw_classifier_obs(2, 0),
+        _bw_classifier_obs(3, 0),
+    ]
+    assert _bw_directional_included_mask(three_eligible) == 0b1110
+
+    # Four eligible but slot 3's disturbance interval is disjoint from the other
+    # three: the three overlapping slots form the single consensus component and
+    # the disjoint outlier is excluded from the included set.
+    outlier_interval = [
+        _bw_classifier_obs(0, 0),
+        _bw_classifier_obs(1, 0),
+        _bw_classifier_obs(2, 0),
+        _bw_classifier_obs(3, 0, disturbance_low_q16=5000, disturbance_high_q16=6000),
+    ]
+    assert _bw_directional_included_mask(outlier_interval) == 0b0111
+
+    # Fewer than four collected slots -> IncompleteRung, nothing included.
+    assert _bw_directional_included_mask(full[:3]) == 0
+
+    # Fewer than three eligible -> InsufficientConsensus, nothing included.
+    two_eligible = [
+        _bw_classifier_obs(0, 0, stationarity_code=4),
+        _bw_classifier_obs(1, 0, stationarity_code=4),
+        _bw_classifier_obs(2, 0),
+        _bw_classifier_obs(3, 0),
+    ]
+    assert _bw_directional_included_mask(two_eligible) == 0
 
 
 def _bw_synthetic_atom(
