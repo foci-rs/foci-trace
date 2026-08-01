@@ -3523,8 +3523,15 @@ class _BreakawayCampaignBuilder:
         direction_overrides: dict[int, int] | None = None,
         confirmed_p_raw_override: int | None = None,
         omit_raw_evidence: bool = False,
+        unrepresentable_slots: set[int] | None = None,
     ) -> list[dict]:
         """Build the confirmation evidence ticks.
+
+        `unrepresentable_slots` marks strokes whose mean is zero/wrong-signed:
+        firmware still streams their (total) raw observation but
+        confirmation_observation_report emits no reduced record for them, so
+        those slots appear in the raw stream and the collected mask but not in the
+        reduced observations.
 
         Returns the wire-order tick sequence: each held-out stroke's raw
         observation on its own marker-160 tick (phase == Confirmation), then the
@@ -3565,6 +3572,7 @@ class _BreakawayCampaignBuilder:
             relative_ses = [10, 12, 15, 9, 11, 13, 8, 14][:observation_count]
         direction_overrides = direction_overrides or {}
         confirmation_multiplier = _confidence_multiplier(8)
+        unrepresentable_slots = unrepresentable_slots or set()
         observations = []
         raw_records: list[tuple[int, bytes]] = []
         actual_ses: list[int] = []
@@ -3572,9 +3580,14 @@ class _BreakawayCampaignBuilder:
         for slot in range(observation_count):
             direction = direction_overrides.get(slot, 0 if slot < 4 else 1)
             relative_se = relative_ses[slot] / 1000.0
-            mean_rate_q, variance_of_mean_q2, target_rate_q = _bw_synthetic_atom(
-                response_percent, relative_se, direction
-            )
+            if slot in unrepresentable_slots:
+                # A collected-but-unrepresentable stroke: zero mean. Its raw
+                # observation still streams (total), but no reduced record.
+                mean_rate_q, variance_of_mean_q2, target_rate_q = 0, 0, 1_000_000
+            else:
+                mean_rate_q, variance_of_mean_q2, target_rate_q = _bw_synthetic_atom(
+                    response_percent, relative_se, direction
+                )
             if not omit_raw_evidence:
                 raw_records.append(
                     (
@@ -3594,6 +3607,8 @@ class _BreakawayCampaignBuilder:
                     )
                 )
                 raw_seq += 1
+            if slot in unrepresentable_slots:
+                continue  # no reduced observation record for this stroke
             interval = _bw_observation_interval_percent(
                 mean_rate_q,
                 variance_of_mean_q2,
@@ -3883,6 +3898,35 @@ def test_audit_breakaway_flags_a_confirmation_collected_mask_that_omits_received
     result = audit_breakaway_campaign(ticks)
     assert result["matches_firmware"] is False
     assert any("forward_collected_mask" in mismatch for mismatch in result["mismatches"])
+
+
+def test_audit_breakaway_collected_mask_counts_a_stroke_with_no_reduced_record() -> None:
+    """A collected inert-zero stroke streams a raw observation but no reduced
+    record. Reconstructing the collected mask from the total raw stream keeps it
+    consistent; reconstructing from the reduced records would falsely flag the
+    slot as absent."""
+    builder = _BreakawayCampaignBuilder()
+    ticks = [
+        builder.probe_plan_tick(),
+        builder.probe_derived_tick(),
+        builder.discovery_plan_tick(),
+        *builder.discovery_ticks(),
+        builder.confirmation_plan_tick(),
+        *builder.confirmation_ticks(
+            accepted=0,
+            terminal_cause=15,
+            observation_count=4,
+            unrepresentable_slots={0},
+            # All four forward strokes collected; slot 0's zero mean is not
+            # eligible, and there is no reverse block.
+            masks=(0b1111, 0b1110, 0, 0, 0, 0),
+        ),
+        builder.campaign_terminal_tick(accepted=0, terminal_cause=15, stage_c_plan_digest=0),
+    ]
+    result = audit_breakaway_campaign(ticks)
+    assert not any("collected_mask" in mismatch for mismatch in result["mismatches"]), result[
+        "mismatches"
+    ]
 
 
 def test_audit_breakaway_accepts_a_partial_confirmation_with_honest_collected_masks() -> None:

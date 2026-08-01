@@ -6491,12 +6491,18 @@ def audit_breakaway_campaign(
         )
         # Reconcile the reported collected masks with the slots actually
         # received, for every outcome (not just an accepted one): the forward
-        # accumulator records schedule slots 0-3, the reverse 4-7. A terminal
-        # whose collected mask omits a slot that arrived (or claims one that did
-        # not) is inconsistent regardless of acceptance.
+        # accumulator records schedule slots 0-3, the reverse 4-7. Reconstruct
+        # from the streamed RAW observations, which are total for every completed
+        # stroke -- not from the reduced observation records, which
+        # confirmation_observation_report omits for an honest zero or wrong-sign
+        # mean (breakaway_reporting.rs). A collected inert-zero stroke would
+        # otherwise look absent and read as a false mismatch.
+        raw_confirmation_collected = _bw_collect_raw_observations(
+            ticks, _BW_RAW_OBSERVATION_PHASE_CONFIRMATION
+        )
         reconstructed_forward_collected = 0
         reconstructed_reverse_collected = 0
-        for observation in observations:
+        for observation in raw_confirmation_collected:
             slot = int(observation["slot_index"])
             if 0 <= slot < 4:
                 reconstructed_forward_collected |= 1 << slot
