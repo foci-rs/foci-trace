@@ -5320,6 +5320,11 @@ _BW_MAX_ADDITIVE_GAIN_RATIO_DEN = 128
 # `SWEEP_DIRECTION_COUNT` (sweep_plan.rs).
 _BW_SWEEP_DIRECTION_COUNT = 2
 
+# `CONSENSUS_OBSERVATIONS_PER_DIRECTION` (sweep_consensus.rs): observations
+# collected per direction at one discovery rung -- the raw-observation octet
+# (4 forward + 4 reverse) a nomination recompute needs.
+_BW_CONSENSUS_OBSERVATIONS_PER_DIRECTION = 4
+
 # `MAX_CONFIDENCE_FAMILY_SIZE` (autotune/velocity_measurement/decision.rs).
 _BW_MAX_CONFIDENCE_FAMILY_SIZE = 128
 
@@ -5351,6 +5356,169 @@ _BW_REQUIRED_HALF_WIDTH_FRACTION = 1.0 / 15.0
 
 # `BreakawayTerminalCause::Accepted` (breakaway_reporting.rs).
 _BW_TERMINAL_CAUSE_ACCEPTED = 21
+
+# `BREAKAWAY_STAGE_B_SCHEMA_REVISION` (combined_plan.rs): the rules revision
+# `AdditiveDiscoveryPlanned.schema_revision` reports, so an offline decoder can
+# confirm it is regenerating the ladder under the exact rules the firmware
+# applied rather than a stale or newer revision.
+_BW_STAGE_B_SCHEMA_REVISION = 15
+
+# `NOMINATION_SCREEN_C_SIGMA` (band_confirmation.rs): the pointwise 95%
+# scale-inflation heuristic the nomination screen applies on top of the
+# family-eight multiplier, `sqrt(15 / chi2_0.05,15)`.
+_BW_NOMINATION_SCREEN_C_SIGMA = 1.4373055
+
+# `INTERVAL_ENDPOINT_ROUNDING_SCALE` (band_confirmation.rs): the granularity
+# at which interval endpoints are conservatively widened before containment is
+# judged -- the lower endpoint always rounds down, the upper always up.
+_BW_INTERVAL_ENDPOINT_ROUNDING_SCALE = 1.0e4
+
+# `PERCENT_MILLI_SATURATION_BOUND` / permille saturation (breakaway_reporting.rs).
+_BW_PERCENT_MILLI_SATURATION_BOUND = 1_000_000.0
+_BW_RELATIVE_SE_PERMILLE_SATURATION_BOUND = 65_535.0
+
+
+def _bw_round_outward_lower(value: float) -> float:
+    """Port of `round_outward_lower` (band_confirmation.rs): round down, never
+    inward, so a rounded interval can never appear narrower than its true
+    value."""
+    scaled = _f32(value * _f32(_BW_INTERVAL_ENDPOINT_ROUNDING_SCALE))
+    return _f32(math.floor(scaled) / _f32(_BW_INTERVAL_ENDPOINT_ROUNDING_SCALE))
+
+
+def _bw_round_outward_upper(value: float) -> float:
+    """Port of `round_outward_upper` (band_confirmation.rs): round up, never
+    inward."""
+    scaled = _f32(value * _f32(_BW_INTERVAL_ENDPOINT_ROUNDING_SCALE))
+    return _f32(math.ceil(scaled) / _f32(_BW_INTERVAL_ENDPOINT_ROUNDING_SCALE))
+
+
+def _bw_percent_to_milli(value: float) -> int:
+    """Port of `percent_to_milli` (breakaway_reporting.rs)."""
+    scaled = _f32(_round_away(_f32(value * _f32(1000.0))))
+    if scaled >= _BW_PERCENT_MILLI_SATURATION_BOUND:
+        return int(_BW_PERCENT_MILLI_SATURATION_BOUND)
+    if scaled <= -_BW_PERCENT_MILLI_SATURATION_BOUND:
+        return -int(_BW_PERCENT_MILLI_SATURATION_BOUND)
+    return int(scaled)
+
+
+def _bw_relative_se_to_permille(value: float) -> int:
+    """Port of `relative_se_to_permille` (breakaway_reporting.rs)."""
+    scaled = _f32(_round_away(_f32(value * _f32(1000.0))))
+    if scaled >= _BW_RELATIVE_SE_PERMILLE_SATURATION_BOUND:
+        return 0xFFFF
+    if scaled <= 0.0:
+        return 0
+    return int(scaled)
+
+
+def _bw_observation_statistic(
+    mean_rate_q: int, variance_of_mean_q2: int, target_rate_q: int, direction_code: int
+) -> tuple[float, float] | None:
+    """Port of `observation_statistic` (band_confirmation.rs).
+
+    Returns `(response_percent, relative_standard_error)` from one raw
+    `BreakawayRawObservation`'s atom, or `None` when the atom is not
+    representable as a candidate response (an invalid target, or a zero or
+    wrong-signed mean for the declared `direction_code`) -- the same
+    condition the firmware's own `ObservationStatisticError` variants cover.
+    `direction_code` is the wire direction code (0 = forward, 1 = reverse;
+    `direction_report_code` in `sweep_evidence.rs`).
+    """
+    if target_rate_q <= 0:
+        return None
+    if direction_code == 0 and mean_rate_q > 0:
+        commanded_magnitude_q = mean_rate_q
+    elif direction_code == 1 and mean_rate_q < 0:
+        commanded_magnitude_q = -mean_rate_q
+    else:
+        return None
+    variance = _f32(variance_of_mean_q2)
+    if not math.isfinite(variance):
+        return None
+    commanded_magnitude = _f32(commanded_magnitude_q)
+    target_magnitude = _f32(target_rate_q)
+    response_percent = _f32(_f32(_f32(100.0) * commanded_magnitude) / target_magnitude)
+    relative_standard_error = _f32(_f32(math.sqrt(variance)) / commanded_magnitude)
+    if not math.isfinite(response_percent) or not math.isfinite(relative_standard_error):
+        return None
+    return response_percent, relative_standard_error
+
+
+def _bw_observation_interval_percent(
+    mean_rate_q: int,
+    variance_of_mean_q2: int,
+    target_rate_q: int,
+    direction_code: int,
+    multiplier: float,
+    c_sigma: float,
+    round_outward: bool,
+) -> tuple[float, float] | None:
+    """Port of `observation_interval_percent` (band_confirmation.rs): build one
+    observation's percent-response interval, `h = multiplier * SE * c_sigma`,
+    then `[r * (1 - h), r * (1 + h)]`, optionally rounded outward.
+    """
+    statistic = _bw_observation_statistic(
+        mean_rate_q, variance_of_mean_q2, target_rate_q, direction_code
+    )
+    if statistic is None:
+        return None
+    response_percent, relative_standard_error = statistic
+    half_width_fraction = _f32(_f32(_f32(multiplier) * relative_standard_error) * _f32(c_sigma))
+    if not math.isfinite(half_width_fraction):
+        return None
+    low_raw = _f32(response_percent * _f32(1.0 - half_width_fraction))
+    high_raw = _f32(response_percent * _f32(1.0 + half_width_fraction))
+    if round_outward:
+        return _bw_round_outward_lower(low_raw), _bw_round_outward_upper(high_raw)
+    return low_raw, high_raw
+
+
+def _bw_rung_response_bounds_percent(
+    observations: list[dict[str, object]], multiplier: float, c_sigma: float, round_outward: bool
+) -> tuple[float, float] | None:
+    """Port of `rung_response_bounds_percent` (band_confirmation.rs): fold a
+    rung's raw observations into one combined percent-response interval by
+    taking the min of every included observation's lower bound and the max of
+    every included observation's upper bound.
+
+    Known gap: the firmware's own fold only includes observations selected by
+    each direction's depth-three `included_mask` (`sweep_consensus.rs`), which
+    can be a strict subset of the four collected observations per direction
+    when the consensus algorithm excludes an outlier. `included_mask` does not
+    ride the wire on `BreakawayRawObservation`, and reconstructing it would
+    require replaying the full stationarity/depth-three-consensus
+    classification pipeline from evidence this record does not carry. This
+    function instead folds every observation passed in unconditionally
+    (assumed fully included). Because folding MORE observations can only
+    widen -- never narrow -- the min/max envelope, this assumption is
+    conservative: a genuine firmware exclusion makes this function's own
+    recomputed bound wider (a larger interval, not a falsely tighter one), so
+    the failure mode is an over-cautious mismatch report, never a silently
+    accepted narrower-than-true bound.
+    """
+    lower: float | None = None
+    upper: float | None = None
+    for observation in observations:
+        interval = _bw_observation_interval_percent(
+            int(observation["mean_rate_q"]),
+            int(observation["variance_of_mean_q2"]),
+            int(observation["target_rate_q"]),
+            int(observation["direction"]),
+            multiplier,
+            c_sigma,
+            round_outward,
+        )
+        if interval is None:
+            return None
+        low, high = interval
+        lower = low if lower is None else min(lower, low)
+        upper = high if upper is None else max(upper, high)
+    if lower is None or upper is None:
+        return None
+    return lower, upper
+
 
 BREAKAWAY_EVENT_ID_NAMES = {
     152: "probe_plan",
@@ -5788,15 +5956,11 @@ def audit_breakaway_campaign(
         discovery_planned = _bw_single_record(discovery_planned_tick, "breakaway_discovery_planned")
         if int(discovery_planned["prior_plan_digest"]) != int(probe_planned["plan_digest"]):
             raise ValueError("breakaway discovery plan does not chain to the probe plan digest")
-        ladder_records = sorted(
-            _bw_tick_records_by_kind(discovery_planned_tick, "breakaway_ladder_rung"),
-            key=lambda record: int(record["rung_index"]),
-        )
-        ladder_gains = [int(record["p_raw"]) for record in ladder_records]
-        if len(ladder_gains) != int(discovery_planned["rung_count"]):
+        if int(discovery_planned["schema_revision"]) != _BW_STAGE_B_SCHEMA_REVISION:
             mismatches.append(
-                "discovery ladder rung count: firmware=%d offline=%d"
-                % (discovery_planned["rung_count"], len(ladder_gains))
+                "discovery schema_revision: firmware=%d want=%d (offline replay regenerates the "
+                "ladder under a different rules revision than the firmware applied)"
+                % (discovery_planned["schema_revision"], _BW_STAGE_B_SCHEMA_REVISION)
             )
         floor_raw = int(discovery_planned["floor_p_raw"])
         breakaway_raw = int(discovery_planned["breakaway_p_raw"])
@@ -5806,6 +5970,17 @@ def audit_breakaway_campaign(
                 "discovery breakaway_p_raw: reported=%d offline (min directional moving)=%d"
                 % (breakaway_raw, resolved_breakaway_raw)
             )
+        # The per-rung ladder no longer rides the wire: the
+        # only per-campaign evidence for the ladder's shape is this plan's own
+        # summary (floor/breakaway/ceiling/observations_per_direction/
+        # maximum_workflow_ms) plus `plan_digest` itself. Regenerate the exact
+        # `gains[]` independently from that summary -- never from a
+        # firmware-reported per-rung list -- and fold the REGENERATED gains
+        # (not anything firmware reported) into the digest this function
+        # compares against `plan_digest`. A tampered `plan_digest` with
+        # self-consistent summary fields is caught here because the digest
+        # folds the regenerated ladder; a tampered summary field is caught
+        # because it changes the regenerated ladder the digest is taken over.
         best = breakaway_plan_additive_discovery_ladder(
             floor_raw,
             breakaway_raw,
@@ -5816,9 +5991,11 @@ def audit_breakaway_campaign(
         if best is None:
             mismatches.append("no candidate additive ladder survives every planning guard")
         else:
-            if best["gains"] != ladder_gains:
+            ladder_gains = best["gains"]
+            if len(ladder_gains) != int(discovery_planned["rung_count"]):
                 mismatches.append(
-                    "discovery ladder gains: firmware=%s offline=%s" % (ladder_gains, best["gains"])
+                    "discovery ladder rung count: firmware=%d offline=%d"
+                    % (discovery_planned["rung_count"], len(ladder_gains))
                 )
             if int(discovery_planned["family_size"]) != best["confidence_family_size"]:
                 mismatches.append(
@@ -5833,17 +6010,17 @@ def audit_breakaway_campaign(
                     "discovery first_additive_step_raw: firmware=%d offline=%d"
                     % (discovery_planned["first_additive_step_raw"], expected_first_step)
                 )
-        expected_discovery_digest = breakaway_discovery_plan_digest(
-            ladder_gains,
-            int(discovery_planned["observations_per_direction"]),
-            int(discovery_planned["family_size"]),
-            int(probe_planned["plan_digest"]),
-        )
-        if expected_discovery_digest != int(discovery_planned["plan_digest"]):
-            mismatches.append(
-                "discovery plan_digest: firmware=0x%016x offline=0x%016x"
-                % (discovery_planned["plan_digest"], expected_discovery_digest)
+            expected_discovery_digest = breakaway_discovery_plan_digest(
+                ladder_gains,
+                int(discovery_planned["observations_per_direction"]),
+                int(discovery_planned["family_size"]),
+                int(probe_planned["plan_digest"]),
             )
+            if expected_discovery_digest != int(discovery_planned["plan_digest"]):
+                mismatches.append(
+                    "discovery plan_digest: firmware=0x%016x offline=0x%016x"
+                    % (discovery_planned["plan_digest"], expected_discovery_digest)
+                )
 
     discovery_terminal: dict[str, object] | None = None
     if discovery_terminal_tick is not None:
@@ -5875,6 +6052,41 @@ def audit_breakaway_campaign(
                 "discovery collected_count: firmware=%d offline has more margin records (%d)"
                 % (discovery_terminal["collected_count"], len(margin_records))
             )
+
+        # Independent nomination recompute: every
+        # `BreakawayDiscoveryRungMargin`'s `lower_percent_milli`/
+        # `upper_percent_milli` above is firmware's OWN reduction of the raw
+        # evidence -- the `breakaway_discovery_rung_margin` check just above
+        # only verifies `M_i`/half-width are correctly *derived from* those
+        # reported bounds, never that the bounds themselves are honest. Group
+        # this tick's raw `BreakawayRawObservation` records (streamed one per
+        # collected stroke, phase == Discovery) by ladder rung_index, fold
+        # each rung's octet through the SAME nomination formula the firmware
+        # uses (multiplier m(8), `NOMINATION_SCREEN_C_SIGMA`, outward
+        # rounding -- see `_bw_rung_response_bounds_percent`'s own doc comment
+        # for the one modeling gap, depth-three `included_mask` exclusion,
+        # this cannot replicate), and compare the recomputed bounds against
+        # the firmware-reported ones. A rung whose p_raw doesn't land on the
+        # independently regenerated ladder, or whose raw evidence disagrees
+        # with the reported bounds, is a mismatch.
+        raw_discovery_observations = [
+            decoded
+            for decoded in _bw_tick_records_by_kind(
+                discovery_terminal_tick, "breakaway_raw_observation"
+            )
+            if int(decoded["phase"]) == 1
+        ]
+        for observation in raw_discovery_observations:
+            if int(observation["plan_digest"]) != int(discovery_planned["plan_digest"]):
+                raise ValueError(
+                    "breakaway discovery raw observation does not chain to its own plan digest"
+                )
+        observations_by_rung: dict[int, dict[int, list[dict[str, object]]]] = {}
+        for observation in raw_discovery_observations:
+            by_direction = observations_by_rung.setdefault(int(observation["rung_index"]), {})
+            by_direction.setdefault(int(observation["direction"]), []).append(observation)
+        nomination_multiplier = _f32(_confidence_multiplier(_BW_CONFIRMATION_FAMILY_SIZE))
+
         previous_mid: int | None = None
         previous_collected_index: int | None = None
         for record in margin_records:
@@ -5895,6 +6107,63 @@ def audit_breakaway_campaign(
                         expected_half_width,
                     )
                 )
+            p_raw = int(record["p_raw"])
+            if p_raw not in ladder_gains:
+                mismatches.append(
+                    "discovery rung margin (collected_index=%d) p_raw=%d is not on the "
+                    "independently regenerated ladder" % (record["collected_index"], p_raw)
+                )
+            else:
+                rung_index = ladder_gains.index(p_raw)
+                by_direction = observations_by_rung.get(rung_index, {})
+                forward = by_direction.get(0, [])
+                reverse = by_direction.get(1, [])
+                if (
+                    len(forward) != _BW_CONSENSUS_OBSERVATIONS_PER_DIRECTION
+                    or len(reverse) != _BW_CONSENSUS_OBSERVATIONS_PER_DIRECTION
+                ):
+                    mismatches.append(
+                        "discovery rung margin (collected_index=%d, p_raw=%d) has no complete "
+                        "raw-observation octet (forward=%d reverse=%d) to independently verify"
+                        % (record["collected_index"], p_raw, len(forward), len(reverse))
+                    )
+                else:
+                    recomputed = _bw_rung_response_bounds_percent(
+                        forward + reverse,
+                        nomination_multiplier,
+                        _BW_NOMINATION_SCREEN_C_SIGMA,
+                        True,
+                    )
+                    if recomputed is None:
+                        mismatches.append(
+                            "discovery rung margin (collected_index=%d, p_raw=%d) raw evidence is "
+                            "not independently nominatable" % (record["collected_index"], p_raw)
+                        )
+                    else:
+                        offline_lower_milli = _bw_percent_to_milli(recomputed[0])
+                        offline_upper_milli = _bw_percent_to_milli(recomputed[1])
+                        if offline_lower_milli != int(record["lower_percent_milli"]):
+                            mismatches.append(
+                                "discovery rung lower_percent_milli (collected_index=%d, "
+                                "p_raw=%d): firmware=%d offline=%d"
+                                % (
+                                    record["collected_index"],
+                                    p_raw,
+                                    record["lower_percent_milli"],
+                                    offline_lower_milli,
+                                )
+                            )
+                        if offline_upper_milli != int(record["upper_percent_milli"]):
+                            mismatches.append(
+                                "discovery rung upper_percent_milli (collected_index=%d, "
+                                "p_raw=%d): firmware=%d offline=%d"
+                                % (
+                                    record["collected_index"],
+                                    p_raw,
+                                    record["upper_percent_milli"],
+                                    offline_upper_milli,
+                                )
+                            )
             mid = (int(record["lower_percent_milli"]) + int(record["upper_percent_milli"])) // 2
             collected_index = int(record["collected_index"])
             # `discovery_rung_margin_report` (breakaway_reporting.rs:426-439)
@@ -6001,6 +6270,140 @@ def audit_breakaway_campaign(
                     "breakaway confirmation accepted with %d observations, want the full family of 8"
                     % len(observations)
                 )
+
+        # Independent confirmation recompute. The checks above only verify
+        # firmware's OWN reported numbers are mutually consistent (complete
+        # masks, an accepted block reporting all eight observations); none of
+        # them touch whether the confirmed gain actually belongs in [70, 80].
+        # Recompute each of the eight held-out strokes' response interval
+        # from its raw evidence -- multiplier m(8), c_sigma = 1.0, outward
+        # rounding, exactly `confirmation_observation_report`'s own
+        # parameters, no nomination-style inflation -- and independently
+        # verify containment, the candidate/confirmed P match, and the fixed
+        # four-forward-then-four-reverse `CONFIRMATION_SLOT_ORDER` schedule.
+        # This is the exact check a human reviewer demonstrated the OLD
+        # audit skipped: an accepted confirmation with a reported interval
+        # mutated to sit outside [70, 80] used to pass with
+        # `matches_firmware=True`. It cannot now.
+        raw_confirmation_observations = {
+            int(decoded["slot_index"]): decoded
+            for decoded in _bw_tick_records_by_kind(
+                confirmation_terminal_ticks[0], "breakaway_raw_observation"
+            )
+            if int(decoded["phase"]) == 2
+        }
+        for observation in raw_confirmation_observations.values():
+            if int(observation["plan_digest"]) != int(confirmation_terminal["plan_digest"]):
+                raise ValueError(
+                    "breakaway confirmation raw observation does not chain to its own plan digest"
+                )
+        reported_by_slot = {int(record["slot_index"]): record for record in observations}
+        confirmation_multiplier = _f32(_confidence_multiplier(_BW_CONFIRMATION_FAMILY_SIZE))
+        all_recomputed_contained = True
+        for slot_index in range(_BW_CONFIRMATION_FAMILY_SIZE):
+            expected_direction = _BW_CONFIRMATION_SLOT_ORDER_CODES[slot_index]
+            raw = raw_confirmation_observations.get(slot_index)
+            reported = reported_by_slot.get(slot_index)
+            if raw is None:
+                if confirmation_accepted:
+                    mismatches.append(
+                        "confirmation accepted but slot %d has no raw evidence to independently "
+                        "verify" % slot_index
+                    )
+                    all_recomputed_contained = False
+                continue
+            if int(raw["direction"]) != expected_direction:
+                mismatches.append(
+                    "confirmation slot %d raw direction=%d does not match the fixed "
+                    "CONFIRMATION_SLOT_ORDER (want direction=%d)"
+                    % (slot_index, raw["direction"], expected_direction)
+                )
+                all_recomputed_contained = False
+            if reported is not None and int(reported["direction"]) != expected_direction:
+                mismatches.append(
+                    "confirmation slot %d reported direction=%d does not match the fixed "
+                    "CONFIRMATION_SLOT_ORDER (want direction=%d)"
+                    % (slot_index, reported["direction"], expected_direction)
+                )
+                all_recomputed_contained = False
+            interval = _bw_observation_interval_percent(
+                int(raw["mean_rate_q"]),
+                int(raw["variance_of_mean_q2"]),
+                int(raw["target_rate_q"]),
+                int(raw["direction"]),
+                confirmation_multiplier,
+                1.0,
+                True,
+            )
+            if interval is None:
+                if confirmation_accepted:
+                    mismatches.append(
+                        "confirmation accepted but slot %d raw evidence is not independently "
+                        "representable" % slot_index
+                    )
+                    all_recomputed_contained = False
+                continue
+            offline_lower_milli = _bw_percent_to_milli(interval[0])
+            offline_upper_milli = _bw_percent_to_milli(interval[1])
+            if not (offline_lower_milli >= 70_000 and offline_upper_milli <= 80_000):
+                all_recomputed_contained = False
+            if reported is not None:
+                if offline_lower_milli != int(reported["response_lower_percent_milli"]):
+                    mismatches.append(
+                        "confirmation slot %d response_lower_percent_milli: firmware=%d offline=%d"
+                        % (
+                            slot_index,
+                            reported["response_lower_percent_milli"],
+                            offline_lower_milli,
+                        )
+                    )
+                if offline_upper_milli != int(reported["response_upper_percent_milli"]):
+                    mismatches.append(
+                        "confirmation slot %d response_upper_percent_milli: firmware=%d offline=%d"
+                        % (
+                            slot_index,
+                            reported["response_upper_percent_milli"],
+                            offline_upper_milli,
+                        )
+                    )
+                statistic = _bw_observation_statistic(
+                    int(raw["mean_rate_q"]),
+                    int(raw["variance_of_mean_q2"]),
+                    int(raw["target_rate_q"]),
+                    int(raw["direction"]),
+                )
+                if statistic is not None:
+                    offline_se_permille = _bw_relative_se_to_permille(statistic[1])
+                    if offline_se_permille != int(reported["relative_standard_error_permille"]):
+                        mismatches.append(
+                            "confirmation slot %d relative_standard_error_permille: "
+                            "firmware=%d offline=%d"
+                            % (
+                                slot_index,
+                                reported["relative_standard_error_permille"],
+                                offline_se_permille,
+                            )
+                        )
+            elif confirmation_accepted:
+                mismatches.append(
+                    "confirmation accepted but slot %d has no reported observation record"
+                    % slot_index
+                )
+        if confirmation_accepted and not all_recomputed_contained:
+            mismatches.append(
+                "confirmation accepted but at least one independently recomputed held-out "
+                "response interval is not contained in [70, 80] percent (or its direction, "
+                "schedule, or representability failed) -- REJECTED"
+            )
+        if confirmation_accepted and confirmation_planned is not None:
+            candidate_p_raw = int(confirmation_planned["candidate_p_raw"])
+            confirmed_p_raw = int(confirmation_terminal["confirmed_p_raw"])
+            if candidate_p_raw != confirmed_p_raw:
+                mismatches.append(
+                    "confirmation accepted candidate_p_raw=%d != confirmed_p_raw=%d"
+                    % (candidate_p_raw, confirmed_p_raw)
+                )
+
         if observations:
             expected_max_se = max(
                 int(record["relative_standard_error_permille"]) for record in observations

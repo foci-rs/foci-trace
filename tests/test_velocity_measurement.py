@@ -8,6 +8,13 @@ from foci_trace.protocol import decode_breakaway_record
 from foci_trace.velocity_measurement import (
     AccuracyDecision,
     VelocityObservation,
+    _BW_NOMINATION_SCREEN_C_SIGMA,
+    _BW_STAGE_B_SCHEMA_REVISION,
+    _bw_observation_interval_percent,
+    _bw_observation_statistic,
+    _bw_percent_to_milli,
+    _bw_relative_se_to_permille,
+    _confidence_multiplier,
     analyze_velocity_observations,
     analyze_stationary_tail,
     audit_breakaway_campaign,
@@ -2954,6 +2961,62 @@ def _bw_record(raw: bytes) -> tuple[bytes, dict[str, object]]:
     return raw, decode_breakaway_record(raw)
 
 
+def _bw_raw_observation(
+    run_sequence: int,
+    sequence: int,
+    plan_digest: int,
+    phase: int,
+    rung_index: int,
+    slot_index: int,
+    direction: int,
+    mean_rate_q: int,
+    variance_of_mean_q2: int,
+    target_rate_q: int,
+) -> bytes:
+    """Build a tag-5 `BreakawayRawObservation` record's raw bytes.
+
+    `struct.pack` has no native 128-bit format code, so `variance_of_mean_q2`
+    is appended as its own 16-byte little-endian span rather than folded into
+    a single `struct.pack` call, mirroring `_EvidenceCursor._take_u128` and
+    the firmware's own `push_u128` (`breakaway_trace_reporting.rs`).
+    """
+    head = struct.pack(
+        "<BIHQBBBBq",
+        5,
+        run_sequence,
+        sequence,
+        plan_digest,
+        phase,
+        rung_index,
+        slot_index,
+        direction,
+        mean_rate_q,
+    )
+    variance_bytes = (variance_of_mean_q2 & ((1 << 128) - 1)).to_bytes(16, "little")
+    tail = struct.pack("<q", target_rate_q)
+    return head + variance_bytes + tail
+
+
+def _bw_synthetic_atom(
+    response_percent: float, relative_se: float, direction: int, target_rate_q: int = 1_000_000
+) -> tuple[int, int, int]:
+    """Construct a `(mean_rate_q, variance_of_mean_q2, target_rate_q)` raw
+    atom that reproduces approximately the given response percent and
+    relative standard error under `_bw_observation_statistic`.
+
+    Test-only fixture helper: builders use this (together with the
+    production `_bw_observation_interval_percent`/`_bw_percent_to_milli`
+    functions under test) to generate self-consistent raw evidence and
+    firmware-reported wire bytes together, the same way the rest of this
+    builder derives expected digests by calling the production digest
+    functions directly rather than hand-computing them.
+    """
+    magnitude = round(response_percent / 100.0 * target_rate_q)
+    mean_rate_q = magnitude if direction == 0 else -magnitude
+    variance_of_mean_q2 = round((relative_se * magnitude) ** 2)
+    return mean_rate_q, variance_of_mean_q2, target_rate_q
+
+
 class _BreakawayCampaignBuilder:
     """Assembles a self-consistent, digest-chained synthetic breakaway campaign.
 
@@ -3081,13 +3144,19 @@ class _BreakawayCampaignBuilder:
             self.ladder["gains"][self.ladder["gains"].index(self.breakaway_raw) + 1]
             - self.breakaway_raw
         )
+        # Tag 5's per-rung `breakaway_ladder_rung` fan-out is gone: the plan's
+        # own summary (floor/breakaway/ceiling/
+        # observations_per_direction/maximum_workflow_ms) is the only wire
+        # evidence for the ladder's shape now, plus `plan_digest` itself.
+        # `audit_breakaway_campaign` regenerates `gains[]` from that summary.
         planned = _bw_tag(
             3,
-            "IHQQHBHHBHHII",
+            "IHQQHHBHHBHHII",
             self.run_sequence,
             sequence,
             digest,
             prior,
+            _BW_STAGE_B_SCHEMA_REVISION,
             self.ladder["confidence_family_size"],
             self.ladder["rung_count"],
             self.observations_per_direction,
@@ -3099,10 +3168,6 @@ class _BreakawayCampaignBuilder:
             self.workflow_envelope_ms,
         )
         ceiling_source = _bw_tag(4, "IHQB", self.run_sequence, sequence, digest, 0)
-        rungs = [
-            _bw_tag(5, "IHQBH", self.run_sequence, sequence, digest, index, gain)
-            for index, gain in enumerate(self.ladder["gains"])
-        ]
         return {
             "event_id": 155,
             "timestamp_ticks": 3_000,
@@ -3110,7 +3175,6 @@ class _BreakawayCampaignBuilder:
             "records": [
                 _bw_record(planned),
                 _bw_record(ceiling_source),
-                *[_bw_record(r) for r in rungs],
             ],
         }
 
@@ -3121,16 +3185,32 @@ class _BreakawayCampaignBuilder:
         plan_digest: int | None = None,
         prior_plan_digest: int | None = None,
         terminal_cause: int = 0,
-        margins: list[tuple[int, int, int]] | None = None,
+        margins: list[tuple[int, float, float]] | None = None,
         collected_count: int | None = None,
+        omit_raw_evidence: bool = False,
     ) -> dict:
         """Build a discovery-terminal tick from `margins`.
 
-        `margins` is `(collected_index, lower_percent_milli,
-        upper_percent_milli)` tuples in collection order. A gap in
-        `collected_index` (e.g. `[(0, ...), (1, ...), (3, ...)]`, skipping 2)
-        is realistic firmware behavior, not a test-only shape: `rung_
-        nomination_bounds` (band_confirmation.rs:306-325) can mark a
+        `margins` is `(collected_index, response_percent, relative_se)`
+        tuples in collection order. For each entry this generates a
+        complete raw-observation octet (four synthetic forward and four
+        synthetic reverse `BreakawayRawObservation`s, all sharing the same
+        response/SE) and DERIVES the `BreakawayDiscoveryRungMargin`'s own
+        `lower_percent_milli`/`upper_percent_milli` from that SAME raw
+        evidence via the production `_bw_observation_interval_percent`/
+        `_bw_percent_to_milli` functions (nomination's own parameters:
+        multiplier m(8), `NOMINATION_SCREEN_C_SIGMA`, outward rounding) --
+        never chosen independently of the raw evidence -- so a fresh
+        builder's raw evidence and reported bounds always agree, exactly as
+        `audit_breakaway_campaign`'s independent nomination recompute
+        requires. `omit_raw_evidence=True` skips emitting the
+        raw-observation records while still emitting the (self-consistently
+        derived) margin records, for tests that want to see how the audit
+        reacts to a margin record with no supporting raw evidence.
+
+        A gap in `collected_index` (e.g. `[(0, ...), (1, ...), (3, ...)]`,
+        skipping 2) is realistic firmware behavior, not a test-only shape:
+        `rung_nomination_bounds` (band_confirmation.rs:306-325) can mark a
         genuinely in-band, genuinely collected rung `nominatable: false`, and
         `discovery_rung_margin_report` (breakaway_reporting.rs:416-417) then
         emits no wire record for it at all -- so `collected_count` (passed
@@ -3145,13 +3225,45 @@ class _BreakawayCampaignBuilder:
         digest = self.discovery_digest if plan_digest is None else plan_digest
         prior = self.probe_digest if prior_plan_digest is None else prior_plan_digest
         if margins is None:
-            margins = [(0, 71_000, 76_000), (1, 74_000, 79_000)]
+            margins = [(0, 75.0, 0.01), (1, 76.0, 0.012)]
         if collected_count is None:
             collected_count = len(margins)
+        nomination_multiplier = _confidence_multiplier(8)
         margin_records = []
+        raw_records = []
         previous_mid: int | None = None
         previous_collected_index: int | None = None
-        for collected_index, lower, upper in margins:
+        for collected_index, response_percent, relative_se in margins:
+            p_raw = self.ladder["gains"][
+                collected_index + self.ladder["gains"].index(self.breakaway_raw)
+            ]
+            rung_index = self.ladder["gains"].index(p_raw)
+            atoms: dict[int, tuple[int, int, int]] = {}
+            for direction in (0, 1):
+                atoms[direction] = _bw_synthetic_atom(response_percent, relative_se, direction)
+                if not omit_raw_evidence:
+                    mean_rate_q, variance_of_mean_q2, target_rate_q = atoms[direction]
+                    for slot in range(4):
+                        raw_records.append(
+                            _bw_raw_observation(
+                                self.run_sequence,
+                                sequence,
+                                digest,
+                                1,
+                                rung_index,
+                                slot,
+                                direction,
+                                mean_rate_q,
+                                variance_of_mean_q2,
+                                target_rate_q,
+                            )
+                        )
+            interval = _bw_observation_interval_percent(
+                *atoms[0], 0, nomination_multiplier, _BW_NOMINATION_SCREEN_C_SIGMA, True
+            )
+            assert interval is not None
+            lower = _bw_percent_to_milli(interval[0])
+            upper = _bw_percent_to_milli(interval[1])
             margin, half_width = breakaway_discovery_rung_margin(lower, upper)
             mid = (lower + upper) // 2
             step = (
@@ -3162,9 +3274,6 @@ class _BreakawayCampaignBuilder:
             )
             previous_mid = mid
             previous_collected_index = collected_index
-            p_raw = self.ladder["gains"][
-                collected_index + self.ladder["gains"].index(self.breakaway_raw)
-            ]
             margin_records.append(
                 _bw_tag(
                     7,
@@ -3197,7 +3306,11 @@ class _BreakawayCampaignBuilder:
             "event_id": 156,
             "timestamp_ticks": 4_000,
             "sequence": sequence,
-            "records": [*[_bw_record(r) for r in margin_records], _bw_record(terminal)],
+            "records": [
+                *[_bw_record(r) for r in raw_records],
+                *[_bw_record(r) for r in margin_records],
+                _bw_record(terminal),
+            ],
         }
 
     def confirmation_plan_tick(
@@ -3244,14 +3357,92 @@ class _BreakawayCampaignBuilder:
         masks: tuple[int, int, int, int, int, int] = (0b1111,) * 6,
         observation_count: int = 8,
         relative_ses: list[int] | None = None,
+        response_percent: float = 75.0,
+        direction_overrides: dict[int, int] | None = None,
+        confirmed_p_raw_override: int | None = None,
+        omit_raw_evidence: bool = False,
     ) -> dict:
+        """Build a confirmation-terminal tick.
+
+        Each of `observation_count` held-out strokes' raw evidence (a
+        synthetic atom at `response_percent`, with a relative SE close to
+        `relative_ses[slot] / 1000`) is generated first; the
+        `BandConfirmationObservation` wire record's own response bounds and
+        SE are DERIVED from that same atom via the production
+        `_bw_observation_interval_percent`/`_bw_percent_to_milli`/
+        `_bw_relative_se_to_permille` functions (confirmation's own
+        parameters: multiplier m(8), c_sigma = 1.0, outward rounding) --
+        never chosen independently -- so a fresh builder's raw evidence and
+        reported bounds always agree, exactly as `audit_breakaway_campaign`'s
+        independent confirmation recompute requires.
+        `response_percent=69.0` (or any value outside [70, 80]) reproduces
+        the exact tamper a human reviewer demonstrated the OLD audit passed:
+        an accepted confirmation whose (raw-evidence-recomputed) interval
+        sits outside the mandatory band.
+
+        `direction_overrides` maps a slot index to a direction code that
+        deliberately breaks the fixed four-forward-then-four-reverse
+        `CONFIRMATION_SLOT_ORDER` schedule -- both the raw observation and
+        the reported wire record use the override, so the ONLY thing that
+        disagrees with the frozen schedule is the schedule itself, not any
+        other recomputed value. `confirmed_p_raw_override` lets a test claim
+        a `confirmed_p_raw` different from the nominated `candidate_p_raw`
+        without touching anything else. `omit_raw_evidence=True` skips
+        emitting the raw-observation records while still emitting the
+        (self-consistently derived) wire observation records.
+        """
         digest = self.confirmation_digest if plan_digest is None else plan_digest
         prior = self.discovery_digest if prior_plan_digest is None else prior_plan_digest
         if relative_ses is None:
             relative_ses = [10, 12, 15, 9, 11, 13, 8, 14][:observation_count]
+        direction_overrides = direction_overrides or {}
+        confirmation_multiplier = _confidence_multiplier(8)
         observations = []
+        raw_records = []
+        actual_ses: list[int] = []
         for slot in range(observation_count):
-            direction = 0 if slot < 4 else 1
+            direction = direction_overrides.get(slot, 0 if slot < 4 else 1)
+            relative_se = relative_ses[slot] / 1000.0
+            mean_rate_q, variance_of_mean_q2, target_rate_q = _bw_synthetic_atom(
+                response_percent, relative_se, direction
+            )
+            if not omit_raw_evidence:
+                raw_records.append(
+                    _bw_raw_observation(
+                        self.run_sequence,
+                        sequence,
+                        digest,
+                        2,
+                        0,
+                        slot,
+                        direction,
+                        mean_rate_q,
+                        variance_of_mean_q2,
+                        target_rate_q,
+                    )
+                )
+            interval = _bw_observation_interval_percent(
+                mean_rate_q,
+                variance_of_mean_q2,
+                target_rate_q,
+                direction,
+                confirmation_multiplier,
+                1.0,
+                True,
+            )
+            assert interval is not None
+            lower = _bw_percent_to_milli(interval[0])
+            upper = _bw_percent_to_milli(interval[1])
+            # Recompute the reported SE from the actual (integer-rounded)
+            # atom fields, not the idealized `relative_se` float used to
+            # construct them, so this always matches what an independent
+            # recompute from the wire's raw evidence produces bit-for-bit.
+            statistic = _bw_observation_statistic(
+                mean_rate_q, variance_of_mean_q2, target_rate_q, direction
+            )
+            assert statistic is not None
+            se_permille = _bw_relative_se_to_permille(statistic[1])
+            actual_ses.append(se_permille)
             observations.append(
                 _bw_tag(
                     11,
@@ -3261,12 +3452,17 @@ class _BreakawayCampaignBuilder:
                     digest,
                     slot,
                     direction,
-                    71_000,
-                    79_000,
-                    relative_ses[slot],
+                    lower,
+                    upper,
+                    se_permille,
                 )
             )
-        max_se = max(relative_ses) if relative_ses else 0
+        max_se = max(actual_ses) if actual_ses else 0
+        confirmed_p_raw = (
+            confirmed_p_raw_override
+            if confirmed_p_raw_override is not None
+            else (self.candidate_p_raw if accepted else 0)
+        )
         terminal = _bw_tag(
             10,
             "IHQQHBBBBBBBBHHHB",
@@ -3278,7 +3474,7 @@ class _BreakawayCampaignBuilder:
             terminal_cause,
             *masks,
             accepted,
-            self.candidate_p_raw if accepted else 0,
+            confirmed_p_raw,
             max_se,
             self.required_se,
             0,
@@ -3287,7 +3483,11 @@ class _BreakawayCampaignBuilder:
             "event_id": 158,
             "timestamp_ticks": 6_000,
             "sequence": sequence,
-            "records": [*[_bw_record(r) for r in observations], _bw_record(terminal)],
+            "records": [
+                *[_bw_record(r) for r in raw_records],
+                *[_bw_record(r) for r in observations],
+                _bw_record(terminal),
+            ],
         }
 
     def campaign_terminal_tick(
@@ -3544,6 +3744,106 @@ def test_audit_breakaway_campaign_rejects_an_accepted_confirmation_with_incomple
     ]
     with pytest.raises(ValueError, match="incomplete"):
         audit_breakaway_campaign(ticks)
+
+
+def test_audit_breakaway_campaign_rejects_an_accepted_confirmation_with_a_raw_interval_outside_the_band() -> (
+    None
+):
+    """Acceptance test for the confirmation raw-evidence recompute.
+
+    A human reviewer demonstrated that the audit, before this fix, certified
+    an ACCEPTED confirmation whose interval was mutated to 69% -- outside the
+    mandatory [70, 80] band -- because nothing independently recomputed each
+    held-out stroke's response interval from raw evidence; the audit only
+    checked that firmware's OWN reported numbers were mutually consistent
+    (complete masks, an aggregate max-of-reported-SEs). This fixture
+    reproduces that exact scenario: every held-out stroke's RAW evidence
+    (not just its wire-reported bounds) genuinely settles at 69%, and the
+    confirmation terminal still reports `accepted=1`. It must now be
+    rejected.
+    """
+    builder = _BreakawayCampaignBuilder()
+    ticks = [
+        builder.probe_plan_tick(),
+        builder.probe_derived_tick(),
+        builder.discovery_plan_tick(),
+        builder.discovery_terminal_tick(),
+        builder.confirmation_plan_tick(),
+        builder.confirmation_terminal_tick(response_percent=69.0),
+        builder.campaign_terminal_tick(),
+    ]
+    result = audit_breakaway_campaign(ticks)
+    assert result["matches_firmware"] is False
+    assert any("not contained in [70, 80]" in mismatch for mismatch in result["mismatches"])
+
+
+def test_audit_breakaway_campaign_rejects_a_confirmed_p_that_does_not_match_the_candidate() -> None:
+    """A confirmed gain that silently diverges from the nominated candidate.
+
+    Must be rejected even when every interval is honestly contained in
+    [70, 80] and every mask is complete -- the OLD audit never compared
+    `confirmation_planned.candidate_p_raw` against
+    `confirmation_terminal.confirmed_p_raw` at all.
+    """
+    builder = _BreakawayCampaignBuilder()
+    ticks = [
+        builder.probe_plan_tick(),
+        builder.probe_derived_tick(),
+        builder.discovery_plan_tick(),
+        builder.discovery_terminal_tick(),
+        builder.confirmation_plan_tick(),
+        builder.confirmation_terminal_tick(confirmed_p_raw_override=builder.candidate_p_raw + 1),
+        builder.campaign_terminal_tick(),
+    ]
+    result = audit_breakaway_campaign(ticks)
+    assert result["matches_firmware"] is False
+    assert any("confirmed_p_raw" in mismatch for mismatch in result["mismatches"])
+
+
+def test_audit_breakaway_campaign_rejects_a_wrong_confirmation_slot_schedule() -> None:
+    """The eight held-out strokes must follow the fixed schedule.
+
+    Four forward observations then four reverse (`CONFIRMATION_SLOT_ORDER`).
+    Swapping slot 0's direction to reverse (both in the raw evidence and the
+    reported wire record, so every value-agreement check still passes) must
+    still be caught and rejected: the schedule itself is part of the
+    contract, not just a byproduct of the plan digest.
+    """
+    builder = _BreakawayCampaignBuilder()
+    ticks = [
+        builder.probe_plan_tick(),
+        builder.probe_derived_tick(),
+        builder.discovery_plan_tick(),
+        builder.discovery_terminal_tick(),
+        builder.confirmation_plan_tick(),
+        builder.confirmation_terminal_tick(direction_overrides={0: 1}),
+        builder.campaign_terminal_tick(),
+    ]
+    result = audit_breakaway_campaign(ticks)
+    assert result["matches_firmware"] is False
+    assert any("CONFIRMATION_SLOT_ORDER" in mismatch for mismatch in result["mismatches"])
+
+
+def test_audit_breakaway_campaign_rejects_an_accepted_confirmation_missing_raw_evidence() -> None:
+    """An accepted confirmation with no raw evidence at all.
+
+    Cannot be independently verified and must not be trusted by default --
+    the whole point of FIX F is that an accepted flag alone is never
+    sufficient.
+    """
+    builder = _BreakawayCampaignBuilder()
+    ticks = [
+        builder.probe_plan_tick(),
+        builder.probe_derived_tick(),
+        builder.discovery_plan_tick(),
+        builder.discovery_terminal_tick(),
+        builder.confirmation_plan_tick(),
+        builder.confirmation_terminal_tick(omit_raw_evidence=True),
+        builder.campaign_terminal_tick(),
+    ]
+    result = audit_breakaway_campaign(ticks)
+    assert result["matches_firmware"] is False
+    assert any("no raw evidence" in mismatch for mismatch in result["mismatches"])
 
 
 def test_audit_breakaway_campaign_rejects_a_second_candidate_after_failure() -> None:

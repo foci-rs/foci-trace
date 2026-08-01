@@ -2240,11 +2240,12 @@ def _bw_probe_terminal() -> bytes:
 
 def _bw_discovery_planned() -> bytes:
     return bytes([3]) + struct.pack(
-        "<IHQQHBHHBHHII",
+        "<IHQQHHBHHBHHII",
         _BW_RUN_SEQUENCE,
         _BW_EVIDENCE_SEQUENCE,
         _BW_PLAN_DIGEST,
         _BW_PRIOR_PLAN_DIGEST,
+        0x0708,
         0x0910,
         8,
         4,
@@ -2267,14 +2268,30 @@ def _bw_ceiling_source() -> bytes:
     )
 
 
-def _bw_ladder_rung() -> bytes:
-    return bytes([5]) + struct.pack(
-        "<IHQBH",
-        _BW_RUN_SEQUENCE,
-        _BW_EVIDENCE_SEQUENCE,
-        _BW_PLAN_DIGEST,
-        3,
-        0x0910,
+_BW_RAW_OBSERVATION_VARIANCE_OF_MEAN_Q2 = 0x1112_1314_1516_1718_191A_1B1C_1D1E_1F20
+
+
+def _bw_raw_observation() -> bytes:
+    """Tag 5's new shape: `struct.pack` has no native
+    128-bit format code, so `variance_of_mean_q2` is appended as its own
+    16-byte little-endian span rather than folded into the `struct.pack`
+    call the other fields share -- mirroring `_EvidenceCursor._take_u128`.
+    """
+    return (
+        bytes([5])
+        + struct.pack(
+            "<IHQBBBBq",
+            _BW_RUN_SEQUENCE,
+            _BW_EVIDENCE_SEQUENCE,
+            _BW_PLAN_DIGEST,
+            1,
+            3,
+            2,
+            1,
+            -0x0102_0304_0506_0708,
+        )
+        + _BW_RAW_OBSERVATION_VARIANCE_OF_MEAN_Q2.to_bytes(16, "little")
+        + struct.pack("<q", 0x2122_2324_2526_2728)
     )
 
 
@@ -2434,11 +2451,12 @@ def test_decode_breakaway_discovery_planned_matches_the_firmware_golden_bytes() 
     from foci_trace.protocol import decode_breakaway_record
 
     payload = _bw_discovery_planned()
-    assert len(payload) == 43
+    assert len(payload) == 45
     decoded = decode_breakaway_record(payload)
     assert decoded["record_kind"] == "breakaway_discovery_planned"
     assert decoded["plan_digest"] == _BW_PLAN_DIGEST
     assert decoded["prior_plan_digest"] == _BW_PRIOR_PLAN_DIGEST
+    assert decoded["schema_revision"] == 0x0708
     assert decoded["family_size"] == 0x0910
     assert decoded["rung_count"] == 8
     assert decoded["observations_per_direction"] == 4
@@ -2460,15 +2478,32 @@ def test_decode_breakaway_ceiling_source_matches_the_firmware_golden_bytes() -> 
     assert decoded["binding_source"] == 1
 
 
-def test_decode_breakaway_ladder_rung_matches_the_firmware_golden_bytes() -> None:
+def test_decode_breakaway_raw_observation_matches_the_firmware_golden_bytes() -> None:
     from foci_trace.protocol import decode_breakaway_record
 
-    payload = _bw_ladder_rung()
-    assert len(payload) == 18
+    payload = _bw_raw_observation()
+    assert len(payload) == 51
     decoded = decode_breakaway_record(payload)
-    assert decoded["record_kind"] == "breakaway_ladder_rung"
+    assert decoded["record_kind"] == "breakaway_raw_observation"
+    assert decoded["plan_digest"] == _BW_PLAN_DIGEST
+    assert decoded["phase"] == 1
     assert decoded["rung_index"] == 3
-    assert decoded["p_raw"] == 0x0910
+    assert decoded["slot_index"] == 2
+    assert decoded["direction"] == 1
+    assert decoded["mean_rate_q"] == -0x0102_0304_0506_0708
+    assert decoded["variance_of_mean_q2"] == _BW_RAW_OBSERVATION_VARIANCE_OF_MEAN_Q2
+    assert decoded["target_rate_q"] == 0x2122_2324_2526_2728
+
+
+def test_decode_breakaway_raw_observation_rejects_an_invalid_phase() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    payload = bytearray(_bw_raw_observation())
+    # Layout: tag(1) + run_sequence(4) + evidence_sequence(2) + plan_digest(8)
+    # puts `phase` at byte offset 15.
+    payload[15] = 0  # 0 (Probe) never carries a raw observation.
+    with pytest.raises(DecodeError, match="phase is invalid"):
+        decode_breakaway_record(bytes(payload))
 
 
 def test_decode_breakaway_discovery_terminal_matches_the_firmware_golden_bytes() -> None:
@@ -2629,26 +2664,33 @@ def test_decode_breakaway_record_rejects_a_length_mismatch_for_a_known_tag() -> 
         decode_breakaway_record(_bw_probe_planned() + b"\x00")
 
 
-def test_the_only_breakaway_tag_that_collides_with_a_legacy_wire_shape_is_tag_one() -> None:
-    """`decode_frame`'s generic decoder recovers every breakaway tag except one.
+def test_the_only_breakaway_tags_that_collide_with_a_legacy_wire_shape_are_one_and_three() -> None:
+    """`decode_frame`'s generic decoder recovers every breakaway tag except two.
 
-    Tags 0 and 2-12 fail every existing `(kind, length)` branch in
+    Tags 0, 2, and 4-12 fail every existing `(kind, length)` branch in
     `_decode_velocity_sweep_evidence` and raise, so `_decode_payload` falls
     back to `decode_breakaway_record` and recovers the correct interpretation
-    with no extra context needed. Tag 1 (`directional_breakaway`, 22 bytes)
-    is the one genuine collision: it is byte-for-byte identical in shape to
-    the legacy 22-byte `integral_plan_marker` record, so the generic decoder
-    "succeeds" with the wrong interpretation. Resolving that one case needs
-    the marker-adjacency context `assemble_breakaway_ticks` provides -- this
-    test pins the collision so a future change to either wire shape doesn't
-    silently make it worse or silently fix it unnoticed.
+    with no extra context needed. Two tags genuinely collide with an
+    unrelated legacy wire shape that shares the same leading tag byte and
+    exact payload length, so the generic decoder "succeeds" with the wrong
+    interpretation:
+
+    - Tag 1 (`directional_breakaway`, 22 bytes) is byte-for-byte identical in
+      shape to the legacy 22-byte `integral_plan_marker` record.
+    - Tag 3 (`discovery_planned`) widened from 43 to 45 bytes when
+      `schema_revision` was added, and 45 bytes also happens to be the
+      legacy non-compact Stage-B `rung` record's exact length.
+
+    Resolving either case needs the marker-adjacency context
+    `assemble_breakaway_ticks` provides -- this test pins both collisions so
+    a future change to any of the three wire shapes doesn't silently make it
+    worse or silently fix it unnoticed.
     """
     for builder in (
         _bw_probe_planned,
         _bw_probe_terminal,
-        _bw_discovery_planned,
         _bw_ceiling_source,
-        _bw_ladder_rung,
+        _bw_raw_observation,
         _bw_discovery_terminal,
         _bw_discovery_rung_margin,
         _bw_rung_zero_diagnostic,
@@ -2661,11 +2703,19 @@ def test_the_only_breakaway_tag_that_collides_with_a_legacy_wire_shape_is_tag_on
         frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
         assert str(frame.payload["record_kind"]).startswith("breakaway_")
 
-    collided_payload = _bw_directional_breakaway()
-    collided_frame = decode_frame(
-        _header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, collided_payload) + collided_payload
+    collided_directional_payload = _bw_directional_breakaway()
+    collided_directional_frame = decode_frame(
+        _header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, collided_directional_payload)
+        + collided_directional_payload
     )
-    assert collided_frame.payload["record_kind"] == "integral_plan_marker"
+    assert collided_directional_frame.payload["record_kind"] == "integral_plan_marker"
+
+    collided_discovery_payload = _bw_discovery_planned()
+    collided_discovery_frame = decode_frame(
+        _header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, collided_discovery_payload)
+        + collided_discovery_payload
+    )
+    assert collided_discovery_frame.payload["record_kind"] == "rung"
 
 
 def test_assemble_breakaway_ticks_bundles_records_by_marker() -> None:
@@ -2685,7 +2735,7 @@ def test_assemble_breakaway_ticks_bundles_records_by_marker() -> None:
         (FRAME_TYPE_EVENT, 101, b"", event_payload(EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN, 0x5060)),
         (FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, 200, _bw_discovery_planned(), None),
         (FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, 200, _bw_ceiling_source(), None),
-        (FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, 200, _bw_ladder_rung(), None),
+        (FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, 200, _bw_raw_observation(), None),
         (
             FRAME_TYPE_EVENT,
             201,
@@ -2704,7 +2754,7 @@ def test_assemble_breakaway_ticks_bundles_records_by_marker() -> None:
     assert [decoded["record_kind"] for _raw, decoded in ticks[1]["records"]] == [
         "breakaway_discovery_planned",
         "breakaway_ceiling_source",
-        "breakaway_ladder_rung",
+        "breakaway_raw_observation",
     ]
 
 

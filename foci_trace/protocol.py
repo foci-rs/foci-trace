@@ -468,12 +468,30 @@ class _EvidenceCursor:
         self.offset = 0
 
     def take(self, fmt: str) -> int:
+        if fmt == "U":
+            return self._take_u128()
         size = struct.calcsize("<" + fmt)
         if self.offset + size > len(self.payload):
             raise DecodeError("velocity-sweep evidence record is truncated")
         value = struct.unpack_from("<" + fmt, self.payload, self.offset)[0]
         self.offset += size
         return int(value)
+
+    def _take_u128(self) -> int:
+        """Read one little-endian unsigned 128-bit field.
+
+        `struct` has no native 128-bit format code, so this mirrors the
+        firmware's own `push_u128` (`breakaway_trace_reporting.rs`): a low
+        u64 half followed by a high u64 half, reassembled here from the raw
+        16-byte little-endian span rather than two separate `struct.unpack`
+        calls.
+        """
+        size = 16
+        if self.offset + size > len(self.payload):
+            raise DecodeError("velocity-sweep evidence record is truncated")
+        value = int.from_bytes(self.payload[self.offset : self.offset + size], "little")
+        self.offset += size
+        return value
 
     def finish(self) -> None:
         if self.offset != len(self.payload):
@@ -2042,7 +2060,13 @@ BREAKAWAY_TAG_DIRECTIONAL_BREAKAWAY = 1
 BREAKAWAY_TAG_PROBE_TERMINAL = 2
 BREAKAWAY_TAG_DISCOVERY_PLANNED = 3
 BREAKAWAY_TAG_CEILING_SOURCE = 4
-BREAKAWAY_TAG_LADDER_RUNG = 5
+# Tag 5 previously carried a per-rung resolved-ladder record (`p_raw` only);
+# that fan-out was dropped in favor of the raw-observation stream that lets
+# an offline decoder independently recompute nomination margins and
+# confirmation containment instead of trusting firmware's reduced bounds.
+# See `decode_breakaway_record`'s tag-5 branch and
+# `breakaway_trace_reporting.rs::encode_raw_observation`'s own doc comment.
+BREAKAWAY_TAG_RAW_OBSERVATION = 5
 BREAKAWAY_TAG_DISCOVERY_TERMINAL = 6
 BREAKAWAY_TAG_DISCOVERY_RUNG_MARGIN = 7
 BREAKAWAY_TAG_RUNG_ZERO_DIAGNOSTIC = 8
@@ -2063,10 +2087,13 @@ def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
     tag space is scoped to the surrounding `EVENT_COMMISSION_BREAKAWAY_*`
     marker (152-159), not globally unique. Tag 1 (`directional_breakaway`, 22
     bytes) collides byte-for-byte with the legacy 22-byte
-    `integral_plan_marker` shape decoded by `_decode_velocity_sweep_evidence`;
-    a caller that already knows (from marker adjacency) that a raw payload
-    belongs to a breakaway bundle must call this function directly on
-    `Frame.raw_payload` rather than trust `Frame.payload`.
+    `integral_plan_marker` shape decoded by `_decode_velocity_sweep_evidence`,
+    and tag 3 (`discovery_planned`, 45 bytes since `schema_revision` was added)
+    collides byte-for-byte with the legacy non-compact
+    Stage-B `rung` shape, which also happens to be 45 bytes; a caller that
+    already knows (from marker adjacency) that a raw payload belongs to a
+    breakaway bundle must call this function directly on `Frame.raw_payload`
+    rather than trust `Frame.payload`.
     """
     _require(payload, 1, "breakaway evidence")
     cursor = _EvidenceCursor(payload)
@@ -2120,7 +2147,7 @@ def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
         if decoded["terminal_cause"] not in BREAKAWAY_TERMINAL_CAUSE_NAMES:
             raise DecodeError("breakaway probe terminal cause is invalid")
         decoded["record_kind"] = "breakaway_probe_terminal"
-    elif tag == BREAKAWAY_TAG_DISCOVERY_PLANNED and len(payload) == 43:
+    elif tag == BREAKAWAY_TAG_DISCOVERY_PLANNED and len(payload) == 45:
         decoded = _take_fields(
             cursor,
             (
@@ -2128,6 +2155,7 @@ def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
                 ("evidence_sequence", "H"),
                 ("plan_digest", "Q"),
                 ("prior_plan_digest", "Q"),
+                ("schema_revision", "H"),
                 ("family_size", "H"),
                 ("rung_count", "B"),
                 ("observations_per_direction", "H"),
@@ -2155,18 +2183,27 @@ def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
         if decoded["binding_source"] not in (0, 1):
             raise DecodeError("breakaway ceiling binding source is invalid")
         decoded["record_kind"] = "breakaway_ceiling_source"
-    elif tag == BREAKAWAY_TAG_LADDER_RUNG and len(payload) == 18:
+    elif tag == BREAKAWAY_TAG_RAW_OBSERVATION and len(payload) == 51:
         decoded = _take_fields(
             cursor,
             (
                 ("run_sequence", "I"),
                 ("evidence_sequence", "H"),
                 ("plan_digest", "Q"),
+                ("phase", "B"),
                 ("rung_index", "B"),
-                ("p_raw", "H"),
+                ("slot_index", "B"),
+                ("direction", "B"),
+                ("mean_rate_q", "q"),
+                ("variance_of_mean_q2", "U"),
+                ("target_rate_q", "q"),
             ),
         )
-        decoded["record_kind"] = "breakaway_ladder_rung"
+        if decoded["phase"] not in (1, 2):
+            raise DecodeError("breakaway raw observation phase is invalid")
+        if decoded["direction"] not in (0, 1):
+            raise DecodeError("breakaway raw observation direction is invalid")
+        decoded["record_kind"] = "breakaway_raw_observation"
     elif tag == BREAKAWAY_TAG_DISCOVERY_TERMINAL and len(payload) == 28:
         decoded = _take_fields(
             cursor,
