@@ -3862,6 +3862,53 @@ def _bw_raw_observation_tick(
     }
 
 
+def test_audit_breakaway_flags_a_confirmation_collected_mask_that_omits_received_slots() -> None:
+    """A non-accepted terminal with three forward strokes but zeroed collected
+    masks used to pass as fully consistent."""
+    builder = _BreakawayCampaignBuilder()
+    ticks = [
+        builder.probe_plan_tick(),
+        builder.probe_derived_tick(),
+        builder.discovery_plan_tick(),
+        *builder.discovery_ticks(),
+        builder.confirmation_plan_tick(),
+        *builder.confirmation_ticks(
+            accepted=0,
+            terminal_cause=15,
+            observation_count=3,
+            masks=(0, 0, 0, 0, 0, 0),
+        ),
+        builder.campaign_terminal_tick(accepted=0, terminal_cause=15, stage_c_plan_digest=0),
+    ]
+    result = audit_breakaway_campaign(ticks)
+    assert result["matches_firmware"] is False
+    assert any("forward_collected_mask" in mismatch for mismatch in result["mismatches"])
+
+
+def test_audit_breakaway_accepts_a_partial_confirmation_with_honest_collected_masks() -> None:
+    """The same partial block is consistent when the collected masks honestly
+    report the three received forward slots and no reverse slots."""
+    builder = _BreakawayCampaignBuilder()
+    ticks = [
+        builder.probe_plan_tick(),
+        builder.probe_derived_tick(),
+        builder.discovery_plan_tick(),
+        *builder.discovery_ticks(),
+        builder.confirmation_plan_tick(),
+        *builder.confirmation_ticks(
+            accepted=0,
+            terminal_cause=15,
+            observation_count=3,
+            masks=(0b0111, 0b0111, 0b0111, 0, 0, 0),
+        ),
+        builder.campaign_terminal_tick(accepted=0, terminal_cause=15, stage_c_plan_digest=0),
+    ]
+    result = audit_breakaway_campaign(ticks)
+    assert not any("collected_mask" in mismatch for mismatch in result["mismatches"]), result[
+        "mismatches"
+    ]
+
+
 def _bw_streamed_identity_campaign() -> list[dict]:
     builder = _BreakawayCampaignBuilder()
     return [

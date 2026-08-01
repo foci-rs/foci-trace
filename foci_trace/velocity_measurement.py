@@ -6489,6 +6489,35 @@ def audit_breakaway_campaign(
             ),
             key=lambda record: int(record["slot_index"]),
         )
+        # Reconcile the reported collected masks with the slots actually
+        # received, for every outcome (not just an accepted one): the forward
+        # accumulator records schedule slots 0-3, the reverse 4-7. A terminal
+        # whose collected mask omits a slot that arrived (or claims one that did
+        # not) is inconsistent regardless of acceptance.
+        reconstructed_forward_collected = 0
+        reconstructed_reverse_collected = 0
+        for observation in observations:
+            slot = int(observation["slot_index"])
+            if 0 <= slot < 4:
+                reconstructed_forward_collected |= 1 << slot
+            elif 4 <= slot < 8:
+                reconstructed_reverse_collected |= 1 << (slot - 4)
+        if reconstructed_forward_collected != int(confirmation_terminal["forward_collected_mask"]):
+            mismatches.append(
+                "confirmation forward_collected_mask: firmware=%s received slots=%s"
+                % (
+                    format(int(confirmation_terminal["forward_collected_mask"]), "#06b"),
+                    format(reconstructed_forward_collected, "#06b"),
+                )
+            )
+        if reconstructed_reverse_collected != int(confirmation_terminal["reverse_collected_mask"]):
+            mismatches.append(
+                "confirmation reverse_collected_mask: firmware=%s received slots=%s"
+                % (
+                    format(int(confirmation_terminal["reverse_collected_mask"]), "#06b"),
+                    format(reconstructed_reverse_collected, "#06b"),
+                )
+            )
         if confirmation_accepted:
             for mask_name in (
                 "forward_collected_mask",
