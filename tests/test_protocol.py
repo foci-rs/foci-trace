@@ -206,9 +206,18 @@ def test_decodes_version_nine_pptm_velocity_diagnostic() -> None:
 
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_OBSERVATION, payload) + payload)
 
-    assert PROTOCOL_VERSION == 9
+    assert PROTOCOL_VERSION == 10
     assert frame.payload["pid_velocity_actual"] is None
     assert frame.payload["actual_velocity_pptm"] == 176
+
+
+def test_decode_frame_rejects_the_superseded_protocol_version_nine() -> None:
+    # Version 9 carried the 51-byte raw-observation record; version 10 widened it
+    # to 99 bytes, a breaking change, so a version-9 stream must be rejected at
+    # the version gate rather than misdecoded.
+    payload = bytes(88)
+    with pytest.raises(DecodeError, match="unsupported protocol version 9"):
+        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=9) + payload)
 
 
 def test_rejects_velocity_observation_with_both_diagnostic_kinds() -> None:

@@ -7,7 +7,11 @@ import struct
 from typing import Any
 
 FRAME_MAGIC = 0x43525446
-PROTOCOL_VERSION = 9
+# Bumped to 10 for the raw-observation expansion (51 -> 99
+# bytes), a breaking wire change. Version 9 is intentionally dropped from the
+# supported set so a version-9 stream (51-byte raw observations) is rejected at
+# the version gate rather than misdecoded as the wider record.
+PROTOCOL_VERSION = 10
 SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, PROTOCOL_VERSION)
 HEADER_LEN = 32
 
