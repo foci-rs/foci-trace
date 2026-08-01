@@ -6495,6 +6495,14 @@ def audit_breakaway_campaign(
                 % (confirmation_planned["plan_digest"], expected_confirmation_digest)
             )
 
+    # The fixed eight-stroke schedule must hold before any slot-keyed collapse
+    # (mask OR, per-slot dict) can hide a duplicate or a ninth stroke. Run this
+    # whenever confirmation raw observations exist, not only when a confirmation
+    # terminal was reached: a safety-aborted confirmation emits its partial raw
+    # strokes and then only the campaign closure (breakaway_campaign.rs), so a
+    # validator gated on the terminal would never see the malformed prefix.
+    _bw_validate_confirmation_slot_schedule(ticks)
+
     if confirmation_terminal_ticks:
         confirmation_terminal = _bw_single_record(
             confirmation_terminal_ticks[0], "breakaway_confirmation_terminal"
@@ -6506,9 +6514,6 @@ def audit_breakaway_campaign(
                 "breakaway confirmation terminal does not chain to its own plan digest"
             )
         confirmation_accepted = int(confirmation_terminal["accepted"]) == 1
-        # The fixed eight-stroke schedule must hold before any slot-keyed collapse
-        # (mask OR, per-slot dict) can hide a duplicate or a ninth stroke.
-        _bw_validate_confirmation_slot_schedule(ticks)
         observations = sorted(
             _bw_tick_records_by_kind(
                 confirmation_terminal_ticks[0], "breakaway_confirmation_observation"

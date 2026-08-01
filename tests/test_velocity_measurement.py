@@ -3960,6 +3960,48 @@ def test_audit_breakaway_rejects_a_ninth_duplicate_confirmation_stroke() -> None
         audit_breakaway_campaign(ticks)
 
 
+def test_audit_breakaway_rejects_a_malformed_confirmation_aborted_before_its_terminal() -> None:
+    """A safety fault aborts confirmation after streaming a malformed prefix
+    (slots 0, 0) and emits only the campaign closure -- never a confirmation
+    terminal. The schedule validator must still fire on the raw stream, so it
+    cannot be gated on the terminal's presence."""
+    builder = _BreakawayCampaignBuilder()
+    atom = _bw_synthetic_atom(75.0, 0.01, 0)
+    raw_ticks = [
+        {
+            "event_id": 160,
+            "timestamp_ticks": 5_800 + position,
+            "sequence": 100 + position,
+            "records": [
+                _bw_record(
+                    _bw_raw_observation(
+                        builder.run_sequence,
+                        100 + position,
+                        builder.confirmation_digest,
+                        2,
+                        0,
+                        0,  # both strokes claim slot 0
+                        0,
+                        *atom,
+                    )
+                )
+            ],
+        }
+        for position in range(2)
+    ]
+    ticks = [
+        builder.probe_plan_tick(),
+        builder.probe_derived_tick(),
+        builder.discovery_plan_tick(),
+        *builder.discovery_ticks(),
+        builder.confirmation_plan_tick(),
+        *raw_ticks,
+        builder.campaign_terminal_tick(accepted=0, terminal_cause=15, stage_c_plan_digest=0),
+    ]
+    with pytest.raises(ValueError, match="fixed .*schedule"):
+        audit_breakaway_campaign(ticks)
+
+
 def test_audit_breakaway_accepts_a_partial_confirmation_with_honest_collected_masks() -> None:
     """The same partial block is consistent when the collected masks honestly
     report the three received forward slots and no reverse slots."""
