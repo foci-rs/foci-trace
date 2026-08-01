@@ -3929,6 +3929,37 @@ def test_audit_breakaway_collected_mask_counts_a_stroke_with_no_reduced_record()
     ]
 
 
+def test_audit_breakaway_rejects_a_ninth_duplicate_confirmation_stroke() -> None:
+    """A ninth confirmation raw observation with a fresh, internally valid
+    sequence but a duplicate slot violates the fixed eight-stroke schedule. It
+    must be rejected, not hidden by the slot-keyed mask OR and per-slot dict."""
+    builder = _BreakawayCampaignBuilder()
+    confirmation = builder.confirmation_ticks()  # eight raw ticks (100..107) + terminal
+    atom = _bw_synthetic_atom(75.0, 0.01, 0)
+    ninth = _bw_raw_observation(
+        builder.run_sequence, 108, builder.confirmation_digest, 2, 0, 0, 0, *atom
+    )
+    ninth_tick = {
+        "event_id": 160,
+        "timestamp_ticks": 5_800,
+        "sequence": 108,
+        "records": [_bw_record(ninth)],
+    }
+    # Splice the ninth raw observation in before the confirmation terminal.
+    confirmation = confirmation[:-1] + [ninth_tick] + confirmation[-1:]
+    ticks = [
+        builder.probe_plan_tick(),
+        builder.probe_derived_tick(),
+        builder.discovery_plan_tick(),
+        *builder.discovery_ticks(),
+        builder.confirmation_plan_tick(),
+        *confirmation,
+        builder.campaign_terminal_tick(),
+    ]
+    with pytest.raises(ValueError, match="fixed .*schedule"):
+        audit_breakaway_campaign(ticks)
+
+
 def test_audit_breakaway_accepts_a_partial_confirmation_with_honest_collected_masks() -> None:
     """The same partial block is consistent when the collected masks honestly
     report the three received forward slots and no reverse slots."""

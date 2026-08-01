@@ -5721,6 +5721,29 @@ def _bw_collect_margins(ticks: list[dict[str, object]]) -> list[dict[str, object
     ]
 
 
+def _bw_validate_confirmation_slot_schedule(ticks: list[dict[str, object]]) -> None:
+    """Enforce the fixed eight-stroke confirmation schedule on the streamed raw
+    observations before any consumer collapses them by slot: the slots must be a
+    prefix 0..N-1 (a complete block is 0..7, an aborted one is shorter), each
+    exactly once and in stream order, with at most eight strokes. Reconstructing
+    masks by OR-ing slot bits and indexing observations by slot both silently hide
+    a duplicate or a ninth stroke, so this must run first."""
+    confirmation_raw = _bw_collect_raw_observations(ticks, _BW_RAW_OBSERVATION_PHASE_CONFIRMATION)
+    if len(confirmation_raw) > _BW_CONFIRMATION_FAMILY_SIZE:
+        raise ValueError(
+            "confirmation raw observations exceed the fixed eight-stroke schedule "
+            f"({len(confirmation_raw)} > {_BW_CONFIRMATION_FAMILY_SIZE})"
+        )
+    for position, observation in enumerate(confirmation_raw):
+        slot = int(observation["slot_index"])
+        if slot != position:
+            raise ValueError(
+                f"confirmation raw observation slot {slot} breaks the fixed schedule "
+                f"at stream position {position} (expected a prefix 0..N-1, each once, "
+                "in order)"
+            )
+
+
 def _bw_validate_streamed_marker_identity(ticks: list[dict[str, object]]) -> None:
     """Bind every streamed raw-observation (marker 160) and discovery-margin
     (marker 161) record to its campaign identity, so a misrouted or forged
@@ -6483,6 +6506,9 @@ def audit_breakaway_campaign(
                 "breakaway confirmation terminal does not chain to its own plan digest"
             )
         confirmation_accepted = int(confirmation_terminal["accepted"]) == 1
+        # The fixed eight-stroke schedule must hold before any slot-keyed collapse
+        # (mask OR, per-slot dict) can hide a duplicate or a ninth stroke.
+        _bw_validate_confirmation_slot_schedule(ticks)
         observations = sorted(
             _bw_tick_records_by_kind(
                 confirmation_terminal_ticks[0], "breakaway_confirmation_observation"
