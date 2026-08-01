@@ -8,11 +8,13 @@ from typing import Any
 
 FRAME_MAGIC = 0x43525446
 # Bumped to 10 for the raw-observation expansion (51 -> 99
-# bytes), a breaking wire change. Version 9 is intentionally dropped from the
-# supported set so a version-9 stream (51-byte raw observations) is rejected at
-# the version gate rather than misdecoded as the wider record.
+# bytes), a breaking wire change: a version-10 stream read by an older decoder
+# (that only knows versions up to 9) is rejected at the version gate rather than
+# misdecoded. Historical versions stay supported so committed older
+# captures (which contain no breakaway raw-observation record and are therefore
+# unaffected by the record's width change) still decode.
 PROTOCOL_VERSION = 10
-SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, PROTOCOL_VERSION)
+SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9, PROTOCOL_VERSION)
 HEADER_LEN = 32
 
 FRAME_TYPE_CRITICAL = 1
