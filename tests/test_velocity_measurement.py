@@ -3357,8 +3357,12 @@ class _BreakawayCampaignBuilder:
         if collected_count is None:
             collected_count = len(margins)
         nomination_multiplier = _confidence_multiplier(8)
-        margin_records = []
-        raw_records = []
+        # Each streamed record gets its own strictly increasing evidence_sequence
+        # (as firmware's next_sequence assigns), and its marker's sequence
+        # matches: raw observations first, then margins, then the terminal.
+        raw_records: list[tuple[int, bytes]] = []
+        margins_data: list[tuple[int, int, int, int, int, int, int]] = []
+        streamed_seq = sequence
         previous_mid: int | None = None
         previous_collected_index: int | None = None
         for collected_index, response_percent, relative_se in margins:
@@ -3373,19 +3377,23 @@ class _BreakawayCampaignBuilder:
                     mean_rate_q, variance_of_mean_q2, target_rate_q = atoms[direction]
                     for slot in range(4):
                         raw_records.append(
-                            _bw_raw_observation(
-                                self.run_sequence,
-                                sequence,
-                                digest,
-                                1,
-                                rung_index,
-                                slot,
-                                direction,
-                                mean_rate_q,
-                                variance_of_mean_q2,
-                                target_rate_q,
+                            (
+                                streamed_seq,
+                                _bw_raw_observation(
+                                    self.run_sequence,
+                                    streamed_seq,
+                                    digest,
+                                    1,
+                                    rung_index,
+                                    slot,
+                                    direction,
+                                    mean_rate_q,
+                                    variance_of_mean_q2,
+                                    target_rate_q,
+                                ),
                             )
                         )
+                        streamed_seq += 1
             interval = _bw_observation_interval_percent(
                 *atoms[0], 0, nomination_multiplier, _BW_NOMINATION_SCREEN_C_SIGMA, True
             )
@@ -3402,27 +3410,35 @@ class _BreakawayCampaignBuilder:
             )
             previous_mid = mid
             previous_collected_index = collected_index
+            margins_data.append((collected_index, p_raw, lower, upper, margin, half_width, step))
+        margin_records: list[tuple[int, bytes]] = []
+        for collected_index, p_raw, lower, upper, margin, half_width, step in margins_data:
             margin_records.append(
-                _bw_tag(
-                    7,
-                    "IHQBHiiiii",
-                    self.run_sequence,
-                    sequence,
-                    digest,
-                    collected_index,
-                    p_raw,
-                    lower,
-                    upper,
-                    margin,
-                    half_width,
-                    step,
+                (
+                    streamed_seq,
+                    _bw_tag(
+                        7,
+                        "IHQBHiiiii",
+                        self.run_sequence,
+                        streamed_seq,
+                        digest,
+                        collected_index,
+                        p_raw,
+                        lower,
+                        upper,
+                        margin,
+                        half_width,
+                        step,
+                    ),
                 )
             )
+            streamed_seq += 1
+        terminal_seq = streamed_seq
         terminal = _bw_tag(
             6,
             "IHQQHBBB",
             self.run_sequence,
-            sequence,
+            terminal_seq,
             digest,
             prior,
             self.ladder["confidence_family_size"],
@@ -3430,25 +3446,22 @@ class _BreakawayCampaignBuilder:
             collected_count,
             0,
         )
-        # Each streamed record on its own marker tick, in wire order: raw
-        # observations (marker 160) as the walk collects each stroke, then the
-        # margins (marker 161) from StreamMargins, then the terminal (marker 156).
         ticks: list[dict] = []
-        for raw in raw_records:
+        for seq, raw in raw_records:
             ticks.append(
                 {
                     "event_id": 160,
                     "timestamp_ticks": 3_500,
-                    "sequence": sequence,
+                    "sequence": seq,
                     "records": [_bw_record(raw)],
                 }
             )
-        for margin in margin_records:
+        for seq, margin in margin_records:
             ticks.append(
                 {
                     "event_id": 161,
                     "timestamp_ticks": 3_800,
-                    "sequence": sequence,
+                    "sequence": seq,
                     "records": [_bw_record(margin)],
                 }
             )
@@ -3456,7 +3469,7 @@ class _BreakawayCampaignBuilder:
             {
                 "event_id": 156,
                 "timestamp_ticks": 4_000,
-                "sequence": sequence,
+                "sequence": terminal_seq,
                 "records": [_bw_record(terminal)],
             }
         )
@@ -3498,7 +3511,7 @@ class _BreakawayCampaignBuilder:
     def confirmation_ticks(
         self,
         *,
-        sequence: int = 6,
+        sequence: int = 100,
         plan_digest: int | None = None,
         prior_plan_digest: int | None = None,
         accepted: int = 1,
@@ -3553,8 +3566,9 @@ class _BreakawayCampaignBuilder:
         direction_overrides = direction_overrides or {}
         confirmation_multiplier = _confidence_multiplier(8)
         observations = []
-        raw_records = []
+        raw_records: list[tuple[int, bytes]] = []
         actual_ses: list[int] = []
+        raw_seq = sequence
         for slot in range(observation_count):
             direction = direction_overrides.get(slot, 0 if slot < 4 else 1)
             relative_se = relative_ses[slot] / 1000.0
@@ -3563,19 +3577,23 @@ class _BreakawayCampaignBuilder:
             )
             if not omit_raw_evidence:
                 raw_records.append(
-                    _bw_raw_observation(
-                        self.run_sequence,
-                        sequence,
-                        digest,
-                        2,
-                        0,
-                        slot,
-                        direction,
-                        mean_rate_q,
-                        variance_of_mean_q2,
-                        target_rate_q,
+                    (
+                        raw_seq,
+                        _bw_raw_observation(
+                            self.run_sequence,
+                            raw_seq,
+                            digest,
+                            2,
+                            0,
+                            slot,
+                            direction,
+                            mean_rate_q,
+                            variance_of_mean_q2,
+                            target_rate_q,
+                        ),
                     )
                 )
+                raw_seq += 1
             interval = _bw_observation_interval_percent(
                 mean_rate_q,
                 variance_of_mean_q2,
@@ -3635,12 +3653,12 @@ class _BreakawayCampaignBuilder:
             0,
         )
         ticks: list[dict] = []
-        for raw in raw_records:
+        for seq, raw in raw_records:
             ticks.append(
                 {
                     "event_id": 160,
                     "timestamp_ticks": 5_800,
-                    "sequence": sequence,
+                    "sequence": seq,
                     "records": [_bw_record(raw)],
                 }
             )
@@ -3842,6 +3860,66 @@ def _bw_raw_observation_tick(
         "sequence": sequence,
         "records": [_bw_record(raw)],
     }
+
+
+def _bw_streamed_identity_campaign() -> list[dict]:
+    builder = _BreakawayCampaignBuilder()
+    return [
+        builder.probe_plan_tick(),
+        builder.probe_derived_tick(),
+        builder.discovery_plan_tick(),
+        *builder.discovery_ticks(),
+        builder.confirmation_plan_tick(),
+        *builder.confirmation_ticks(),
+        builder.campaign_terminal_tick(),
+    ]
+
+
+def _bw_first_marker_index(ticks: list[dict], event_id: int) -> int:
+    return next(index for index, tick in enumerate(ticks) if tick["event_id"] == event_id)
+
+
+def test_audit_breakaway_binds_a_streamed_margin_to_its_plan_digest() -> None:
+    ticks = _bw_streamed_identity_campaign()
+    index = _bw_first_marker_index(ticks, 161)
+    ticks[index]["records"][0][1]["plan_digest"] ^= 0xFF
+    with pytest.raises(ValueError, match="does not chain to its owning plan"):
+        audit_breakaway_campaign(ticks)
+
+
+def test_audit_breakaway_binds_a_streamed_margin_to_the_campaign_run() -> None:
+    ticks = _bw_streamed_identity_campaign()
+    index = _bw_first_marker_index(ticks, 161)
+    ticks[index]["records"][0][1]["run_sequence"] += 1
+    with pytest.raises(ValueError, match="run_sequence does not match"):
+        audit_breakaway_campaign(ticks)
+
+
+def test_audit_breakaway_binds_a_streamed_record_sequence_to_its_marker() -> None:
+    ticks = _bw_streamed_identity_campaign()
+    index = _bw_first_marker_index(ticks, 160)
+    # Mutate only the record's evidence_sequence, leaving its marker's.
+    ticks[index]["records"][0][1]["evidence_sequence"] += 1000
+    with pytest.raises(ValueError, match="does not match its marker"):
+        audit_breakaway_campaign(ticks)
+
+
+def test_audit_breakaway_rejects_a_second_record_in_a_streamed_marker() -> None:
+    ticks = _bw_streamed_identity_campaign()
+    index = _bw_first_marker_index(ticks, 161)
+    ticks[index]["records"] = ticks[index]["records"] * 2
+    with pytest.raises(ValueError, match="exactly one record"):
+        audit_breakaway_campaign(ticks)
+
+
+def test_audit_breakaway_rejects_out_of_order_streamed_sequences() -> None:
+    ticks = _bw_streamed_identity_campaign()
+    # Reorder the first two raw-observation marker ticks so their sequences
+    # descend in stream order.
+    first = _bw_first_marker_index(ticks, 160)
+    ticks[first], ticks[first + 1] = ticks[first + 1], ticks[first]
+    with pytest.raises(ValueError, match="not strictly increasing"):
+        audit_breakaway_campaign(ticks)
 
 
 def test_audit_breakaway_campaign_ranks_a_raw_observation_marker_by_its_phase() -> None:
@@ -4057,10 +4135,10 @@ def test_audit_breakaway_campaign_rejects_a_second_candidate_after_failure() -> 
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
-        builder.confirmation_plan_tick(sequence=5),
-        *builder.confirmation_ticks(sequence=6, accepted=0, terminal_cause=15),
-        builder.confirmation_plan_tick(sequence=8),
-        *builder.confirmation_ticks(sequence=9, accepted=0, terminal_cause=15),
+        builder.confirmation_plan_tick(sequence=100),
+        *builder.confirmation_ticks(sequence=101, accepted=0, terminal_cause=15),
+        builder.confirmation_plan_tick(sequence=200),
+        *builder.confirmation_ticks(sequence=201, accepted=0, terminal_cause=15),
         builder.campaign_terminal_tick(accepted=0, terminal_cause=15, stage_c_plan_digest=0),
     ]
     with pytest.raises(ValueError, match="second confirmation candidate"):

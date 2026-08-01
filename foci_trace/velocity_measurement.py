@@ -5721,6 +5721,67 @@ def _bw_collect_margins(ticks: list[dict[str, object]]) -> list[dict[str, object
     ]
 
 
+def _bw_validate_streamed_marker_identity(ticks: list[dict[str, object]]) -> None:
+    """Bind every streamed raw-observation (marker 160) and discovery-margin
+    (marker 161) record to its campaign identity, so a misrouted or forged
+    streamed record cannot pass as authentic evidence. Each such marker must
+    carry exactly one record whose run_sequence matches the campaign, whose
+    evidence_sequence matches its own marker, and whose plan_digest chains to the
+    owning plan (the discovery plan for a margin or a discovery-phase raw
+    observation, the confirmation plan for a confirmation-phase one). The
+    streamed evidence_sequences must be strictly increasing in stream order.
+    """
+    if not ticks:
+        return
+    campaign_run = int(ticks[0]["records"][0][1]["run_sequence"])  # type: ignore[index]
+    discovery_digest: int | None = None
+    confirmation_digest: int | None = None
+    for tick in ticks:
+        if tick["event_id"] == 155:
+            discovery_digest = int(
+                _bw_single_record(tick, "breakaway_discovery_planned")["plan_digest"]
+            )
+        elif tick["event_id"] == 157:
+            confirmation_digest = int(
+                _bw_single_record(tick, "breakaway_confirmation_planned")["plan_digest"]
+            )
+
+    previous_sequence: int | None = None
+    for tick in ticks:
+        event_id = tick["event_id"]
+        if event_id not in (160, 161):
+            continue
+        records = tick["records"]  # type: ignore[assignment]
+        if len(records) != 1:  # type: ignore[arg-type]
+            raise ValueError(
+                f"streamed marker {event_id} tick must carry exactly one record, got {len(records)}"  # type: ignore[arg-type]
+            )
+        record = records[0][1]  # type: ignore[index]
+        if int(record["run_sequence"]) != campaign_run:
+            raise ValueError(
+                f"streamed marker {event_id} record run_sequence does not match the campaign run"
+            )
+        sequence = int(record["evidence_sequence"])
+        if sequence != int(tick["sequence"]):
+            raise ValueError(
+                f"streamed marker {event_id} record evidence_sequence does not match its marker"
+            )
+        if previous_sequence is not None and sequence <= previous_sequence:
+            raise ValueError(
+                "streamed marker evidence_sequence is not strictly increasing in stream order"
+            )
+        previous_sequence = sequence
+        if event_id == 161:
+            expected = discovery_digest
+            what = "discovery margin"
+        else:
+            phase = int(record["phase"])
+            expected = discovery_digest if phase == 1 else confirmation_digest
+            what = "raw observation"
+        if expected is None or int(record["plan_digest"]) != expected:
+            raise ValueError(f"streamed {what} plan_digest does not chain to its owning plan")
+
+
 def _bw_fnv1a_extend(digest: int, value: int, byte_width: int) -> int:
     """Fold one little-endian field into an FNV-1a digest.
 
@@ -6048,6 +6109,8 @@ def audit_breakaway_campaign(
         plan_ticks_time = int(ticks[0]["timestamp_ticks"])  # type: ignore[arg-type]
         if any(timestamp < plan_ticks_time for timestamp in motion_timestamps):
             raise ValueError("motion observed before the breakaway probe plan was frozen")
+
+    _bw_validate_streamed_marker_identity(ticks)
 
     mismatches: list[str] = []
 
