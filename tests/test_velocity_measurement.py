@@ -3258,10 +3258,86 @@ class _BreakawayCampaignBuilder:
             "records": [_bw_record(raw)],
         }
 
+    def _probe_trajectory(self) -> list[tuple[int, int]]:
+        """Return `(rung_index, disposition)` commits for one direction."""
+        moving_index = self.moving_index()
+        lo, hi = 0, len(self.search_grid)
+        trajectory: list[tuple[int, int]] = []
+        while lo < hi:
+            tested = lo + (hi - lo) // 2
+            disposition = 2 if tested >= moving_index else 0
+            trajectory.append((tested, disposition))
+            if disposition == 2:
+                hi = tested
+            else:
+                lo = tested + 1
+        if moving_index > 0:
+            trajectory.append((moving_index - 1, 0))
+        trajectory.append((moving_index, 2))
+        return trajectory
+
+    def probe_stream_ticks(
+        self, *, sequence: int = 2, plan_digest: int | None = None
+    ) -> list[dict]:
+        """Build recovered probe raw/decision pairs for both directions."""
+        digest = self.probe_digest if plan_digest is None else plan_digest
+        ticks: list[dict] = []
+        evidence_sequence = sequence
+        for direction in (0, 1):
+            for slot, (rung_index, disposition) in enumerate(self._probe_trajectory()):
+                productive = disposition == 2
+                settled_low = 100 if productive and direction == 0 else -100
+                settled_high = 200 if productive and direction == 0 else 100
+                if productive and direction == 1:
+                    settled_low, settled_high = -200, -100
+                raw = _bw_raw_observation(
+                    self.run_sequence,
+                    evidence_sequence,
+                    digest,
+                    0,
+                    rung_index,
+                    slot,
+                    direction,
+                    150 if direction == 0 else -150,
+                    100,
+                    1_000,
+                    settled_rate_low_q=settled_low,
+                    settled_rate_high_q=settled_high,
+                )
+                ticks.append(
+                    {
+                        "event_id": 160,
+                        "timestamp_ticks": 1_200 + evidence_sequence,
+                        "sequence": evidence_sequence,
+                        "records": [_bw_record(raw)],
+                    }
+                )
+                evidence_sequence += 1
+                decision = _bw_tag(
+                    13,
+                    "IHQBBB",
+                    self.run_sequence,
+                    evidence_sequence,
+                    digest,
+                    direction,
+                    rung_index,
+                    disposition,
+                )
+                ticks.append(
+                    {
+                        "event_id": 162,
+                        "timestamp_ticks": 1_200 + evidence_sequence,
+                        "sequence": evidence_sequence,
+                        "records": [_bw_record(decision)],
+                    }
+                )
+                evidence_sequence += 1
+        return ticks
+
     def probe_derived_tick(
         self,
         *,
-        sequence: int = 2,
+        sequence: int = 40,
         plan_digest: int | None = None,
         observations: int | None = None,
     ) -> dict:
@@ -3300,10 +3376,36 @@ class _BreakawayCampaignBuilder:
             "records": [_bw_record(forward), _bw_record(reverse)],
         }
 
+    def probe_terminal_tick(
+        self,
+        *,
+        sequence: int = 4,
+        terminal_cause: int = 4,
+        exclusion_reason: int = 1,
+    ) -> dict:
+        raw = _bw_tag(
+            2,
+            "IHQHBBBB",
+            self.run_sequence,
+            sequence,
+            self.probe_digest,
+            self.family_size,
+            terminal_cause,
+            0,
+            0,
+            exclusion_reason,
+        )
+        return {
+            "event_id": 154,
+            "timestamp_ticks": 2_000,
+            "sequence": sequence,
+            "records": [_bw_record(raw)],
+        }
+
     def discovery_plan_tick(
         self,
         *,
-        sequence: int = 3,
+        sequence: int = 41,
         plan_digest: int | None = None,
         prior_plan_digest: int | None = None,
     ) -> dict:
@@ -3350,7 +3452,7 @@ class _BreakawayCampaignBuilder:
     def discovery_ticks(
         self,
         *,
-        sequence: int = 4,
+        sequence: int = 50,
         plan_digest: int | None = None,
         prior_plan_digest: int | None = None,
         terminal_cause: int = 0,
@@ -3524,7 +3626,7 @@ class _BreakawayCampaignBuilder:
     def confirmation_plan_tick(
         self,
         *,
-        sequence: int = 5,
+        sequence: int = 150,
         plan_digest: int | None = None,
         prior_plan_digest: int | None = None,
         family_size: int = 8,
@@ -3557,7 +3659,7 @@ class _BreakawayCampaignBuilder:
     def confirmation_ticks(
         self,
         *,
-        sequence: int = 100,
+        sequence: int = 160,
         plan_digest: int | None = None,
         prior_plan_digest: int | None = None,
         accepted: int = 1,
@@ -3739,7 +3841,7 @@ class _BreakawayCampaignBuilder:
     def campaign_terminal_tick(
         self,
         *,
-        sequence: int = 7,
+        sequence: int = 250,
         timestamp_ticks: int = 7_000,
         phase: int = 2,
         terminal_cause: int = 21,
@@ -3766,6 +3868,7 @@ class _BreakawayCampaignBuilder:
     def accepted_campaign_ticks(self) -> list[dict]:
         return [
             self.probe_plan_tick(),
+            *self.probe_stream_ticks(),
             self.probe_derived_tick(),
             self.discovery_plan_tick(),
             *self.discovery_ticks(),
@@ -3861,6 +3964,154 @@ def test_audit_breakaway_campaign_accepts_a_self_consistent_campaign() -> None:
     assert result["workflow_duration_ms"] == pytest.approx(6.0)
 
 
+def test_audit_breakaway_replays_a_transient_lower_endpoint_and_mixed_mask() -> None:
+    builder = _BreakawayCampaignBuilder()
+    ticks = builder.accepted_campaign_ticks()
+    lower_index = builder.moving_index() - 1
+    changed = False
+    for position, tick in enumerate(ticks[:-1]):
+        if tick["event_id"] != 160:
+            continue
+        observation = tick["records"][0][1]
+        if (
+            observation["phase"] == 0
+            and observation["direction"] == 0
+            and observation["rung_index"] == lower_index
+        ):
+            decision = ticks[position + 1]["records"][0][1]
+            observation["stationarity_code"] = 6
+            observation["settled_rate_low_q"] = 100
+            observation["settled_rate_high_q"] = 200
+            observation["drift_ratio_ppm"] = 300_000
+            observation["post_fit_lag_one_state"] = 2
+            decision["disposition"] = 1
+            changed = True
+            break
+    assert changed
+    directional = next(
+        record
+        for tick in ticks
+        if tick["event_id"] == 153
+        for _raw, record in tick["records"]
+        if record["direction"] == 0
+    )
+    directional["lower_disposition_mask"] = 0b11
+
+    result = audit_breakaway_campaign(ticks)
+
+    assert result["matches_firmware"] is True, result["mismatches"]
+    assert result["probe_replay"]["directions"][0]["lower_disposition_mask"] == 0b11
+
+
+@pytest.mark.parametrize(("lag_state", "reason"), [(0, 1), (1, 8)])
+def test_audit_breakaway_replays_lag_one_probe_terminals(lag_state: int, reason: int) -> None:
+    builder = _BreakawayCampaignBuilder()
+    raw_tick = builder.probe_stream_ticks()[0]
+    observation = raw_tick["records"][0][1]
+    observation["stationarity_code"] = 6
+    observation["settled_rate_low_q"] = 100
+    observation["settled_rate_high_q"] = 200
+    observation["drift_ratio_ppm"] = 300_000
+    observation["post_fit_lag_one_state"] = lag_state
+    ticks = [
+        builder.probe_plan_tick(),
+        raw_tick,
+        builder.probe_terminal_tick(sequence=3, terminal_cause=4, exclusion_reason=reason),
+        builder.campaign_terminal_tick(
+            sequence=4,
+            phase=0,
+            terminal_cause=4,
+            accepted=0,
+            stage_c_plan_digest=0,
+        ),
+    ]
+
+    result = audit_breakaway_campaign(ticks)
+
+    assert result["matches_firmware"] is True, result["mismatches"]
+    assert result["probe_replay"]["expected_terminal"] == {
+        "kind": "terminal",
+        "terminal_cause": 4,
+        "exclusion_reason": reason,
+    }
+
+
+def test_audit_breakaway_does_not_commit_raw_evidence_when_recovery_fails() -> None:
+    builder = _BreakawayCampaignBuilder()
+    raw_tick = builder.probe_stream_ticks()[0]
+    ticks = [
+        builder.probe_plan_tick(),
+        raw_tick,
+        builder.probe_terminal_tick(sequence=3, terminal_cause=4, exclusion_reason=4),
+        builder.campaign_terminal_tick(
+            sequence=4,
+            phase=0,
+            terminal_cause=4,
+            accepted=0,
+            stage_c_plan_digest=0,
+        ),
+    ]
+
+    result = audit_breakaway_campaign(ticks)
+
+    assert result["probe_replay"]["committed_observations"] == 0
+    assert len(result["probe_replay"]["uncommitted_raw"]) == 1
+
+
+def test_audit_breakaway_rejects_probe_decision_sequence_disagreement() -> None:
+    builder = _BreakawayCampaignBuilder()
+    ticks = builder.accepted_campaign_ticks()
+    raw_tick = next(tick for tick in ticks if tick["event_id"] == 160 and tick["sequence"] == 2)
+    raw_tick["sequence"] = 1
+    raw_tick["records"][0][1]["evidence_sequence"] = 1
+
+    with pytest.raises(ValueError, match="does not follow its raw observation"):
+        audit_breakaway_campaign(ticks)
+
+
+def test_audit_breakaway_rejects_probe_decision_digest_disagreement() -> None:
+    builder = _BreakawayCampaignBuilder()
+    ticks = builder.accepted_campaign_ticks()
+    decision_tick = next(tick for tick in ticks if tick["event_id"] == 162)
+    decision_tick["records"][0][1]["plan_digest"] ^= 0xFF
+
+    with pytest.raises(ValueError, match="does not chain to its owning plan"):
+        audit_breakaway_campaign(ticks)
+
+
+def test_audit_breakaway_derives_only_observed_post_breakaway_transients() -> None:
+    builder = _BreakawayCampaignBuilder()
+    ticks = builder.accepted_campaign_ticks()
+    discovery = [
+        tick["records"][0][1]
+        for tick in ticks
+        if tick["event_id"] == 160 and tick["records"][0][1]["phase"] == 1
+    ]
+    higher_rung = max(int(observation["rung_index"]) for observation in discovery)
+    transient = next(
+        observation
+        for observation in discovery
+        if observation["rung_index"] == higher_rung
+        and observation["direction"] == 0
+        and observation["slot_index"] == 0
+    )
+    transient["stationarity_code"] = 6
+    transient["post_fit_lag_one_state"] = 2
+
+    result = audit_breakaway_campaign(ticks)
+
+    assert result["post_breakaway_transient"] == [
+        {
+            "direction": 0,
+            "consensus_rung_index": higher_rung - 1,
+            "consensus_p_raw": builder.ladder["gains"][higher_rung - 1],
+            "transient_rung_index": higher_rung,
+            "transient_p_raw": builder.ladder["gains"][higher_rung],
+            "slot_index": 0,
+        }
+    ]
+
+
 def test_audit_breakaway_campaign_accepts_a_non_nominatable_rung_leaving_a_collected_index_gap() -> (
     None
 ):
@@ -3879,6 +4130,7 @@ def test_audit_breakaway_campaign_accepts_a_non_nominatable_rung_leaving_a_colle
     builder = _BreakawayCampaignBuilder()
     ticks = [
         builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(
@@ -3929,6 +4181,7 @@ def test_audit_breakaway_flags_a_confirmation_collected_mask_that_omits_received
     builder = _BreakawayCampaignBuilder()
     ticks = [
         builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
@@ -3954,6 +4207,7 @@ def test_audit_breakaway_collected_mask_counts_a_stroke_with_no_reduced_record()
     builder = _BreakawayCampaignBuilder()
     ticks = [
         builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
@@ -3980,21 +4234,22 @@ def test_audit_breakaway_rejects_a_ninth_duplicate_confirmation_stroke() -> None
     sequence but a duplicate slot violates the fixed eight-stroke schedule. It
     must be rejected, not hidden by the slot-keyed mask OR and per-slot dict."""
     builder = _BreakawayCampaignBuilder()
-    confirmation = builder.confirmation_ticks()  # eight raw ticks (100..107) + terminal
+    confirmation = builder.confirmation_ticks()  # eight raw ticks (160..167) + terminal
     atom = _bw_synthetic_atom(75.0, 0.01, 0)
     ninth = _bw_raw_observation(
-        builder.run_sequence, 108, builder.confirmation_digest, 2, 0, 0, 0, *atom
+        builder.run_sequence, 168, builder.confirmation_digest, 2, 0, 0, 0, *atom
     )
     ninth_tick = {
         "event_id": 160,
         "timestamp_ticks": 5_800,
-        "sequence": 108,
+        "sequence": 168,
         "records": [_bw_record(ninth)],
     }
     # Splice the ninth raw observation in before the confirmation terminal.
     confirmation = confirmation[:-1] + [ninth_tick] + confirmation[-1:]
     ticks = [
         builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
@@ -4037,6 +4292,7 @@ def test_audit_breakaway_rejects_a_malformed_confirmation_aborted_before_its_ter
     ]
     ticks = [
         builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
@@ -4054,6 +4310,7 @@ def test_audit_breakaway_accepts_a_partial_confirmation_with_honest_collected_ma
     builder = _BreakawayCampaignBuilder()
     ticks = [
         builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
@@ -4076,6 +4333,7 @@ def _bw_streamed_identity_campaign() -> list[dict]:
     builder = _BreakawayCampaignBuilder()
     return [
         builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
@@ -4140,6 +4398,7 @@ def test_audit_breakaway_campaign_ranks_a_raw_observation_marker_by_its_phase() 
     builder = _BreakawayCampaignBuilder()
     ticks = [
         builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
@@ -4156,6 +4415,7 @@ def test_audit_breakaway_campaign_flags_a_workflow_duration_over_its_reserved_bu
     builder = _BreakawayCampaignBuilder()
     ticks = [
         builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
@@ -4175,6 +4435,7 @@ def test_audit_breakaway_campaign_rejects_reordered_phases() -> None:
     builder = _BreakawayCampaignBuilder()
     ticks = [
         builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(),
         builder.discovery_plan_tick(),
         builder.probe_derived_tick(),  # probe after discovery: reordered
         *builder.discovery_ticks(),
@@ -4197,6 +4458,7 @@ def test_audit_breakaway_campaign_rejects_a_digest_chain_break() -> None:
     builder = _BreakawayCampaignBuilder()
     ticks = [
         builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(prior_plan_digest=0xBAD_D1CE57),
         *builder.discovery_ticks(),
@@ -4212,6 +4474,7 @@ def test_audit_breakaway_campaign_rejects_a_family_four_one_rung_confirmation() 
     builder = _BreakawayCampaignBuilder()
     ticks = [
         builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
@@ -4227,6 +4490,7 @@ def test_audit_breakaway_campaign_rejects_an_accepted_confirmation_with_incomple
     builder = _BreakawayCampaignBuilder()
     ticks = [
         builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
@@ -4257,6 +4521,7 @@ def test_audit_breakaway_campaign_rejects_an_accepted_confirmation_with_a_raw_in
     builder = _BreakawayCampaignBuilder()
     ticks = [
         builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
@@ -4280,6 +4545,7 @@ def test_audit_breakaway_campaign_rejects_a_confirmed_p_that_does_not_match_the_
     builder = _BreakawayCampaignBuilder()
     ticks = [
         builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
@@ -4304,6 +4570,7 @@ def test_audit_breakaway_campaign_rejects_a_wrong_confirmation_slot_schedule() -
     builder = _BreakawayCampaignBuilder()
     ticks = [
         builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
@@ -4326,6 +4593,7 @@ def test_audit_breakaway_campaign_rejects_an_accepted_confirmation_missing_raw_e
     builder = _BreakawayCampaignBuilder()
     ticks = [
         builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
@@ -4342,6 +4610,7 @@ def test_audit_breakaway_campaign_rejects_a_second_candidate_after_failure() -> 
     builder = _BreakawayCampaignBuilder()
     ticks = [
         builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
@@ -4359,6 +4628,7 @@ def test_audit_breakaway_campaign_rejects_stage_c_after_unsuccessful_confirmatio
     builder = _BreakawayCampaignBuilder()
     ticks = [
         builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
@@ -4376,6 +4646,7 @@ def test_audit_breakaway_campaign_flags_a_wrong_reported_digest_as_a_mismatch_no
     builder = _BreakawayCampaignBuilder()
     ticks = [
         builder.probe_plan_tick(plan_digest=builder.probe_digest ^ 0xFF),
+        *builder.probe_stream_ticks(plan_digest=builder.probe_digest ^ 0xFF),
         builder.probe_derived_tick(plan_digest=builder.probe_digest ^ 0xFF),
         builder.discovery_plan_tick(prior_plan_digest=builder.probe_digest ^ 0xFF),
         *builder.discovery_ticks(prior_plan_digest=builder.probe_digest ^ 0xFF),
@@ -4400,6 +4671,7 @@ def test_audit_breakaway_campaign_reports_additive_ladder_resolution_budget_exce
     builder = _BreakawayCampaignBuilder()
     ticks = [
         builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(),
         builder.probe_derived_tick(),
         builder.campaign_terminal_tick(
             phase=1, terminal_cause=10, accepted=0, stage_c_plan_digest=0
@@ -4417,6 +4689,7 @@ def test_audit_breakaway_campaign_reports_target_band_skipped_from_a_real_discov
     builder = _BreakawayCampaignBuilder()
     ticks = [
         builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(),
         builder.probe_derived_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(terminal_cause=7, margins=[]),

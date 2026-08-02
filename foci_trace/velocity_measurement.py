@@ -5588,6 +5588,50 @@ def _bw_directional_included_mask(direction_observations: list[dict[str, object]
     return included_mask
 
 
+def _bw_post_breakaway_transients(
+    observations: list[dict[str, object]], ladder_gains: list[int]
+) -> list[dict[str, int]]:
+    """Derive observed transients within the collected discovery span.
+
+    A diagnostic is emitted only after the same direction has an earlier rung
+    with the existing `EligibleConsensus` result.  Nothing is inferred beyond
+    the last collected rung.
+    """
+    by_rung_direction: dict[tuple[int, int], list[dict[str, object]]] = {}
+    for observation in observations:
+        rung_index = int(observation["rung_index"])
+        if not 0 <= rung_index < len(ladder_gains):
+            continue
+        key = (rung_index, int(observation["direction"]))
+        by_rung_direction.setdefault(key, []).append(observation)
+
+    diagnostics: list[dict[str, int]] = []
+    latest_consensus: list[int | None] = [None, None]
+    for rung_index in sorted({key[0] for key in by_rung_direction}):
+        for direction in (0, 1):
+            rung_observations = by_rung_direction.get((rung_index, direction), [])
+            consensus_rung = latest_consensus[direction]
+            if consensus_rung is not None and rung_index > consensus_rung:
+                for observation in rung_observations:
+                    if (
+                        int(observation["stationarity_code"]) == _BW_STATIONARITY_EXCESSIVE_DRIFT
+                        and observation.get("post_fit_lag_one_state") == 2
+                    ):
+                        diagnostics.append(
+                            {
+                                "direction": direction,
+                                "consensus_rung_index": consensus_rung,
+                                "consensus_p_raw": ladder_gains[consensus_rung],
+                                "transient_rung_index": rung_index,
+                                "transient_p_raw": ladder_gains[rung_index],
+                                "slot_index": int(observation["slot_index"]),
+                            }
+                        )
+            if _bw_directional_included_mask(rung_observations) != 0:
+                latest_consensus[direction] = rung_index
+    return diagnostics
+
+
 def _bw_included_observations(
     direction_observations: list[dict[str, object]], included_mask: int
 ) -> list[dict[str, object]]:
@@ -5755,13 +5799,14 @@ def _bw_validate_confirmation_slot_schedule(ticks: list[dict[str, object]]) -> N
 
 
 def _bw_validate_streamed_marker_identity(ticks: list[dict[str, object]]) -> None:
-    """Bind every streamed raw-observation (marker 160) and discovery-margin
-    (marker 161) record to its campaign identity, so a misrouted or forged
+    """Bind every streamed raw-observation (marker 160), discovery-margin
+    (marker 161), and probe-decision (marker 162) record to its campaign identity,
+    so a misrouted or forged
     streamed record cannot pass as authentic evidence. Each such marker must
     carry exactly one record whose run_sequence matches the campaign, whose
     evidence_sequence matches its own marker, and whose plan_digest chains to the
-    owning plan (the discovery plan for a margin or a discovery-phase raw
-    observation, the confirmation plan for a confirmation-phase one). The
+    owning plan (probe for phase 0 or a decision, discovery for phase 1 or a
+    margin, confirmation for phase 2). The
     streamed evidence_sequences must be strictly increasing in stream order.
     """
     if not ticks:
@@ -5782,7 +5827,7 @@ def _bw_validate_streamed_marker_identity(ticks: list[dict[str, object]]) -> Non
     previous_sequence: int | None = None
     for tick in ticks:
         event_id = tick["event_id"]
-        if event_id not in (160, 161):
+        if event_id not in (160, 161, 162):
             continue
         records = tick["records"]  # type: ignore[assignment]
         if len(records) != 1:  # type: ignore[arg-type]
@@ -5807,9 +5852,17 @@ def _bw_validate_streamed_marker_identity(ticks: list[dict[str, object]]) -> Non
         if event_id == 161:
             expected = discovery_digest
             what = "discovery margin"
+        elif event_id == 162:
+            expected = int(ticks[0]["records"][0][1]["plan_digest"])  # type: ignore[index]
+            what = "probe decision"
         else:
             phase = int(record["phase"])
-            expected = discovery_digest if phase == 1 else confirmation_digest
+            if phase == _BW_RAW_OBSERVATION_PHASE_PROBE:
+                expected = int(ticks[0]["records"][0][1]["plan_digest"])  # type: ignore[index]
+            elif phase == _BW_RAW_OBSERVATION_PHASE_DISCOVERY:
+                expected = discovery_digest
+            else:
+                expected = confirmation_digest
             what = "raw observation"
         if expected is None or int(record["plan_digest"]) != expected:
             raise ValueError(f"streamed {what} plan_digest does not chain to its owning plan")
@@ -6490,10 +6543,79 @@ def audit_breakaway_campaign(
                 % probe_terminal["terminal_cause"]
             )
 
+    probe_stream_present = any(
+        tick["event_id"] == 162
+        or (
+            tick["event_id"] == 160
+            and any(
+                int(record["phase"]) == _BW_RAW_OBSERVATION_PHASE_PROBE
+                for record in _bw_tick_records_by_kind(tick, "breakaway_raw_observation")
+            )
+        )
+        for tick in ticks
+    )
+    v14_probe_summary = any(
+        breakaway.get("lower_disposition_mask") is not None for breakaway in directional_breakaways
+    )
+    if v14_probe_summary and not probe_stream_present:
+        raise ValueError("v14 directional breakaway has no streamed probe decisions")
+    probe_replay = _bw_replay_probe(ticks, search_grid) if probe_stream_present else None
+    if probe_replay is not None:
+        reported_by_direction = {
+            int(record["direction"]): record for record in directional_breakaways
+        }
+        if len(reported_by_direction) != len(directional_breakaways):
+            raise ValueError("probe-derived records repeat a direction")
+        for direction, replayed in enumerate(probe_replay["directions"]):  # type: ignore[index]
+            reported = reported_by_direction.get(direction)
+            if replayed is None:
+                if reported is not None:
+                    mismatches.append(
+                        f"direction {direction} reports a breakaway the probe replay did not resolve"
+                    )
+                continue
+            if reported is None:
+                mismatches.append(
+                    f"direction {direction} probe replay resolved without a directional record"
+                )
+                continue
+            expected_inert_index = replayed["inert_index"]
+            expected_inert_present = int(expected_inert_index is not None)
+            if int(reported["inert_present"]) != expected_inert_present:
+                mismatches.append(
+                    f"direction {direction} inert_present disagrees with probe replay"
+                )
+            elif (
+                expected_inert_index is not None
+                and int(reported["inert_p_raw"]) != search_grid[int(expected_inert_index)]
+            ):
+                mismatches.append(f"direction {direction} inert_p_raw disagrees with probe replay")
+            expected_moving_p = search_grid[int(replayed["moving_index"])]
+            if int(reported["moving_p_raw"]) != expected_moving_p:
+                mismatches.append(f"direction {direction} moving_p_raw disagrees with probe replay")
+            for field in ("observations", "lower_disposition_mask"):
+                if int(reported[field]) != int(replayed[field]):
+                    mismatches.append(
+                        f"direction {direction} {field}: firmware={reported[field]} "
+                        f"offline={replayed[field]}"
+                    )
+        expected_terminal = probe_replay["expected_terminal"]
+        if expected_terminal is not None:
+            if probe_terminal is None:
+                mismatches.append("probe replay terminated but firmware reported no probe terminal")
+            else:
+                for field in ("terminal_cause", "exclusion_reason"):
+                    if int(probe_terminal[field]) != int(expected_terminal[field]):
+                        mismatches.append(
+                            f"probe {field}: firmware={probe_terminal[field]} "
+                            f"offline={expected_terminal[field]}"
+                        )
+
     discovery_planned_tick = next((tick for tick in ticks if tick["event_id"] == 155), None)
     discovery_terminal_tick = next((tick for tick in ticks if tick["event_id"] == 156), None)
     discovery_planned: dict[str, object] | None = None
     ladder_gains: list[int] = []
+    post_breakaway_transient: list[dict[str, int]] = []
     if discovery_planned_tick is not None:
         discovery_planned = _bw_single_record(discovery_planned_tick, "breakaway_discovery_planned")
         if int(discovery_planned["prior_plan_digest"]) != int(probe_planned["plan_digest"]):
@@ -6616,6 +6738,9 @@ def audit_breakaway_campaign(
         # with the reported bounds, is a mismatch.
         raw_discovery_observations = _bw_collect_raw_observations(
             ticks, _BW_RAW_OBSERVATION_PHASE_DISCOVERY
+        )
+        post_breakaway_transient = _bw_post_breakaway_transients(
+            raw_discovery_observations, ladder_gains
         )
         for observation in raw_discovery_observations:
             if int(observation["plan_digest"]) != int(discovery_planned["plan_digest"]):
@@ -7072,8 +7197,10 @@ def audit_breakaway_campaign(
         "directional_breakaways": directional_breakaways,
         "resolved_breakaway_p_raw": resolved_breakaway_raw,
         "probe_terminal": probe_terminal,
+        "probe_replay": probe_replay,
         "discovery_planned": discovery_planned,
         "discovery_terminal": discovery_terminal,
+        "post_breakaway_transient": post_breakaway_transient,
         "confirmation_planned": confirmation_planned,
         "confirmation_accepted": confirmation_accepted,
         "campaign_terminal": campaign_terminal,
