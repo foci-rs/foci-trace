@@ -206,7 +206,7 @@ def test_decodes_version_nine_pptm_velocity_diagnostic() -> None:
 
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_OBSERVATION, payload) + payload)
 
-    assert PROTOCOL_VERSION == 12
+    assert PROTOCOL_VERSION == 13
     assert frame.payload["pid_velocity_actual"] is None
     assert frame.payload["actual_velocity_pptm"] == 176
 
@@ -215,8 +215,8 @@ def test_decode_frame_rejects_a_version_beyond_the_supported_range() -> None:
     # A version past the supported range is rejected; historical versions stay
     # decodable so committed captures still replay.
     payload = bytes(88)
-    with pytest.raises(DecodeError, match="unsupported protocol version 13"):
-        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=13) + payload)
+    with pytest.raises(DecodeError, match="unsupported protocol version 14"):
+        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=14) + payload)
 
 
 def test_rejects_velocity_observation_with_both_diagnostic_kinds() -> None:
@@ -2564,9 +2564,29 @@ def test_decode_breakaway_probe_terminal_rejects_unknown_checkpoint() -> None:
 def test_decode_breakaway_probe_terminal_rejects_unknown_exclusion_reason() -> None:
     from foci_trace.protocol import DecodeError, decode_breakaway_record
 
-    payload = _bw_probe_terminal()[:-1] + bytes([5])
+    payload = _bw_probe_terminal()[:-1] + bytes([11])
     with pytest.raises(DecodeError, match="exclusion reason is invalid"):
         decode_breakaway_record(payload)
+
+
+@pytest.mark.parametrize(
+    ("reason", "name"),
+    [
+        (5, "moving_no_blocking_plateau"),
+        (6, "moving_too_few_decorrelated_blocks"),
+        (7, "moving_resolved_slope"),
+        (8, "moving_structured_residual"),
+        (9, "moving_stationarity_arithmetic"),
+        (10, "moving_excessive_drift"),
+    ],
+)
+def test_decode_breakaway_probe_terminal_preserves_exact_stationarity_exclusion(
+    reason: int, name: str
+) -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    decoded = decode_breakaway_record(_bw_probe_terminal()[:-1] + bytes([reason]))
+    assert decoded["exclusion_reason_name"] == name
 
 
 def test_decode_breakaway_discovery_planned_matches_the_firmware_golden_bytes() -> None:

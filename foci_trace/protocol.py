@@ -7,10 +7,10 @@ import struct
 from typing import Any
 
 FRAME_MAGIC = 0x43525446
-# Bumped to 12 for the probe exclusion reason and complete probe-plan digest
-# context. Historical versions remain readable.
-PROTOCOL_VERSION = 12
-SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, PROTOCOL_VERSION)
+# Bumped to 13 for exact probe stationarity-exclusion codes. Historical
+# versions and the aggregate v12 stationarity code remain readable.
+PROTOCOL_VERSION = 13
+SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, PROTOCOL_VERSION)
 HEADER_LEN = 32
 
 FRAME_TYPE_CRITICAL = 1
@@ -2112,6 +2112,12 @@ BREAKAWAY_PROBE_EXCLUSION_REASON_NAMES = {
     2: "moving_stationarity_excluded",
     3: "settle_rest_unconfirmed",
     4: "recovery_rest_unconfirmed",
+    5: "moving_no_blocking_plateau",
+    6: "moving_too_few_decorrelated_blocks",
+    7: "moving_resolved_slope",
+    8: "moving_structured_residual",
+    9: "moving_stationarity_arithmetic",
+    10: "moving_excessive_drift",
 }
 
 # Local wire tags for the breakaway-campaign canonical-record family
