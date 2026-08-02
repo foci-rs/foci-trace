@@ -43,6 +43,7 @@ from .protocol import (
     FRAME_TYPE_STATUS,
     FRAME_TYPE_VELOCITY_OBSERVATION,
     FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
+    PROTOCOL_VERSION,
     VELOCITY_OBSERVATION_FLAG_PID_VELOCITY_ACTUAL_VALID,
     VELOCITY_OBSERVATION_FLAG_PPTM_ACTUAL_VALID,
     DecodeError,
@@ -453,6 +454,7 @@ class _FittedTransform:
 @dataclass
 class _DeviceState:
     report: DeviceReport
+    protocol_version: int | None = None
     clock_hz: int = DEFAULT_CLOCK_HZ
     first_timestamp: int | None = None
     last_sequence: int | None = None
@@ -2324,7 +2326,10 @@ def _breakaway_campaign_audits(
                 (frame_type, timestamp_ticks, raw_payload, decoded_payload)
             )
         for source_index, frames in sorted(by_source.items()):
-            ticks = assemble_breakaway_ticks(frames)
+            ticks = assemble_breakaway_ticks(
+                frames,
+                protocol_version=state.protocol_version or PROTOCOL_VERSION,
+            )
             campaigns: list[list[dict[str, object]]] = []
             current: list[dict[str, object]] = []
             for tick in ticks:
@@ -2473,6 +2478,8 @@ def analyze_capture(
             state.report.decode_errors += 1
             continue
         header = frame.header
+        if state.protocol_version is None:
+            state.protocol_version = header.protocol_version
         state.report.frame_counts[header.frame_type] = (
             state.report.frame_counts.get(header.frame_type, 0) + 1
         )

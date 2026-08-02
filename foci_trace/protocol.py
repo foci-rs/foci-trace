@@ -7,10 +7,10 @@ import struct
 from typing import Any
 
 FRAME_MAGIC = 0x43525446
-# Bumped to 13 for exact probe stationarity-exclusion codes. Historical
-# versions and the aggregate v12 stationarity code remain readable.
-PROTOCOL_VERSION = 13
-SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, PROTOCOL_VERSION)
+# Version 14 adds productive-boundary probe evidence. Historical versions
+# remain readable, including the distinct v13 record shapes and terminology.
+PROTOCOL_VERSION = 14
+SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
 HEADER_LEN = 32
 
 FRAME_TYPE_CRITICAL = 1
@@ -77,9 +77,10 @@ EVENT_COMMISSION_BREAKAWAY_CONFIRMATION_TERMINAL = 158
 EVENT_COMMISSION_BREAKAWAY_CAMPAIGN_TERMINAL = 159
 EVENT_COMMISSION_BREAKAWAY_RAW_OBSERVATION = 160
 EVENT_COMMISSION_BREAKAWAY_DISCOVERY_MARGIN = 161
+EVENT_COMMISSION_BREAKAWAY_PROBE_DECISION = 162
 EVENT_COMMISSION_DIAGNOSTIC_WARNING = 200
 
-# Every breakaway-campaign marker event id (152-161), in phase-emission order.
+# Every breakaway-campaign marker event id (152-162), in phase-emission order.
 # The FTRC marker granularity is one `CommissionTraceEvent` per tick -- these
 # ids are what the offline assembler uses to claim the raw velocity-sweep-
 # evidence frames immediately preceding each marker. Per-observation and
@@ -97,6 +98,7 @@ BREAKAWAY_CAMPAIGN_EVENT_IDS = (
     EVENT_COMMISSION_BREAKAWAY_CAMPAIGN_TERMINAL,
     EVENT_COMMISSION_BREAKAWAY_RAW_OBSERVATION,
     EVENT_COMMISSION_BREAKAWAY_DISCOVERY_MARGIN,
+    EVENT_COMMISSION_BREAKAWAY_PROBE_DECISION,
 )
 
 _LEVEL_NAMES = {
@@ -157,6 +159,7 @@ _COMMISSIONING_EVENT_NAMES = {
     EVENT_COMMISSION_BREAKAWAY_CONFIRMATION_PLAN: "commission_breakaway_confirmation_plan",
     EVENT_COMMISSION_BREAKAWAY_CONFIRMATION_TERMINAL: "commission_breakaway_confirmation_terminal",
     EVENT_COMMISSION_BREAKAWAY_CAMPAIGN_TERMINAL: "commission_breakaway_campaign_terminal",
+    EVENT_COMMISSION_BREAKAWAY_PROBE_DECISION: "commission_breakaway_probe_decision",
     EVENT_COMMISSION_DIAGNOSTIC_WARNING: "commission_diagnostic_warning",
 }
 
@@ -353,7 +356,7 @@ def _decode_payload(version: int, frame_type: int, payload: bytes) -> dict[str, 
             # also rejects the payload, the original legacy error is what
             # callers see, preserving today's corrupt-payload behavior.
             try:
-                return decode_breakaway_record(payload)
+                return decode_breakaway_record(payload, protocol_version=version)
             except DecodeError:
                 raise legacy_error from None
     return {"raw": payload}
@@ -2051,6 +2054,13 @@ BREAKAWAY_TERMINAL_CAUSE_NAMES = {
     21: "accepted",
 }
 
+
+def _breakaway_terminal_cause_name(cause: int, protocol_version: int) -> str:
+    if cause == 1 and protocol_version >= 14:
+        return "probe_no_productive_response_at_authority"
+    return BREAKAWAY_TERMINAL_CAUSE_NAMES[cause]
+
+
 # `BreakawayPhase` (breakaway_reporting.rs): which of the three campaign
 # drivers owns a `BreakawayCampaignTerminal` closure record.
 BREAKAWAY_PHASE_NAMES = {
@@ -2143,9 +2153,12 @@ BREAKAWAY_TAG_CONFIRMATION_PLANNED = 9
 BREAKAWAY_TAG_CONFIRMATION_TERMINAL = 10
 BREAKAWAY_TAG_CONFIRMATION_OBSERVATION = 11
 BREAKAWAY_TAG_CAMPAIGN_TERMINAL = 12
+BREAKAWAY_TAG_PROBE_DECISION = 13
 
 
-def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
+def decode_breakaway_record(
+    payload: bytes, *, protocol_version: int = PROTOCOL_VERSION
+) -> dict[str, Any]:
     """Decode one breakaway-campaign canonical evidence record.
 
     Dispatches purely on the record's local tag (`payload[0]`) and exact
@@ -2154,8 +2167,8 @@ def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
     `_decode_velocity_sweep_evidence`, this function is never the sole
     authority for a `FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE` payload: the local
     tag space is scoped to the surrounding `EVENT_COMMISSION_BREAKAWAY_*`
-    marker (152-159), not globally unique. Tag 1 (`directional_breakaway`, 22
-    bytes) collides byte-for-byte with the legacy 22-byte
+    marker (152-162), not globally unique. The v13 tag 1
+    (`directional_breakaway`, 22 bytes) collides byte-for-byte with the legacy 22-byte
     `integral_plan_marker` shape decoded by `_decode_velocity_sweep_evidence`,
     and tag 3 (`discovery_planned`, 45 bytes since `schema_revision` was added)
     collides byte-for-byte with the legacy non-compact
@@ -2164,6 +2177,8 @@ def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
     breakaway bundle must call this function directly on `Frame.raw_payload`
     rather than trust `Frame.payload`.
     """
+    if protocol_version not in SUPPORTED_PROTOCOL_VERSIONS:
+        raise DecodeError(f"unsupported protocol version {protocol_version}")
     _require(payload, 1, "breakaway evidence")
     cursor = _EvidenceCursor(payload)
     tag = cursor.take("B")
@@ -2207,7 +2222,10 @@ def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
                 }
             )
         decoded["record_kind"] = "breakaway_probe_planned"
-    elif tag == BREAKAWAY_TAG_DIRECTIONAL_BREAKAWAY and len(payload) == 22:
+    elif tag == BREAKAWAY_TAG_DIRECTIONAL_BREAKAWAY and (
+        (protocol_version >= 14 and len(payload) == 23)
+        or (protocol_version <= 13 and len(payload) == 22)
+    ):
         decoded = _take_fields(
             cursor,
             (
@@ -2225,6 +2243,12 @@ def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
             raise DecodeError("breakaway directional-breakaway direction is invalid")
         if decoded["inert_present"] not in (0, 1):
             raise DecodeError("breakaway directional-breakaway inert-present flag is invalid")
+        decoded["lower_disposition_mask"] = cursor.take("B") if protocol_version >= 14 else None
+        if (
+            decoded["lower_disposition_mask"] is not None
+            and decoded["lower_disposition_mask"] & ~0b11
+        ):
+            raise DecodeError("breakaway directional-breakaway disposition mask is invalid")
         decoded["record_kind"] = "breakaway_directional_breakaway"
     elif tag == BREAKAWAY_TAG_PROBE_TERMINAL and len(payload) in (19, 20, 21):
         decoded = _take_fields(
@@ -2240,6 +2264,9 @@ def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
         )
         if decoded["terminal_cause"] not in BREAKAWAY_TERMINAL_CAUSE_NAMES:
             raise DecodeError("breakaway probe terminal cause is invalid")
+        decoded["terminal_cause_name"] = _breakaway_terminal_cause_name(
+            int(decoded["terminal_cause"]), protocol_version
+        )
         decoded["fault_checkpoint"] = cursor.take("B") if len(payload) >= 20 else 0
         if decoded["fault_checkpoint"] not in BREAKAWAY_CHECKPOINT_NAMES:
             raise DecodeError("breakaway probe terminal checkpoint is invalid")
@@ -2287,7 +2314,10 @@ def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
         if decoded["binding_source"] not in (0, 1):
             raise DecodeError("breakaway ceiling binding source is invalid")
         decoded["record_kind"] = "breakaway_ceiling_source"
-    elif tag == BREAKAWAY_TAG_RAW_OBSERVATION and len(payload) == 99:
+    elif tag == BREAKAWAY_TAG_RAW_OBSERVATION and (
+        (protocol_version >= 14 and len(payload) == 104)
+        or (protocol_version <= 13 and len(payload) == 99)
+    ):
         decoded = _take_fields(
             cursor,
             (
@@ -2316,7 +2346,8 @@ def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
                 ("disturbance_high_q16", "i"),
             ),
         )
-        if decoded["phase"] not in (1, 2):
+        valid_phases = (0, 1, 2) if protocol_version >= 14 else (1, 2)
+        if decoded["phase"] not in valid_phases:
             raise DecodeError("breakaway raw observation phase is invalid")
         if decoded["direction"] not in (0, 1):
             raise DecodeError("breakaway raw observation direction is invalid")
@@ -2324,6 +2355,18 @@ def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
             raise DecodeError("breakaway raw observation stationarity code is invalid")
         if decoded["disturbance_present"] not in (0, 1):
             raise DecodeError("breakaway raw observation disturbance flag is invalid")
+        if protocol_version >= 14:
+            decoded["drift_ratio_ppm"] = cursor.take("I")
+            decoded["post_fit_lag_one_state"] = cursor.take("B")
+            if decoded["post_fit_lag_one_state"] not in (0, 1, 2):
+                raise DecodeError("breakaway raw observation lag-one state is invalid")
+            if decoded["stationarity_code"] == 0 and decoded["post_fit_lag_one_state"] != 2:
+                raise DecodeError(
+                    "breakaway usable raw observation requires lag-one state passed (2)"
+                )
+        else:
+            decoded["drift_ratio_ppm"] = None
+            decoded["post_fit_lag_one_state"] = None
         decoded["record_kind"] = "breakaway_raw_observation"
     elif tag == BREAKAWAY_TAG_DISCOVERY_TERMINAL and len(payload) == 28:
         decoded = _take_fields(
@@ -2341,6 +2384,9 @@ def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
         )
         if decoded["terminal_cause"] not in BREAKAWAY_TERMINAL_CAUSE_NAMES:
             raise DecodeError("breakaway discovery terminal cause is invalid")
+        decoded["terminal_cause_name"] = _breakaway_terminal_cause_name(
+            int(decoded["terminal_cause"]), protocol_version
+        )
         decoded["record_kind"] = "breakaway_discovery_terminal"
     elif tag == BREAKAWAY_TAG_DISCOVERY_RUNG_MARGIN and len(payload) == 38:
         decoded = _take_fields(
@@ -2417,6 +2463,9 @@ def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
         )
         if decoded["terminal_cause"] not in BREAKAWAY_TERMINAL_CAUSE_NAMES:
             raise DecodeError("breakaway confirmation terminal cause is invalid")
+        decoded["terminal_cause_name"] = _breakaway_terminal_cause_name(
+            int(decoded["terminal_cause"]), protocol_version
+        )
         if decoded["accepted"] not in (0, 1):
             raise DecodeError("breakaway confirmation accepted flag is invalid")
         for name in (
@@ -2465,9 +2514,29 @@ def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
             raise DecodeError("breakaway campaign terminal phase is invalid")
         if decoded["terminal_cause"] not in BREAKAWAY_TERMINAL_CAUSE_NAMES:
             raise DecodeError("breakaway campaign terminal cause is invalid")
+        decoded["terminal_cause_name"] = _breakaway_terminal_cause_name(
+            int(decoded["terminal_cause"]), protocol_version
+        )
         if decoded["accepted"] not in (0, 1):
             raise DecodeError("breakaway campaign terminal accepted flag is invalid")
         decoded["record_kind"] = "breakaway_campaign_terminal"
+    elif tag == BREAKAWAY_TAG_PROBE_DECISION and protocol_version >= 14 and len(payload) == 18:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest", "Q"),
+                ("direction", "B"),
+                ("rung_index", "B"),
+                ("disposition", "B"),
+            ),
+        )
+        if decoded["direction"] not in (0, 1):
+            raise DecodeError("breakaway probe decision direction is invalid")
+        if decoded["disposition"] not in (0, 1, 2):
+            raise DecodeError("breakaway probe decision disposition is invalid")
+        decoded["record_kind"] = "breakaway_probe_decision"
     else:
         raise DecodeError(f"unknown breakaway evidence tag {tag} (length {len(payload)})")
     cursor.finish()
@@ -2477,6 +2546,8 @@ def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
 
 def assemble_breakaway_ticks(
     frames: list[tuple[int, int, bytes, dict[str, Any] | None]],
+    *,
+    protocol_version: int = PROTOCOL_VERSION,
 ) -> list[dict[str, Any]]:
     """Assemble breakaway-campaign canonical records into per-marker ticks.
 
@@ -2536,7 +2607,10 @@ def assemble_breakaway_ticks(
         # (`SOURCE_KIND_BOARD`/`SOURCE_INDEX_NA`), never the real one.
         args = decoded_payload.get("args") or []
         sequence = int(args[2]) if len(args) > 2 else 0
-        records = [(raw, decode_breakaway_record(raw)) for raw in pending]
+        records = [
+            (raw, decode_breakaway_record(raw, protocol_version=protocol_version))
+            for raw in pending
+        ]
         pending = []
         ticks.append(
             {

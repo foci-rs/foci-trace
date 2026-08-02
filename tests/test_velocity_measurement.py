@@ -3010,6 +3010,8 @@ def _bw_raw_observation(
     disturbance_present: int = 1,
     disturbance_low_q16: int = 0,
     disturbance_high_q16: int = 1000,
+    drift_ratio_ppm: int = 0,
+    post_fit_lag_one_state: int = 2,
 ) -> bytes:
     """Build a tag-5 `BreakawayRawObservation` record's raw bytes.
 
@@ -3060,7 +3062,9 @@ def _bw_raw_observation(
         disturbance_low_q16,
         disturbance_high_q16,
     )
-    return head + variance_bytes + tail
+    return (
+        head + variance_bytes + tail + struct.pack("<IB", drift_ratio_ppm, post_fit_lag_one_state)
+    )
 
 
 def _bw_classifier_obs(slot: int, direction: int, **overrides) -> dict:
@@ -3082,6 +3086,8 @@ def _bw_classifier_obs(slot: int, direction: int, **overrides) -> dict:
         "disturbance_present": 1,
         "disturbance_low_q16": 0,
         "disturbance_high_q16": 1000,
+        "drift_ratio_ppm": 0,
+        "post_fit_lag_one_state": 2,
     }
     base.update(overrides)
     return base
@@ -3263,7 +3269,7 @@ class _BreakawayCampaignBuilder:
         strokes = self.probe_strokes() if observations is None else observations
         forward = _bw_tag(
             1,
-            "IHQBBHHB",
+            "IHQBBHHBB",
             self.run_sequence,
             sequence,
             digest,
@@ -3272,10 +3278,11 @@ class _BreakawayCampaignBuilder:
             self.floor_raw,
             self.breakaway_raw,
             strokes,
+            0b01,
         )
         reverse = _bw_tag(
             1,
-            "IHQBBHHB",
+            "IHQBBHHBB",
             self.run_sequence,
             sequence,
             digest,
@@ -3284,6 +3291,7 @@ class _BreakawayCampaignBuilder:
             self.floor_raw,
             self.breakaway_raw,
             strokes,
+            0b01,
         )
         return {
             "event_id": 153,

@@ -12,6 +12,7 @@ from foci_trace.protocol import (
     FRAME_TYPE_VELOCITY_OBSERVATION,
     FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
     PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS,
     VELOCITY_OBSERVATION_FLAG_PID_VELOCITY_ACTUAL_VALID,
     VELOCITY_OBSERVATION_FLAG_PPTM_ACTUAL_VALID,
     DecodeError,
@@ -206,7 +207,8 @@ def test_decodes_version_nine_pptm_velocity_diagnostic() -> None:
 
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_OBSERVATION, payload) + payload)
 
-    assert PROTOCOL_VERSION == 13
+    assert PROTOCOL_VERSION == 14
+    assert 13 in SUPPORTED_PROTOCOL_VERSIONS
     assert frame.payload["pid_velocity_actual"] is None
     assert frame.payload["actual_velocity_pptm"] == 176
 
@@ -215,8 +217,8 @@ def test_decode_frame_rejects_a_version_beyond_the_supported_range() -> None:
     # A version past the supported range is rejected; historical versions stay
     # decodable so committed captures still replay.
     payload = bytes(88)
-    with pytest.raises(DecodeError, match="unsupported protocol version 14"):
-        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=14) + payload)
+    with pytest.raises(DecodeError, match="unsupported protocol version 15"):
+        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=15) + payload)
 
 
 def test_rejects_velocity_observation_with_both_diagnostic_kinds() -> None:
@@ -2240,7 +2242,7 @@ def _bw_probe_planned_legacy() -> bytes:
     )
 
 
-def _bw_directional_breakaway() -> bytes:
+def _bw_directional_breakaway_v13() -> bytes:
     return bytes([1]) + struct.pack(
         "<IHQBBHHB",
         _BW_RUN_SEQUENCE,
@@ -2252,6 +2254,10 @@ def _bw_directional_breakaway() -> bytes:
         0x1112,
         6,
     )
+
+
+def _bw_directional_breakaway() -> bytes:
+    return _bw_directional_breakaway_v13() + bytes([0b11])
 
 
 def _bw_probe_terminal() -> bytes:
@@ -2326,7 +2332,7 @@ def _bw_ceiling_source() -> bytes:
 _BW_RAW_OBSERVATION_VARIANCE_OF_MEAN_Q2 = 0x1112_1314_1516_1718_191A_1B1C_1D1E_1F20
 
 
-def _bw_raw_observation() -> bytes:
+def _bw_raw_observation_v13() -> bytes:
     """Tag 5's new shape: `struct.pack` has no native
     128-bit format code, so `variance_of_mean_q2` is appended as its own
     16-byte little-endian span rather than folded into the `struct.pack`
@@ -2364,6 +2370,25 @@ def _bw_raw_observation() -> bytes:
             -0x0102_0304,
             0x0506_0708,
         )
+    )
+
+
+def _bw_raw_observation(*, stationarity_code: int = 4, post_fit_lag_one_state: int = 2) -> bytes:
+    payload = bytearray(_bw_raw_observation_v13())
+    payload[51] = stationarity_code
+    payload.extend(struct.pack("<IB", 0x1112_1314, post_fit_lag_one_state))
+    return bytes(payload)
+
+
+def _bw_probe_decision() -> bytes:
+    return bytes([13]) + struct.pack(
+        "<IHQBBB",
+        _BW_RUN_SEQUENCE,
+        _BW_EVIDENCE_SEQUENCE,
+        _BW_PLAN_DIGEST,
+        1,
+        3,
+        1,
     )
 
 
@@ -2511,7 +2536,7 @@ def test_decode_breakaway_directional_breakaway_matches_the_firmware_golden_byte
     from foci_trace.protocol import decode_breakaway_record
 
     payload = _bw_directional_breakaway()
-    assert len(payload) == 22
+    assert len(payload) == 23
     decoded = decode_breakaway_record(payload)
     assert decoded["record_kind"] == "breakaway_directional_breakaway"
     assert decoded["direction"] == 1
@@ -2519,6 +2544,14 @@ def test_decode_breakaway_directional_breakaway_matches_the_firmware_golden_byte
     assert decoded["inert_p_raw"] == 0x0910
     assert decoded["moving_p_raw"] == 0x1112
     assert decoded["observations"] == 6
+    assert decoded["lower_disposition_mask"] == 0b11
+
+
+def test_decode_breakaway_directional_breakaway_preserves_v13_shape() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    decoded = decode_breakaway_record(_bw_directional_breakaway_v13(), protocol_version=13)
+    assert decoded["lower_disposition_mask"] is None
 
 
 def test_decode_breakaway_probe_terminal_matches_the_firmware_golden_bytes() -> None:
@@ -2551,6 +2584,15 @@ def test_decode_breakaway_probe_terminal_preserves_historical_capture_support(
     assert decoded["fault_checkpoint"] == fault_checkpoint
     assert decoded["exclusion_reason"] == 0
     assert decoded["exclusion_reason_name"] == "none"
+
+
+def test_breakaway_terminal_cause_one_uses_protocol_versioned_spelling() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    v13 = decode_breakaway_record(_bw_probe_terminal_v10(), protocol_version=13)
+    v14 = decode_breakaway_record(_bw_probe_terminal_v10(), protocol_version=14)
+    assert v13["terminal_cause_name"] == "probe_no_motion_at_authority"
+    assert v14["terminal_cause_name"] == "probe_no_productive_response_at_authority"
 
 
 def test_decode_breakaway_probe_terminal_rejects_unknown_checkpoint() -> None:
@@ -2624,7 +2666,7 @@ def test_decode_breakaway_raw_observation_matches_the_firmware_golden_bytes() ->
     from foci_trace.protocol import decode_breakaway_record
 
     payload = _bw_raw_observation()
-    assert len(payload) == 99
+    assert len(payload) == 104
     decoded = decode_breakaway_record(payload)
     assert decoded["record_kind"] == "breakaway_raw_observation"
     assert decoded["plan_digest"] == _BW_PLAN_DIGEST
@@ -2646,6 +2688,62 @@ def test_decode_breakaway_raw_observation_matches_the_firmware_golden_bytes() ->
     assert decoded["disturbance_present"] == 1
     assert decoded["disturbance_low_q16"] == -0x0102_0304
     assert decoded["disturbance_high_q16"] == 0x0506_0708
+    assert decoded["drift_ratio_ppm"] == 0x1112_1314
+    assert decoded["post_fit_lag_one_state"] == 2
+
+
+def test_decode_breakaway_raw_observation_preserves_v13_shape_without_inference() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    decoded = decode_breakaway_record(_bw_raw_observation_v13(), protocol_version=13)
+    assert decoded["drift_ratio_ppm"] is None
+    assert decoded["post_fit_lag_one_state"] is None
+
+
+@pytest.mark.parametrize("state", [0, 1])
+def test_decode_breakaway_raw_observation_rejects_usable_v14_lag_states_below_passed(
+    state: int,
+) -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    with pytest.raises(DecodeError, match="usable.*lag-one state"):
+        decode_breakaway_record(
+            _bw_raw_observation(stationarity_code=0, post_fit_lag_one_state=state)
+        )
+
+
+def test_decode_breakaway_raw_observation_accepts_usable_v14_lag_state_passed() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    decoded = decode_breakaway_record(
+        _bw_raw_observation(stationarity_code=0, post_fit_lag_one_state=2)
+    )
+    assert decoded["post_fit_lag_one_state"] == 2
+
+
+def test_decode_breakaway_raw_observation_rejects_unknown_v14_lag_state() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    with pytest.raises(DecodeError, match="lag-one state is invalid"):
+        decode_breakaway_record(_bw_raw_observation(post_fit_lag_one_state=3))
+
+
+def test_decode_breakaway_probe_decision_matches_the_firmware_golden_bytes() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    payload = _bw_probe_decision()
+    assert len(payload) == 18
+    decoded = decode_breakaway_record(payload)
+    assert decoded == {
+        "run_sequence": _BW_RUN_SEQUENCE,
+        "evidence_sequence": _BW_EVIDENCE_SEQUENCE,
+        "plan_digest": _BW_PLAN_DIGEST,
+        "direction": 1,
+        "rung_index": 3,
+        "disposition": 1,
+        "record_kind": "breakaway_probe_decision",
+        "tag": 13,
+    }
 
 
 def test_decode_breakaway_raw_observation_rejects_an_invalid_phase() -> None:
@@ -2654,7 +2752,7 @@ def test_decode_breakaway_raw_observation_rejects_an_invalid_phase() -> None:
     payload = bytearray(_bw_raw_observation())
     # Layout: tag(1) + run_sequence(4) + evidence_sequence(2) + plan_digest(8)
     # puts `phase` at byte offset 15.
-    payload[15] = 0  # 0 (Probe) never carries a raw observation.
+    payload[15] = 3
     with pytest.raises(DecodeError, match="phase is invalid"):
         decode_breakaway_record(bytes(payload))
 
@@ -2778,6 +2876,7 @@ def test_breakaway_event_ids_match_the_firmware_trace_events_table() -> None:
         EVENT_COMMISSION_BREAKAWAY_DISCOVERY_PLAN,
         EVENT_COMMISSION_BREAKAWAY_DISCOVERY_TERMINAL,
         EVENT_COMMISSION_BREAKAWAY_PROBE_DERIVED,
+        EVENT_COMMISSION_BREAKAWAY_PROBE_DECISION,
         EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN,
         EVENT_COMMISSION_BREAKAWAY_PROBE_TERMINAL,
         EVENT_COMMISSION_BREAKAWAY_RAW_OBSERVATION,
@@ -2795,6 +2894,7 @@ def test_breakaway_event_ids_match_the_firmware_trace_events_table() -> None:
     assert EVENT_COMMISSION_BREAKAWAY_CAMPAIGN_TERMINAL == 159
     assert EVENT_COMMISSION_BREAKAWAY_RAW_OBSERVATION == 160
     assert EVENT_COMMISSION_BREAKAWAY_DISCOVERY_MARGIN == 161
+    assert EVENT_COMMISSION_BREAKAWAY_PROBE_DECISION == 162
     assert BREAKAWAY_CAMPAIGN_EVENT_IDS == (
         EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN,
         EVENT_COMMISSION_BREAKAWAY_PROBE_DERIVED,
@@ -2806,6 +2906,7 @@ def test_breakaway_event_ids_match_the_firmware_trace_events_table() -> None:
         EVENT_COMMISSION_BREAKAWAY_CAMPAIGN_TERMINAL,
         EVENT_COMMISSION_BREAKAWAY_RAW_OBSERVATION,
         EVENT_COMMISSION_BREAKAWAY_DISCOVERY_MARGIN,
+        EVENT_COMMISSION_BREAKAWAY_PROBE_DECISION,
     )
 
 
@@ -2813,7 +2914,7 @@ def test_decode_breakaway_record_rejects_an_unknown_tag() -> None:
     from foci_trace.protocol import decode_breakaway_record
 
     with pytest.raises(DecodeError, match="unknown breakaway evidence tag"):
-        decode_breakaway_record(bytes([13, 0, 0, 0, 0]))
+        decode_breakaway_record(bytes([14, 0, 0, 0, 0]))
 
 
 def test_decode_breakaway_record_rejects_a_length_mismatch_for_a_known_tag() -> None:
@@ -2823,10 +2924,10 @@ def test_decode_breakaway_record_rejects_a_length_mismatch_for_a_known_tag() -> 
         decode_breakaway_record(_bw_probe_planned() + b"\x00")
 
 
-def test_the_only_breakaway_tags_that_collide_with_a_legacy_wire_shape_are_one_and_three() -> None:
+def test_the_only_v14_breakaway_tag_that_collides_with_a_legacy_wire_shape_is_three() -> None:
     """`decode_frame`'s generic decoder recovers every breakaway tag except two.
 
-    Tags 0, 2, and 4-12 fail every existing `(kind, length)` branch in
+    Tags 0-2 and 4-13 fail every existing `(kind, length)` branch in
     `_decode_velocity_sweep_evidence` and raise, so `_decode_payload` falls
     back to `decode_breakaway_record` and recovers the correct interpretation
     with no extra context needed. Two tags genuinely collide with an
@@ -2834,8 +2935,8 @@ def test_the_only_breakaway_tags_that_collide_with_a_legacy_wire_shape_are_one_a
     exact payload length, so the generic decoder "succeeds" with the wrong
     interpretation:
 
-    - Tag 1 (`directional_breakaway`, 22 bytes) is byte-for-byte identical in
-      shape to the legacy 22-byte `integral_plan_marker` record.
+    - The v14 tag 1 (`directional_breakaway`, 23 bytes) no longer collides with
+      the legacy 22-byte `integral_plan_marker`; the historical v13 shape does.
     - Tag 3 (`discovery_planned`) widened from 43 to 45 bytes when
       `schema_revision` was added, and 45 bytes also happens to be the
       legacy non-compact Stage-B `rung` record's exact length.
@@ -2857,17 +2958,22 @@ def test_the_only_breakaway_tags_that_collide_with_a_legacy_wire_shape_are_one_a
         _bw_confirmation_terminal,
         _bw_confirmation_observation,
         _bw_campaign_terminal,
+        _bw_probe_decision,
     ):
         payload = builder()
         frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
         assert str(frame.payload["record_kind"]).startswith("breakaway_")
 
-    collided_directional_payload = _bw_directional_breakaway()
-    collided_directional_frame = decode_frame(
-        _header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, collided_directional_payload)
-        + collided_directional_payload
+    v13_directional_payload = _bw_directional_breakaway_v13()
+    v13_directional_frame = decode_frame(
+        _header(
+            FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
+            v13_directional_payload,
+            version=13,
+        )
+        + v13_directional_payload
     )
-    assert collided_directional_frame.payload["record_kind"] == "integral_plan_marker"
+    assert v13_directional_frame.payload["record_kind"] == "integral_plan_marker"
 
     collided_discovery_payload = _bw_discovery_planned()
     collided_discovery_frame = decode_frame(
