@@ -5356,6 +5356,10 @@ _BW_REQUIRED_HALF_WIDTH_FRACTION = 1.0 / 15.0
 
 # `BreakawayTerminalCause::Accepted` (breakaway_reporting.rs).
 _BW_TERMINAL_CAUSE_ACCEPTED = 21
+_BW_STATIONARITY_EXCESSIVE_DRIFT = 6
+_BW_PROBE_DISPOSITION_INERT = 0
+_BW_PROBE_DISPOSITION_TRANSIENT = 1
+_BW_PROBE_DISPOSITION_PRODUCTIVE = 2
 
 # `BREAKAWAY_STAGE_B_SCHEMA_REVISION` (combined_plan.rs): the rules revision
 # `AdditiveDiscoveryPlanned.schema_revision` reports, so an offline decoder can
@@ -5658,12 +5662,13 @@ BREAKAWAY_EVENT_ID_NAMES = {
     159: "campaign_terminal",
     160: "raw_observation",
     161: "discovery_rung_margin",
+    162: "probe_decision",
 }
 
 # Phase rank per marker event id: probe (0) must never follow discovery (1),
 # which must never follow confirmation (2); the campaign terminal (3) is
 # always the campaign's last tick, from any phase. The raw-observation marker
-# (160) is shared by discovery and confirmation strokes, so its rank is not
+# (160) is shared by probe, discovery, and confirmation strokes, so its rank is not
 # fixed here -- `_bw_tick_phase_rank` resolves it from the streamed record's own
 # `phase` field. The discovery-margin marker (161) is discovery-only.
 _BW_EVENT_PHASE_RANK = {
@@ -5676,23 +5681,28 @@ _BW_EVENT_PHASE_RANK = {
     158: 2,
     159: 3,
     161: 1,
+    162: 0,
 }
 
 # Raw-observation record `phase` field values (BreakawayPhase as u8): the
 # streamed marker-160 tick belongs to whichever phase its record names.
+_BW_RAW_OBSERVATION_PHASE_PROBE = 0
 _BW_RAW_OBSERVATION_PHASE_DISCOVERY = 1
 _BW_RAW_OBSERVATION_PHASE_CONFIRMATION = 2
 
 
 def _bw_tick_phase_rank(tick: dict[str, object]) -> int:
     """Phase rank of one marker tick, resolving the shared raw-observation
-    marker (160) from its record's `phase` field: a discovery stroke ranks with
-    discovery (1), a confirmation stroke with confirmation (2)."""
+    marker (160) from its record's `phase` field."""
     event_id = tick["event_id"]
     if event_id == 160:
         observations = _bw_tick_records_by_kind(tick, "breakaway_raw_observation")
         phase = int(observations[0]["phase"]) if observations else 0
-        return 2 if phase == _BW_RAW_OBSERVATION_PHASE_CONFIRMATION else 1
+        if phase == _BW_RAW_OBSERVATION_PHASE_CONFIRMATION:
+            return 2
+        if phase == _BW_RAW_OBSERVATION_PHASE_DISCOVERY:
+            return 1
+        return 0
     return _BW_EVENT_PHASE_RANK[event_id]
 
 
@@ -5872,6 +5882,234 @@ def breakaway_probe_plan_digest(
     digest = _bw_fnv1a_extend(digest, pwm_hz, 4)
     digest = _bw_fnv1a_extend(digest, encoder_counts_per_rev, 4)
     return digest
+
+
+def _bw_classify_probe_observation(observation: dict[str, object]) -> dict[str, int | str]:
+    """Port the probe-local productive-response classifier.
+
+    The result is either a committed cursor disposition (`0` inert, `1`
+    transient, `2` productive) or the probe terminal cause and evidence reason
+    that firmware must report.  The `ExcessiveDrift` branch intentionally has
+    probe-local authority precedence; the shared sweep classifier is unchanged.
+    """
+    settled_low = int(observation["settled_rate_low_q"])
+    settled_high = int(observation["settled_rate_high_q"])
+    deficit_low = int(observation["deficit_low_q"])
+    deficit_high = int(observation["deficit_high_q"])
+    usable = int(observation["usable_torque_limit"])
+    hard = int(observation["hard_torque_limit"])
+    predicted = int(observation["predicted_torque_target_abs"])
+    stationarity = int(observation["stationarity_code"])
+    forward = int(observation["direction"]) == 0
+
+    valid_intervals = settled_low <= settled_high and deficit_low <= deficit_high and usable <= hard
+    wrong_direction = settled_high < 0 if forward else settled_low > 0
+    moving = settled_low > 0 if forward else settled_high < 0
+
+    def terminal(cause: int, exclusion_reason: int = 0) -> dict[str, int | str]:
+        return {
+            "kind": "terminal",
+            "terminal_cause": cause,
+            "exclusion_reason": exclusion_reason,
+        }
+
+    if stationarity == _BW_STATIONARITY_EXCESSIVE_DRIFT:
+        drift = observation.get("drift_ratio_ppm")
+        if (
+            not valid_intervals
+            or drift is None
+            or int(drift) == NO_REPORTABLE_DRIFT_RATIO_PPM
+            or int(drift) <= MAX_MOVING_DRIFT_PPM
+        ):
+            return terminal(4, 1)
+        if predicted >= hard or wrong_direction:
+            return terminal(6)
+        if predicted >= usable:
+            return terminal(5)
+        lag_state = observation.get("post_fit_lag_one_state")
+        if lag_state == 0:
+            return terminal(4, 1)
+        if lag_state == 1:
+            return terminal(4, 8)
+        if lag_state != 2:
+            return terminal(4, 1)
+        contains_zero = settled_low <= 0 <= settled_high
+        return {
+            "kind": "decision",
+            "disposition": (
+                _BW_PROBE_DISPOSITION_INERT if contains_zero else _BW_PROBE_DISPOSITION_TRANSIENT
+            ),
+        }
+
+    if not valid_intervals:
+        return terminal(4, 1)
+    if predicted >= hard or wrong_direction:
+        return terminal(6)
+    if stationarity != 0:
+        return terminal(4, stationarity + 4)
+    if not moving:
+        return {"kind": "decision", "disposition": _BW_PROBE_DISPOSITION_INERT}
+    if predicted >= usable:
+        return terminal(5)
+    deficit_resolved = deficit_low > 0 if forward else deficit_high < 0
+    if not deficit_resolved:
+        return {"kind": "decision", "disposition": _BW_PROBE_DISPOSITION_PRODUCTIVE}
+    if int(observation["disturbance_present"]) == 0:
+        return terminal(4, 1)
+    return {"kind": "decision", "disposition": _BW_PROBE_DISPOSITION_PRODUCTIVE}
+
+
+@dataclass
+class _BreakawayProbeCursorReplay:
+    """Host-side port of one directional `BreakawaySearchCursor`."""
+
+    rung_count: int
+    lo: int = 0
+    hi: int = 0
+    stage: str = "bisecting"
+    pending_index: int = 0
+    observations: int = 0
+    boundary_inert: int | None = None
+    boundary_moving: int | None = None
+    lower_disposition_mask: int = 0
+
+    @classmethod
+    def start(cls, rung_count: int) -> "_BreakawayProbeCursorReplay":
+        if rung_count <= 0:
+            raise ValueError("probe cursor requires a non-empty search grid")
+        return cls(rung_count, hi=rung_count, pending_index=rung_count // 2)
+
+    def advance(self, disposition: int) -> tuple[str, int | dict[str, int | None]]:
+        if disposition not in (
+            _BW_PROBE_DISPOSITION_INERT,
+            _BW_PROBE_DISPOSITION_TRANSIENT,
+            _BW_PROBE_DISPOSITION_PRODUCTIVE,
+        ):
+            raise ValueError("probe cursor disposition is invalid")
+        self.observations += 1
+        productive = disposition == _BW_PROBE_DISPOSITION_PRODUCTIVE
+        if self.stage == "bisecting":
+            tested = self.pending_index
+            if productive:
+                self.hi = tested
+            else:
+                self.lo = tested + 1
+                self.lower_disposition_mask = 1 << disposition
+            if self.lo < self.hi:
+                self.pending_index = self.lo + (self.hi - self.lo) // 2
+                return "probe", self.pending_index
+            if self.lo >= self.rung_count:
+                self.stage = "confirm_all_inert"
+                self.pending_index = self.rung_count - 1
+                return "probe", self.pending_index
+            self.boundary_moving = self.lo
+            self.boundary_inert = self.lo - 1 if self.lo > 0 else None
+            if self.boundary_inert is not None:
+                self.stage = "confirm_inert"
+                self.pending_index = self.boundary_inert
+            else:
+                self.stage = "confirm_moving"
+                self.pending_index = self.lo
+            return "probe", self.pending_index
+        if self.stage == "confirm_inert":
+            if productive:
+                return "terminal", {"terminal_cause": 2, "exclusion_reason": 0}
+            self.lower_disposition_mask |= 1 << disposition
+            self.stage = "confirm_moving"
+            if self.boundary_moving is None:
+                raise ValueError("probe cursor has no productive boundary")
+            self.pending_index = self.boundary_moving
+            return "probe", self.pending_index
+        if self.stage == "confirm_moving":
+            if not productive:
+                return "terminal", {"terminal_cause": 2, "exclusion_reason": 0}
+            if self.boundary_moving is None:
+                raise ValueError("probe cursor has no productive boundary")
+            return "resolved", {
+                "inert_index": self.boundary_inert,
+                "moving_index": self.boundary_moving,
+                "observations": self.observations,
+                "lower_disposition_mask": self.lower_disposition_mask,
+            }
+        if self.stage == "confirm_all_inert":
+            cause = 2 if productive else 1
+            return "terminal", {"terminal_cause": cause, "exclusion_reason": 0}
+        raise ValueError(f"unknown probe cursor stage {self.stage}")
+
+
+def _bw_replay_probe(ticks: list[dict[str, object]], search_grid: list[int]) -> dict[str, object]:
+    """Replay committed v14 probe decisions from raw evidence.
+
+    A raw observation is provisional until the immediately following recovered
+    decision names it.  A final raw record without a decision is retained as a
+    recovery-failure breadcrumb and never mutates the reconstructed cursor.
+    """
+    streamed: list[dict[str, object]] = []
+    for tick in ticks:
+        if tick["event_id"] == 160:
+            raw = _bw_tick_records_by_kind(tick, "breakaway_raw_observation")
+            if raw and int(raw[0]["phase"]) == _BW_RAW_OBSERVATION_PHASE_PROBE:
+                streamed.append(raw[0])
+        elif tick["event_id"] == 162:
+            streamed.extend(_bw_tick_records_by_kind(tick, "breakaway_probe_decision"))
+
+    cursors = [_BreakawayProbeCursorReplay.start(len(search_grid)) for _ in range(2)]
+    resolved: list[dict[str, int | None] | None] = [None, None]
+    committed = 0
+    uncommitted_raw: list[dict[str, object]] = []
+    expected_terminal: dict[str, int | str] | None = None
+    index = 0
+    while index < len(streamed):
+        raw = streamed[index]
+        if raw.get("record_kind") != "breakaway_raw_observation":
+            raise ValueError("probe decision has no preceding raw observation")
+        classification = _bw_classify_probe_observation(raw)
+        decision = streamed[index + 1] if index + 1 < len(streamed) else None
+        if decision is None or decision.get("record_kind") != "breakaway_probe_decision":
+            if index + 1 != len(streamed):
+                raise ValueError("uncommitted probe raw observation is not the final probe record")
+            uncommitted_raw.append(raw)
+            expected_terminal = classification if classification["kind"] == "terminal" else None
+            break
+
+        if int(decision["evidence_sequence"]) != int(raw["evidence_sequence"]) + 1:
+            raise ValueError("probe decision evidence_sequence does not follow its raw observation")
+        for field_name in ("run_sequence", "plan_digest", "direction", "rung_index"):
+            if int(decision[field_name]) != int(raw[field_name]):
+                raise ValueError(f"probe decision {field_name} disagrees with its raw observation")
+        if classification["kind"] != "decision":
+            raise ValueError("probe decision commits raw evidence that independently terminates")
+        if int(decision["disposition"]) != int(classification["disposition"]):
+            raise ValueError("probe decision disposition disagrees with independent classification")
+
+        direction = int(raw["direction"])
+        if direction == 1 and resolved[0] is None:
+            raise ValueError("reverse probe decision precedes the resolved forward direction")
+        cursor = cursors[direction]
+        if resolved[direction] is not None:
+            raise ValueError("probe decision follows a resolved direction")
+        if int(raw["rung_index"]) != cursor.pending_index:
+            raise ValueError(
+                "probe decision rung does not match the independently reconstructed cursor"
+            )
+        step, value = cursor.advance(int(classification["disposition"]))
+        committed += 1
+        if step == "resolved":
+            resolved[direction] = value  # type: ignore[assignment]
+        elif step == "terminal":
+            expected_terminal = value  # type: ignore[assignment]
+            if index + 2 != len(streamed):
+                raise ValueError(
+                    "probe evidence continues after an independently terminal decision"
+                )
+        index += 2
+
+    return {
+        "directions": resolved,
+        "committed_observations": committed,
+        "uncommitted_raw": uncommitted_raw,
+        "expected_terminal": expected_terminal,
+    }
 
 
 def breakaway_replay_binary_search(rung_count: int, moving_index: int) -> int:
