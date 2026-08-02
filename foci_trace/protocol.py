@@ -7,11 +7,10 @@ import struct
 from typing import Any
 
 FRAME_MAGIC = 0x43525446
-# Bumped to 11 for the operation-level checkpoint appended to the breakaway probe
-# terminal. The decoder retains the version-10 19-byte terminal shape so the
-# first hardware-validation captures remain readable.
-PROTOCOL_VERSION = 11
-SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, PROTOCOL_VERSION)
+# Bumped to 12 for the probe exclusion reason and complete probe-plan digest
+# context. Historical versions remain readable.
+PROTOCOL_VERSION = 12
+SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, PROTOCOL_VERSION)
 HEADER_LEN = 32
 
 FRAME_TYPE_CRITICAL = 1
@@ -2107,6 +2106,14 @@ BREAKAWAY_CHECKPOINT_NAMES = {
     41: "recovery_zero_boundary",
 }
 
+BREAKAWAY_PROBE_EXCLUSION_REASON_NAMES = {
+    0: "none",
+    1: "invalid_moving_evidence",
+    2: "moving_stationarity_excluded",
+    3: "settle_rest_unconfirmed",
+    4: "recovery_rest_unconfirmed",
+}
+
 # Local wire tags for the breakaway-campaign canonical-record family
 # (`breakaway_trace_reporting.rs`). These are scoped to the surrounding
 # `EVENT_COMMISSION_BREAKAWAY_*` marker, not globally unique against the
@@ -2154,7 +2161,7 @@ def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
     _require(payload, 1, "breakaway evidence")
     cursor = _EvidenceCursor(payload)
     tag = cursor.take("B")
-    if tag == BREAKAWAY_TAG_PROBE_PLANNED and len(payload) == 23:
+    if tag == BREAKAWAY_TAG_PROBE_PLANNED and len(payload) in (23, 47):
         decoded = _take_fields(
             cursor,
             (
@@ -2168,6 +2175,31 @@ def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
                 ("p_top_raw", "H"),
             ),
         )
+        if len(payload) == 47:
+            decoded.update(
+                _take_fields(
+                    cursor,
+                    (
+                        ("workflow_digest", "Q"),
+                        ("target_velocity_rpm", "i"),
+                        ("hard_torque_limit", "H"),
+                        ("usable_torque_limit", "H"),
+                        ("pwm_hz", "I"),
+                        ("encoder_counts_per_rev", "I"),
+                    ),
+                )
+            )
+        else:
+            decoded.update(
+                {
+                    "workflow_digest": None,
+                    "target_velocity_rpm": None,
+                    "hard_torque_limit": None,
+                    "usable_torque_limit": None,
+                    "pwm_hz": None,
+                    "encoder_counts_per_rev": None,
+                }
+            )
         decoded["record_kind"] = "breakaway_probe_planned"
     elif tag == BREAKAWAY_TAG_DIRECTIONAL_BREAKAWAY and len(payload) == 22:
         decoded = _take_fields(
@@ -2188,7 +2220,7 @@ def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
         if decoded["inert_present"] not in (0, 1):
             raise DecodeError("breakaway directional-breakaway inert-present flag is invalid")
         decoded["record_kind"] = "breakaway_directional_breakaway"
-    elif tag == BREAKAWAY_TAG_PROBE_TERMINAL and len(payload) in (19, 20):
+    elif tag == BREAKAWAY_TAG_PROBE_TERMINAL and len(payload) in (19, 20, 21):
         decoded = _take_fields(
             cursor,
             (
@@ -2202,10 +2234,16 @@ def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
         )
         if decoded["terminal_cause"] not in BREAKAWAY_TERMINAL_CAUSE_NAMES:
             raise DecodeError("breakaway probe terminal cause is invalid")
-        decoded["fault_checkpoint"] = cursor.take("B") if len(payload) == 20 else 0
+        decoded["fault_checkpoint"] = cursor.take("B") if len(payload) >= 20 else 0
         if decoded["fault_checkpoint"] not in BREAKAWAY_CHECKPOINT_NAMES:
             raise DecodeError("breakaway probe terminal checkpoint is invalid")
         decoded["fault_checkpoint_name"] = BREAKAWAY_CHECKPOINT_NAMES[decoded["fault_checkpoint"]]
+        decoded["exclusion_reason"] = cursor.take("B") if len(payload) == 21 else 0
+        if decoded["exclusion_reason"] not in BREAKAWAY_PROBE_EXCLUSION_REASON_NAMES:
+            raise DecodeError("breakaway probe terminal exclusion reason is invalid")
+        decoded["exclusion_reason_name"] = BREAKAWAY_PROBE_EXCLUSION_REASON_NAMES[
+            decoded["exclusion_reason"]
+        ]
         decoded["record_kind"] = "breakaway_probe_terminal"
     elif tag == BREAKAWAY_TAG_DISCOVERY_PLANNED and len(payload) == 45:
         decoded = _take_fields(

@@ -36,6 +36,47 @@ from foci_trace.protocol import (
 )
 
 
+_BREAKAWAY_PROBE_CONTEXT = {
+    "workflow_digest": 0xA1B2_C3D4_E5F6_0718,
+    "target_velocity_rpm": -600,
+    "hard_torque_limit": 2_816,
+    "usable_torque_limit": 2_048,
+    "pwm_hz": 25_000,
+    "encoder_counts_per_rev": 4_000,
+}
+
+
+def _breakaway_probe_plan_payload(
+    *,
+    run_sequence: int,
+    evidence_sequence: int,
+    plan_digest: int,
+    family_size: int,
+    max_observations: int,
+    search_count: int,
+    p_start_raw: int,
+    p_top_raw: int,
+) -> bytes:
+    """Encode the complete v12 probe-plan record used by analyzer fixtures."""
+    return bytes([0]) + struct.pack(
+        "<IHQHBBHHQiHHII",
+        run_sequence,
+        evidence_sequence,
+        plan_digest,
+        family_size,
+        max_observations,
+        search_count,
+        p_start_raw,
+        p_top_raw,
+        _BREAKAWAY_PROBE_CONTEXT["workflow_digest"],
+        _BREAKAWAY_PROBE_CONTEXT["target_velocity_rpm"],
+        _BREAKAWAY_PROBE_CONTEXT["hard_torque_limit"],
+        _BREAKAWAY_PROBE_CONTEXT["usable_torque_limit"],
+        _BREAKAWAY_PROBE_CONTEXT["pwm_hz"],
+        _BREAKAWAY_PROBE_CONTEXT["encoder_counts_per_rev"],
+    )
+
+
 def test_outer_safety_timing_audit_reviews_margin_and_raw_coverage() -> None:
     summary = {
         "engine_sequence": 11,
@@ -2849,7 +2890,9 @@ def test_analyze_capture_reconstructs_a_breakaway_campaign_from_ftrc_frames() ->
     search_grid = breakaway_build_search_grid(p_start_raw, p_top_raw)
     family_size = 16
     max_observations = 8
-    probe_digest = breakaway_probe_plan_digest(search_grid, family_size, max_observations)
+    probe_digest = breakaway_probe_plan_digest(
+        search_grid, family_size, max_observations, **_BREAKAWAY_PROBE_CONTEXT
+    )
 
     def bw_event_payload(event_id: int, sequence: int) -> bytes:
         # Matches `request_commission_event`'s real wire packing:
@@ -2860,16 +2903,15 @@ def test_analyze_capture_reconstructs_a_breakaway_campaign_from_ftrc_frames() ->
             "<BBHBxxxiiii", 1, SUBSYSTEM_COMMISSIONING, event_id, 4, 0, 1, sequence, 0
         )
 
-    probe_planned = bytes([0]) + struct.pack(
-        "<IHQHBBHH",
-        7,
-        1,
-        probe_digest,
-        family_size,
-        max_observations,
-        len(search_grid),
-        p_start_raw,
-        p_top_raw,
+    probe_planned = _breakaway_probe_plan_payload(
+        run_sequence=7,
+        evidence_sequence=1,
+        plan_digest=probe_digest,
+        family_size=family_size,
+        max_observations=max_observations,
+        search_count=len(search_grid),
+        p_start_raw=p_start_raw,
+        p_top_raw=p_top_raw,
     )
     probe_terminal = bytes([2]) + struct.pack("<IHQHBBB", 7, 2, probe_digest, family_size, 6, 0, 17)
     campaign_terminal = bytes([12]) + struct.pack("<IHBBBQ", 7, 3, 0, 6, 0, 0)
@@ -2934,15 +2976,24 @@ def test_analyze_capture_rejects_in_phase_motion_before_the_breakaway_probe_plan
     search_grid = [2, 3, 4, 6, 8]
     family_size = 16
     max_observations = 8
-    probe_digest = breakaway_probe_plan_digest(search_grid, family_size, max_observations)
+    probe_digest = breakaway_probe_plan_digest(
+        search_grid, family_size, max_observations, **_BREAKAWAY_PROBE_CONTEXT
+    )
 
     def bw_event_payload(event_id: int, sequence: int) -> bytes:
         return struct.pack(
             "<BBHBxxxiiii", 1, SUBSYSTEM_COMMISSIONING, event_id, 4, 0, 1, sequence, 0
         )
 
-    probe_planned = bytes([0]) + struct.pack(
-        "<IHQHBBHH", 7, 1, probe_digest, family_size, max_observations, len(search_grid), 2, 8
+    probe_planned = _breakaway_probe_plan_payload(
+        run_sequence=7,
+        evidence_sequence=1,
+        plan_digest=probe_digest,
+        family_size=family_size,
+        max_observations=max_observations,
+        search_count=len(search_grid),
+        p_start_raw=2,
+        p_top_raw=8,
     )
     probe_terminal = bytes([2]) + struct.pack("<IHQHBB", 7, 2, probe_digest, family_size, 1, 0)
     campaign_terminal = bytes([12]) + struct.pack("<IHBBBQ", 7, 3, 0, 1, 0, 0)
@@ -3021,15 +3072,24 @@ def test_analyze_capture_does_not_flag_prior_phase_motion_as_premature() -> None
     search_grid = [2, 3, 4, 6, 8]
     family_size = 16
     max_observations = 8
-    probe_digest = breakaway_probe_plan_digest(search_grid, family_size, max_observations)
+    probe_digest = breakaway_probe_plan_digest(
+        search_grid, family_size, max_observations, **_BREAKAWAY_PROBE_CONTEXT
+    )
 
     def bw_event_payload(event_id: int, sequence: int) -> bytes:
         return struct.pack(
             "<BBHBxxxiiii", 1, SUBSYSTEM_COMMISSIONING, event_id, 4, 0, 1, sequence, 0
         )
 
-    probe_planned = bytes([0]) + struct.pack(
-        "<IHQHBBHH", 7, 1, probe_digest, family_size, max_observations, len(search_grid), 2, 8
+    probe_planned = _breakaway_probe_plan_payload(
+        run_sequence=7,
+        evidence_sequence=1,
+        plan_digest=probe_digest,
+        family_size=family_size,
+        max_observations=max_observations,
+        search_count=len(search_grid),
+        p_start_raw=2,
+        p_top_raw=8,
     )
     probe_terminal = bytes([2]) + struct.pack("<IHQHBB", 7, 2, probe_digest, family_size, 1, 0)
     campaign_terminal = bytes([12]) + struct.pack("<IHBBBQ", 7, 3, 0, 1, 0, 0)

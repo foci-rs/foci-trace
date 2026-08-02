@@ -206,7 +206,7 @@ def test_decodes_version_nine_pptm_velocity_diagnostic() -> None:
 
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_OBSERVATION, payload) + payload)
 
-    assert PROTOCOL_VERSION == 11
+    assert PROTOCOL_VERSION == 12
     assert frame.payload["pid_velocity_actual"] is None
     assert frame.payload["actual_velocity_pptm"] == 176
 
@@ -215,8 +215,8 @@ def test_decode_frame_rejects_a_version_beyond_the_supported_range() -> None:
     # A version past the supported range is rejected; historical versions stay
     # decodable so committed captures still replay.
     payload = bytes(88)
-    with pytest.raises(DecodeError, match="unsupported protocol version 12"):
-        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=12) + payload)
+    with pytest.raises(DecodeError, match="unsupported protocol version 13"):
+        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=13) + payload)
 
 
 def test_rejects_velocity_observation_with_both_diagnostic_kinds() -> None:
@@ -2208,6 +2208,26 @@ _BW_PRIOR_PLAN_DIGEST = 0x99AA_BBCC_DDEE_FF00
 
 def _bw_probe_planned() -> bytes:
     return bytes([0]) + struct.pack(
+        "<IHQHBBHHQiHHII",
+        _BW_RUN_SEQUENCE,
+        _BW_EVIDENCE_SEQUENCE,
+        _BW_PLAN_DIGEST,
+        0x0910,
+        0x11,
+        0x12,
+        0x1314,
+        0x1516,
+        0x1718_1920_2122_2324,
+        -0x2526_2728,
+        0x2930,
+        0x3132,
+        0x3334_3536,
+        0x3738_3940,
+    )
+
+
+def _bw_probe_planned_legacy() -> bytes:
+    return bytes([0]) + struct.pack(
         "<IHQHBBHH",
         _BW_RUN_SEQUENCE,
         _BW_EVIDENCE_SEQUENCE,
@@ -2236,6 +2256,20 @@ def _bw_directional_breakaway() -> bytes:
 
 def _bw_probe_terminal() -> bytes:
     return bytes([2]) + struct.pack(
+        "<IHQHBBBB",
+        _BW_RUN_SEQUENCE,
+        _BW_EVIDENCE_SEQUENCE,
+        _BW_PLAN_DIGEST,
+        0x0910,
+        4,
+        0,
+        0,
+        3,
+    )
+
+
+def _bw_probe_terminal_v11() -> bytes:
+    return bytes([2]) + struct.pack(
         "<IHQHBBB",
         _BW_RUN_SEQUENCE,
         _BW_EVIDENCE_SEQUENCE,
@@ -2247,7 +2281,7 @@ def _bw_probe_terminal() -> bytes:
     )
 
 
-def _bw_probe_terminal_legacy() -> bytes:
+def _bw_probe_terminal_v10() -> bytes:
     return bytes([2]) + struct.pack(
         "<IHQHBB",
         _BW_RUN_SEQUENCE,
@@ -2445,7 +2479,7 @@ def test_decode_breakaway_probe_planned_matches_the_firmware_golden_bytes() -> N
     from foci_trace.protocol import decode_breakaway_record
 
     payload = _bw_probe_planned()
-    assert len(payload) == 23
+    assert len(payload) == 47
     decoded = decode_breakaway_record(payload)
     assert decoded["record_kind"] == "breakaway_probe_planned"
     assert decoded["tag"] == 0
@@ -2457,6 +2491,20 @@ def test_decode_breakaway_probe_planned_matches_the_firmware_golden_bytes() -> N
     assert decoded["search_count"] == 0x12
     assert decoded["p_start_raw"] == 0x1314
     assert decoded["p_top_raw"] == 0x1516
+    assert decoded["workflow_digest"] == 0x1718_1920_2122_2324
+    assert decoded["target_velocity_rpm"] == -0x2526_2728
+    assert decoded["hard_torque_limit"] == 0x2930
+    assert decoded["usable_torque_limit"] == 0x3132
+    assert decoded["pwm_hz"] == 0x3334_3536
+    assert decoded["encoder_counts_per_rev"] == 0x3738_3940
+
+
+def test_decode_breakaway_probe_planned_preserves_historical_capture_support() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    decoded = decode_breakaway_record(_bw_probe_planned_legacy())
+    assert decoded["record_kind"] == "breakaway_probe_planned"
+    assert decoded["workflow_digest"] is None
 
 
 def test_decode_breakaway_directional_breakaway_matches_the_firmware_golden_bytes() -> None:
@@ -2477,32 +2525,47 @@ def test_decode_breakaway_probe_terminal_matches_the_firmware_golden_bytes() -> 
     from foci_trace.protocol import decode_breakaway_record
 
     payload = _bw_probe_terminal()
-    assert len(payload) == 20
+    assert len(payload) == 21
     decoded = decode_breakaway_record(payload)
     assert decoded["record_kind"] == "breakaway_probe_terminal"
     assert decoded["family_size"] == 0x0910
-    assert decoded["terminal_cause"] == 6
+    assert decoded["terminal_cause"] == 4
     assert decoded["has_safety_fault"] == 0
-    assert decoded["fault_checkpoint"] == 17
-    assert decoded["fault_checkpoint_name"] == "probe_moving_encoder_sample"
-
-
-def test_decode_breakaway_probe_terminal_preserves_historical_capture_support() -> None:
-    from foci_trace.protocol import decode_breakaway_record
-
-    payload = _bw_probe_terminal_legacy()
-    assert len(payload) == 19
-    decoded = decode_breakaway_record(payload)
-    assert decoded["record_kind"] == "breakaway_probe_terminal"
     assert decoded["fault_checkpoint"] == 0
     assert decoded["fault_checkpoint_name"] == "none"
+    assert decoded["exclusion_reason"] == 3
+    assert decoded["exclusion_reason_name"] == "settle_rest_unconfirmed"
+
+
+@pytest.mark.parametrize(
+    ("payload", "fault_checkpoint"),
+    [(_bw_probe_terminal_v10(), 0), (_bw_probe_terminal_v11(), 17)],
+)
+def test_decode_breakaway_probe_terminal_preserves_historical_capture_support(
+    payload: bytes, fault_checkpoint: int
+) -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    decoded = decode_breakaway_record(payload)
+    assert decoded["record_kind"] == "breakaway_probe_terminal"
+    assert decoded["fault_checkpoint"] == fault_checkpoint
+    assert decoded["exclusion_reason"] == 0
+    assert decoded["exclusion_reason_name"] == "none"
 
 
 def test_decode_breakaway_probe_terminal_rejects_unknown_checkpoint() -> None:
     from foci_trace.protocol import DecodeError, decode_breakaway_record
 
-    payload = _bw_probe_terminal()[:-1] + bytes([42])
+    payload = _bw_probe_terminal_v11()[:-1] + bytes([42])
     with pytest.raises(DecodeError, match="checkpoint is invalid"):
+        decode_breakaway_record(payload)
+
+
+def test_decode_breakaway_probe_terminal_rejects_unknown_exclusion_reason() -> None:
+    from foci_trace.protocol import DecodeError, decode_breakaway_record
+
+    payload = _bw_probe_terminal()[:-1] + bytes([5])
+    with pytest.raises(DecodeError, match="exclusion reason is invalid"):
         decode_breakaway_record(payload)
 
 

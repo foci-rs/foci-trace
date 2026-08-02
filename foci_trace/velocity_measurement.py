@@ -5847,7 +5847,16 @@ def breakaway_build_search_grid(p_start_raw: int, p_top_raw: int) -> list[int]:
 
 
 def breakaway_probe_plan_digest(
-    search_gains: list[int], confidence_family_size: int, maximum_observations: int
+    search_gains: list[int],
+    confidence_family_size: int,
+    maximum_observations: int,
+    *,
+    workflow_digest: int,
+    target_velocity_rpm: int,
+    hard_torque_limit: int,
+    usable_torque_limit: int,
+    pwm_hz: int,
+    encoder_counts_per_rev: int,
 ) -> int:
     """Port of `BreakawayProbePlan::digest` (breakaway_plan.rs)."""
     digest = FNV1A64_OFFSET
@@ -5856,6 +5865,12 @@ def breakaway_probe_plan_digest(
         digest = _bw_fnv1a_extend(digest, gain, 2)
     digest = _bw_fnv1a_extend(digest, confidence_family_size, 2)
     digest = _bw_fnv1a_extend(digest, maximum_observations, 1)
+    digest = _bw_fnv1a_extend(digest, workflow_digest, 8)
+    digest = _bw_fnv1a_extend(digest, target_velocity_rpm & 0xFFFF_FFFF, 4)
+    digest = _bw_fnv1a_extend(digest, hard_torque_limit, 2)
+    digest = _bw_fnv1a_extend(digest, usable_torque_limit, 2)
+    digest = _bw_fnv1a_extend(digest, pwm_hz, 4)
+    digest = _bw_fnv1a_extend(digest, encoder_counts_per_rev, 4)
     return digest
 
 
@@ -6146,12 +6161,25 @@ def audit_breakaway_campaign(
             "probe search_count: firmware=%d offline=%d"
             % (probe_planned["search_count"], len(search_grid))
         )
-    expected_probe_digest = breakaway_probe_plan_digest(
-        search_grid[: int(probe_planned["search_count"])],
-        int(probe_planned["family_size"]),
-        int(probe_planned["max_observations"]),
+    probe_digest_verified = probe_planned["workflow_digest"] is not None
+    expected_probe_digest = (
+        breakaway_probe_plan_digest(
+            search_grid[: int(probe_planned["search_count"])],
+            int(probe_planned["family_size"]),
+            int(probe_planned["max_observations"]),
+            workflow_digest=int(probe_planned["workflow_digest"]),
+            target_velocity_rpm=int(probe_planned["target_velocity_rpm"]),
+            hard_torque_limit=int(probe_planned["hard_torque_limit"]),
+            usable_torque_limit=int(probe_planned["usable_torque_limit"]),
+            pwm_hz=int(probe_planned["pwm_hz"]),
+            encoder_counts_per_rev=int(probe_planned["encoder_counts_per_rev"]),
+        )
+        if probe_digest_verified
+        else None
     )
-    if expected_probe_digest != int(probe_planned["plan_digest"]):
+    if expected_probe_digest is not None and expected_probe_digest != int(
+        probe_planned["plan_digest"]
+    ):
         mismatches.append(
             "probe plan_digest: firmware=0x%016x offline=0x%016x"
             % (probe_planned["plan_digest"], expected_probe_digest)
@@ -6801,6 +6829,7 @@ def audit_breakaway_campaign(
     return {
         "phase_sequence": [BREAKAWAY_EVENT_ID_NAMES[tick["event_id"]] for tick in ticks],
         "probe_planned": probe_planned,
+        "probe_digest_verified": probe_digest_verified,
         "search_grid": search_grid,
         "directional_breakaways": directional_breakaways,
         "resolved_breakaway_p_raw": resolved_breakaway_raw,

@@ -46,6 +46,30 @@ from foci_trace.velocity_measurement import (
 
 FIXTURE = Path(__file__).parent / "fixtures" / "velocity_measurement_golden.json"
 
+_BREAKAWAY_WORKFLOW_DIGEST = 0xA1B2_C3D4_E5F6_0718
+_BREAKAWAY_TARGET_VELOCITY_RPM = -600
+_BREAKAWAY_HARD_TORQUE_LIMIT = 2_816
+_BREAKAWAY_USABLE_TORQUE_LIMIT = 2_048
+_BREAKAWAY_PWM_HZ = 25_000
+_BREAKAWAY_ENCODER_COUNTS_PER_REV = 4_000
+
+
+def test_breakaway_probe_plan_digest_matches_the_firmware_context_fixture() -> None:
+    assert (
+        breakaway_probe_plan_digest(
+            [3, 5, 6, 9],
+            16,
+            8,
+            workflow_digest=_BREAKAWAY_WORKFLOW_DIGEST,
+            target_velocity_rpm=_BREAKAWAY_TARGET_VELOCITY_RPM,
+            hard_torque_limit=_BREAKAWAY_HARD_TORQUE_LIMIT,
+            usable_torque_limit=_BREAKAWAY_USABLE_TORQUE_LIMIT,
+            pwm_hz=_BREAKAWAY_PWM_HZ,
+            encoder_counts_per_rev=_BREAKAWAY_ENCODER_COUNTS_PER_REV,
+        )
+        == 0x2581_C2DA_8114_9F64
+    )
+
 
 def _observation(
     delta_counts: int,
@@ -3157,7 +3181,15 @@ class _BreakawayCampaignBuilder:
         self.family_size = 16
         self.max_observations = 8
         self.probe_digest = breakaway_probe_plan_digest(
-            self.search_grid, self.family_size, self.max_observations
+            self.search_grid,
+            self.family_size,
+            self.max_observations,
+            workflow_digest=_BREAKAWAY_WORKFLOW_DIGEST,
+            target_velocity_rpm=_BREAKAWAY_TARGET_VELOCITY_RPM,
+            hard_torque_limit=_BREAKAWAY_HARD_TORQUE_LIMIT,
+            usable_torque_limit=_BREAKAWAY_USABLE_TORQUE_LIMIT,
+            pwm_hz=_BREAKAWAY_PWM_HZ,
+            encoder_counts_per_rev=_BREAKAWAY_ENCODER_COUNTS_PER_REV,
         )
 
         self.floor_raw = 181
@@ -3197,7 +3229,7 @@ class _BreakawayCampaignBuilder:
         digest = self.probe_digest if plan_digest is None else plan_digest
         raw = _bw_tag(
             0,
-            "IHQHBBHH",
+            "IHQHBBHHQiHHII",
             self.run_sequence,
             sequence,
             digest,
@@ -3206,6 +3238,12 @@ class _BreakawayCampaignBuilder:
             len(self.search_grid),
             self.p_start_raw,
             self.p_top_raw,
+            _BREAKAWAY_WORKFLOW_DIGEST,
+            _BREAKAWAY_TARGET_VELOCITY_RPM,
+            _BREAKAWAY_HARD_TORQUE_LIMIT,
+            _BREAKAWAY_USABLE_TORQUE_LIMIT,
+            _BREAKAWAY_PWM_HZ,
+            _BREAKAWAY_ENCODER_COUNTS_PER_REV,
         )
         return {
             "event_id": 152,
