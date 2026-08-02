@@ -206,19 +206,17 @@ def test_decodes_version_nine_pptm_velocity_diagnostic() -> None:
 
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_OBSERVATION, payload) + payload)
 
-    assert PROTOCOL_VERSION == 10
+    assert PROTOCOL_VERSION == 11
     assert frame.payload["pid_velocity_actual"] is None
     assert frame.payload["actual_velocity_pptm"] == 176
 
 
 def test_decode_frame_rejects_a_version_beyond_the_supported_range() -> None:
-    # The version-10 bump means an older decoder rejects a
-    # newer stream at the version gate rather than misdecoding the widened
-    # raw-observation record. A version past the supported range is rejected;
-    # historical versions stay decodable so committed captures still replay.
+    # A version past the supported range is rejected; historical versions stay
+    # decodable so committed captures still replay.
     payload = bytes(88)
-    with pytest.raises(DecodeError, match="unsupported protocol version 11"):
-        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=11) + payload)
+    with pytest.raises(DecodeError, match="unsupported protocol version 12"):
+        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=12) + payload)
 
 
 def test_rejects_velocity_observation_with_both_diagnostic_kinds() -> None:
@@ -2238,6 +2236,19 @@ def _bw_directional_breakaway() -> bytes:
 
 def _bw_probe_terminal() -> bytes:
     return bytes([2]) + struct.pack(
+        "<IHQHBBB",
+        _BW_RUN_SEQUENCE,
+        _BW_EVIDENCE_SEQUENCE,
+        _BW_PLAN_DIGEST,
+        0x0910,
+        6,
+        0,
+        17,
+    )
+
+
+def _bw_probe_terminal_legacy() -> bytes:
+    return bytes([2]) + struct.pack(
         "<IHQHBB",
         _BW_RUN_SEQUENCE,
         _BW_EVIDENCE_SEQUENCE,
@@ -2466,12 +2477,33 @@ def test_decode_breakaway_probe_terminal_matches_the_firmware_golden_bytes() -> 
     from foci_trace.protocol import decode_breakaway_record
 
     payload = _bw_probe_terminal()
-    assert len(payload) == 19
+    assert len(payload) == 20
     decoded = decode_breakaway_record(payload)
     assert decoded["record_kind"] == "breakaway_probe_terminal"
     assert decoded["family_size"] == 0x0910
-    assert decoded["terminal_cause"] == 1
+    assert decoded["terminal_cause"] == 6
     assert decoded["has_safety_fault"] == 0
+    assert decoded["fault_checkpoint"] == 17
+    assert decoded["fault_checkpoint_name"] == "probe_moving_encoder_sample"
+
+
+def test_decode_breakaway_probe_terminal_preserves_historical_capture_support() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    payload = _bw_probe_terminal_legacy()
+    assert len(payload) == 19
+    decoded = decode_breakaway_record(payload)
+    assert decoded["record_kind"] == "breakaway_probe_terminal"
+    assert decoded["fault_checkpoint"] == 0
+    assert decoded["fault_checkpoint_name"] == "none"
+
+
+def test_decode_breakaway_probe_terminal_rejects_unknown_checkpoint() -> None:
+    from foci_trace.protocol import DecodeError, decode_breakaway_record
+
+    payload = _bw_probe_terminal()[:-1] + bytes([42])
+    with pytest.raises(DecodeError, match="checkpoint is invalid"):
+        decode_breakaway_record(payload)
 
 
 def test_decode_breakaway_discovery_planned_matches_the_firmware_golden_bytes() -> None:

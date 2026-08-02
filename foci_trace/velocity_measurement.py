@@ -6209,6 +6209,21 @@ def audit_breakaway_campaign(
         else None
     )
 
+    probe_terminal_tick = next((tick for tick in ticks if tick["event_id"] == 154), None)
+    probe_terminal: dict[str, object] | None = None
+    if probe_terminal_tick is not None:
+        probe_terminal = _bw_single_record(probe_terminal_tick, "breakaway_probe_terminal")
+        if int(probe_terminal["plan_digest"]) != int(probe_planned["plan_digest"]):
+            raise ValueError("breakaway probe terminal does not chain to its own plan digest")
+        if (
+            int(probe_terminal["fault_checkpoint"]) != 0
+            and int(probe_terminal["terminal_cause"]) != 6
+        ):
+            mismatches.append(
+                "probe terminal reports a fault checkpoint for non-safety cause %d"
+                % probe_terminal["terminal_cause"]
+            )
+
     discovery_planned_tick = next((tick for tick in ticks if tick["event_id"] == 155), None)
     discovery_terminal_tick = next((tick for tick in ticks if tick["event_id"] == 156), None)
     discovery_planned: dict[str, object] | None = None
@@ -6789,6 +6804,7 @@ def audit_breakaway_campaign(
         "search_grid": search_grid,
         "directional_breakaways": directional_breakaways,
         "resolved_breakaway_p_raw": resolved_breakaway_raw,
+        "probe_terminal": probe_terminal,
         "discovery_planned": discovery_planned,
         "discovery_terminal": discovery_terminal,
         "confirmation_planned": confirmation_planned,

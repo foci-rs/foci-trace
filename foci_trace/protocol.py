@@ -7,14 +7,11 @@ import struct
 from typing import Any
 
 FRAME_MAGIC = 0x43525446
-# Bumped to 10 for the raw-observation expansion (51 -> 99
-# bytes), a breaking wire change: a version-10 stream read by an older decoder
-# (that only knows versions up to 9) is rejected at the version gate rather than
-# misdecoded. Historical versions stay supported so committed older
-# captures (which contain no breakaway raw-observation record and are therefore
-# unaffected by the record's width change) still decode.
-PROTOCOL_VERSION = 10
-SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9, PROTOCOL_VERSION)
+# Bumped to 11 for the operation-level checkpoint appended to the breakaway probe
+# terminal. The decoder retains the version-10 19-byte terminal shape so the
+# first hardware-validation captures remain readable.
+PROTOCOL_VERSION = 11
+SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, PROTOCOL_VERSION)
 HEADER_LEN = 32
 
 FRAME_TYPE_CRITICAL = 1
@@ -2063,6 +2060,53 @@ BREAKAWAY_PHASE_NAMES = {
     2: "confirmation",
 }
 
+# Persistent `BreakawayCheckpoint` codes. Values are append-only because they
+# appear both in warm-reset breadcrumbs and in the handled probe terminal.
+BREAKAWAY_CHECKPOINT_NAMES = {
+    0: "none",
+    1: "campaign_installed",
+    2: "safety_configured",
+    3: "gain_programming",
+    4: "target_command",
+    5: "capture",
+    6: "event_routing",
+    7: "campaign_terminal_handled",
+    8: "stage_c_handed_off",
+    9: "probe_safety_encoder_read",
+    10: "probe_gain_write",
+    11: "probe_ramp_mode_write",
+    12: "probe_gain_integrator_clear",
+    13: "probe_target_baseline_read",
+    14: "probe_clamp_install",
+    15: "probe_current_primitive_start",
+    16: "probe_target_write",
+    17: "probe_moving_encoder_sample",
+    18: "probe_moving_current_input_sample",
+    19: "probe_moving_current_output_sample",
+    20: "probe_moving_boundary",
+    21: "probe_zero_target_write",
+    22: "probe_zero_integrator_clear",
+    23: "probe_settle_baseline_read",
+    24: "probe_settle_encoder_sample",
+    25: "probe_settle_current_input_sample",
+    26: "probe_settle_current_output_sample",
+    27: "probe_zero_boundary",
+    28: "recovery_gain_write",
+    29: "recovery_moving_integrator_clear",
+    30: "recovery_current_primitive_start",
+    31: "recovery_target_write",
+    32: "recovery_moving_safety_sample",
+    33: "recovery_moving_current_input_sample",
+    34: "recovery_moving_current_output_sample",
+    35: "recovery_moving_boundary",
+    36: "recovery_zero_target_write",
+    37: "recovery_settle_integrator_clear",
+    38: "recovery_settle_safety_sample",
+    39: "recovery_settle_current_input_sample",
+    40: "recovery_settle_current_output_sample",
+    41: "recovery_zero_boundary",
+}
+
 # Local wire tags for the breakaway-campaign canonical-record family
 # (`breakaway_trace_reporting.rs`). These are scoped to the surrounding
 # `EVENT_COMMISSION_BREAKAWAY_*` marker, not globally unique against the
@@ -2144,7 +2188,7 @@ def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
         if decoded["inert_present"] not in (0, 1):
             raise DecodeError("breakaway directional-breakaway inert-present flag is invalid")
         decoded["record_kind"] = "breakaway_directional_breakaway"
-    elif tag == BREAKAWAY_TAG_PROBE_TERMINAL and len(payload) == 19:
+    elif tag == BREAKAWAY_TAG_PROBE_TERMINAL and len(payload) in (19, 20):
         decoded = _take_fields(
             cursor,
             (
@@ -2158,6 +2202,10 @@ def decode_breakaway_record(payload: bytes) -> dict[str, Any]:
         )
         if decoded["terminal_cause"] not in BREAKAWAY_TERMINAL_CAUSE_NAMES:
             raise DecodeError("breakaway probe terminal cause is invalid")
+        decoded["fault_checkpoint"] = cursor.take("B") if len(payload) == 20 else 0
+        if decoded["fault_checkpoint"] not in BREAKAWAY_CHECKPOINT_NAMES:
+            raise DecodeError("breakaway probe terminal checkpoint is invalid")
+        decoded["fault_checkpoint_name"] = BREAKAWAY_CHECKPOINT_NAMES[decoded["fault_checkpoint"]]
         decoded["record_kind"] = "breakaway_probe_terminal"
     elif tag == BREAKAWAY_TAG_DISCOVERY_PLANNED and len(payload) == 45:
         decoded = _take_fields(

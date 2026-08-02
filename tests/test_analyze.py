@@ -2871,8 +2871,8 @@ def test_analyze_capture_reconstructs_a_breakaway_campaign_from_ftrc_frames() ->
         p_start_raw,
         p_top_raw,
     )
-    probe_terminal = bytes([2]) + struct.pack("<IHQHBB", 7, 2, probe_digest, family_size, 1, 0)
-    campaign_terminal = bytes([12]) + struct.pack("<IHBBBQ", 7, 3, 0, 1, 0, 0)
+    probe_terminal = bytes([2]) + struct.pack("<IHQHBBB", 7, 2, probe_digest, family_size, 6, 0, 17)
+    campaign_terminal = bytes([12]) + struct.pack("<IHBBBQ", 7, 3, 0, 6, 0, 0)
 
     output = io.BytesIO()
     writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
@@ -2919,6 +2919,8 @@ def test_analyze_capture_reconstructs_a_breakaway_campaign_from_ftrc_frames() ->
     audit = analysis.breakaway_campaign_audits[0]
     assert audit["matches_firmware"] is True
     assert audit["phase_sequence"] == ["probe_plan", "probe_terminal", "campaign_terminal"]
+    assert audit["probe_terminal"]["fault_checkpoint"] == 17
+    assert audit["probe_terminal"]["fault_checkpoint_name"] == "probe_moving_encoder_sample"
     assert audit["confirmation_accepted"] is False
 
 
