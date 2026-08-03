@@ -4708,6 +4708,36 @@ def test_audit_breakaway_campaign_rejects_an_accepted_confirmation_with_incomple
         audit_breakaway_campaign(ticks)
 
 
+def test_audit_breakaway_campaign_accepts_a_confirmation_whose_disturbance_consensus_split() -> (
+    None
+):
+    """A split depth-three consensus is diagnostic, not disqualifying.
+
+    Reproduces the stepper_x capture of 2026-08-03 at 95% current headroom:
+    both directions reported complete collected and eligible masks and all
+    eight response intervals inside 70-80%, but the depth-three consensus over
+    the DISTURBANCE intervals split into two components, so `included_mask` was
+    0. That is a different measured quantity than the proportional response
+    under test, so the audit must not refuse the accepted path over it.
+    """
+    builder = _BreakawayCampaignBuilder()
+    ticks = [
+        builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(),
+        builder.probe_result_tick(),
+        builder.discovery_plan_tick(),
+        *builder.discovery_ticks(),
+        builder.confirmation_plan_tick(),
+        *builder.confirmation_ticks(masks=(0b1111, 0b1111, 0, 0b1111, 0b1111, 0)),
+        builder.campaign_terminal_tick(),
+    ]
+
+    result = audit_breakaway_campaign(ticks)
+
+    assert result["confirmation_accepted"] is True
+    assert result["matches_firmware"] is True, result["mismatches"]
+
+
 def test_audit_breakaway_campaign_rejects_an_accepted_confirmation_with_a_raw_interval_outside_the_band() -> (
     None
 ):

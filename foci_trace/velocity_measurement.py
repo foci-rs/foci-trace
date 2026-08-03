@@ -6886,13 +6886,17 @@ def audit_breakaway_campaign(
                 )
             )
         if confirmation_accepted:
+            # `included_mask` is deliberately absent: it is the depth-three
+            # consensus over the DISTURBANCE intervals, a different measured
+            # quantity than the proportional response confirmation tests, and
+            # `directional_input_is_complete` (band_confirmation.rs) does not
+            # gate on it. The independent containment recompute below is what
+            # verifies all eight responses belong in [70, 80].
             for mask_name in (
                 "forward_collected_mask",
                 "forward_eligible_mask",
-                "forward_included_mask",
                 "reverse_collected_mask",
                 "reverse_eligible_mask",
-                "reverse_included_mask",
             ):
                 if int(confirmation_terminal[mask_name]) != 0b1111:
                     raise ValueError(
