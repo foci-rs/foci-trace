@@ -3016,6 +3016,7 @@ def _bw_raw_observation(
     stroke_min_displacement_counts: int = 0,
     stroke_max_displacement_counts: int = 0,
     capture_max_interval_us: int = 1_000,
+    moving_pid_output_peak: int = 0,
 ) -> bytes:
     """Build a tag-5 `BreakawayRawObservation` record's raw bytes.
 
@@ -3071,12 +3072,13 @@ def _bw_raw_observation(
         + variance_bytes
         + tail
         + struct.pack(
-            "<IBiiI",
+            "<IBiiIH",
             drift_ratio_ppm,
             post_fit_lag_one_state,
             stroke_min_displacement_counts,
             stroke_max_displacement_counts,
             capture_max_interval_us,
+            moving_pid_output_peak,
         )
     )
 

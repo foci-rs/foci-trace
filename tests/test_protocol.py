@@ -207,7 +207,7 @@ def test_decodes_version_nine_pptm_velocity_diagnostic() -> None:
 
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_OBSERVATION, payload) + payload)
 
-    assert PROTOCOL_VERSION == 15
+    assert PROTOCOL_VERSION == 16
     assert 13 in SUPPORTED_PROTOCOL_VERSIONS
     assert 14 in SUPPORTED_PROTOCOL_VERSIONS
     assert frame.payload["pid_velocity_actual"] is None
@@ -218,8 +218,8 @@ def test_decode_frame_rejects_a_version_beyond_the_supported_range() -> None:
     # A version past the supported range is rejected; historical versions stay
     # decodable so committed captures still replay.
     payload = bytes(88)
-    with pytest.raises(DecodeError, match="unsupported protocol version 16"):
-        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=16) + payload)
+    with pytest.raises(DecodeError, match="unsupported protocol version 17"):
+        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=17) + payload)
 
 
 def test_rejects_velocity_observation_with_both_diagnostic_kinds() -> None:
@@ -2429,7 +2429,7 @@ def _bw_raw_observation_v14(
     return bytes(payload)
 
 
-def _bw_raw_observation(
+def _bw_raw_observation_v15(
     *,
     phase: int = 1,
     stationarity_code: int = 4,
@@ -2446,6 +2446,30 @@ def _bw_raw_observation(
     )
     payload[15] = phase
     payload.extend(struct.pack("<iiI", minimum, maximum, max_interval_us))
+    return bytes(payload)
+
+
+def _bw_raw_observation(
+    *,
+    phase: int = 1,
+    stationarity_code: int = 4,
+    post_fit_lag_one_state: int = 2,
+    minimum: int = -0x1516_1718,
+    maximum: int = 0x2122_2324,
+    max_interval_us: int = 0x2526_2728,
+    moving_pid_output_peak: int = 0xA1A2,
+) -> bytes:
+    payload = bytearray(
+        _bw_raw_observation_v15(
+            phase=phase,
+            stationarity_code=stationarity_code,
+            post_fit_lag_one_state=post_fit_lag_one_state,
+            minimum=minimum,
+            maximum=maximum,
+            max_interval_us=max_interval_us,
+        )
+    )
+    payload.extend(struct.pack("<H", moving_pid_output_peak))
     return bytes(payload)
 
 
@@ -2770,7 +2794,7 @@ def test_decode_breakaway_raw_observation_matches_the_firmware_golden_bytes() ->
     from foci_trace.protocol import decode_breakaway_record
 
     payload = _bw_raw_observation()
-    assert len(payload) == 116
+    assert len(payload) == 118
     decoded = decode_breakaway_record(payload)
     assert decoded["record_kind"] == "breakaway_raw_observation"
     assert decoded["plan_digest"] == _BW_PLAN_DIGEST
@@ -2797,6 +2821,26 @@ def test_decode_breakaway_raw_observation_matches_the_firmware_golden_bytes() ->
     assert decoded["stroke_min_displacement_counts"] == -0x1516_1718
     assert decoded["stroke_max_displacement_counts"] == 0x2122_2324
     assert decoded["capture_max_interval_us"] == 0x2526_2728
+    assert decoded["moving_pid_output_peak"] == 0xA1A2
+
+
+def test_decode_breakaway_raw_observation_still_reads_a_v15_capture() -> None:
+    """A pre-v16 capture decodes unchanged, with no measured peak.
+
+    The two 2026-08-03 stepper_x captures are v15. They must keep replaying
+    after the record grew, so the measured peak reads as `None` rather than
+    the record failing its exact-length dispatch.
+    """
+    from foci_trace.protocol import decode_breakaway_record
+
+    payload = _bw_raw_observation_v15()
+    assert len(payload) == 116
+
+    decoded = decode_breakaway_record(payload, protocol_version=15)
+
+    assert decoded["record_kind"] == "breakaway_raw_observation"
+    assert decoded["capture_max_interval_us"] == 0x2526_2728
+    assert decoded["moving_pid_output_peak"] is None
 
 
 @pytest.mark.parametrize("max_interval_us", [0, 2_001])

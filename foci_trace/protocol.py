@@ -7,10 +7,13 @@ import struct
 from typing import Any
 
 FRAME_MAGIC = 0x43525446
-# Version 15 replaces the productive-boundary probe with physical excursion.
+# Version 16 adds the measured `moving_pid_output_peak` to the breakaway
+# raw-observation record, so a current-headroom terminus can be attributed to
+# the open-loop model term or to measured demand.
+# Version 15 replaced the productive-boundary probe with physical excursion.
 # Historical versions remain readable through their versioned record shapes.
-PROTOCOL_VERSION = 15
-SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
+PROTOCOL_VERSION = 16
+SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
 HEADER_LEN = 32
 
 FRAME_TYPE_CRITICAL = 1
@@ -2399,7 +2402,8 @@ def decode_breakaway_record(
             raise DecodeError("breakaway ceiling binding source is invalid")
         decoded["record_kind"] = "breakaway_ceiling_source"
     elif tag == BREAKAWAY_TAG_RAW_OBSERVATION and (
-        (protocol_version >= 15 and len(payload) == 116)
+        (protocol_version >= 16 and len(payload) == 118)
+        or (protocol_version == 15 and len(payload) == 116)
         or (protocol_version == 14 and len(payload) == 104)
         or (protocol_version <= 13 and len(payload) == 99)
     ):
@@ -2473,6 +2477,14 @@ def decode_breakaway_record(
             decoded["stroke_min_displacement_counts"] = None
             decoded["stroke_max_displacement_counts"] = None
             decoded["capture_max_interval_us"] = None
+        if protocol_version >= 16:
+            # Measured peak velocity-controller output. `predicted_torque_target_abs`
+            # above is `max(P * rpm / 256, moving_pid_output_peak)` in firmware, so
+            # only carrying both makes a current-headroom terminus attributable to
+            # the model term or to measured demand. Absent before v16.
+            decoded["moving_pid_output_peak"] = cursor.take("H")
+        else:
+            decoded["moving_pid_output_peak"] = None
         decoded["record_kind"] = "breakaway_raw_observation"
     elif tag == BREAKAWAY_TAG_DISCOVERY_TERMINAL and len(payload) == 28:
         decoded = _take_fields(
