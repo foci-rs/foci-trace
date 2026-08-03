@@ -7,10 +7,10 @@ import struct
 from typing import Any
 
 FRAME_MAGIC = 0x43525446
-# Version 14 adds productive-boundary probe evidence. Historical versions
-# remain readable, including the distinct v13 record shapes and terminology.
-PROTOCOL_VERSION = 14
-SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
+# Version 15 replaces the productive-boundary probe with physical excursion.
+# Historical versions remain readable through their versioned record shapes.
+PROTOCOL_VERSION = 15
+SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
 HEADER_LEN = 32
 
 FRAME_TYPE_CRITICAL = 1
@@ -68,7 +68,7 @@ EVENT_COMMISSION_ACCEPTANCE_MATRIX_AMPLITUDE = 148
 EVENT_COMMISSION_ACCEPTANCE_MATRIX_TERMINAL = 149
 EVENT_COMMISSION_REST_SELECTION_DIAGNOSTIC = 151
 EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN = 152
-EVENT_COMMISSION_BREAKAWAY_PROBE_DERIVED = 153
+EVENT_COMMISSION_BREAKAWAY_PROBE_RESULT = 153
 EVENT_COMMISSION_BREAKAWAY_PROBE_TERMINAL = 154
 EVENT_COMMISSION_BREAKAWAY_DISCOVERY_PLAN = 155
 EVENT_COMMISSION_BREAKAWAY_DISCOVERY_TERMINAL = 156
@@ -89,7 +89,7 @@ EVENT_COMMISSION_DIAGNOSTIC_WARNING = 200
 # recognize those markers or it silently discards the streamed records.
 BREAKAWAY_CAMPAIGN_EVENT_IDS = (
     EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN,
-    EVENT_COMMISSION_BREAKAWAY_PROBE_DERIVED,
+    EVENT_COMMISSION_BREAKAWAY_PROBE_RESULT,
     EVENT_COMMISSION_BREAKAWAY_PROBE_TERMINAL,
     EVENT_COMMISSION_BREAKAWAY_DISCOVERY_PLAN,
     EVENT_COMMISSION_BREAKAWAY_DISCOVERY_TERMINAL,
@@ -152,7 +152,7 @@ _COMMISSIONING_EVENT_NAMES = {
     EVENT_COMMISSION_ACCEPTANCE_MATRIX_TERMINAL: "commission_acceptance_matrix_terminal",
     EVENT_COMMISSION_REST_SELECTION_DIAGNOSTIC: "commission_rest_selection_diagnostic",
     EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN: "commission_breakaway_probe_plan",
-    EVENT_COMMISSION_BREAKAWAY_PROBE_DERIVED: "commission_breakaway_probe_derived",
+    EVENT_COMMISSION_BREAKAWAY_PROBE_RESULT: "commission_breakaway_probe_result",
     EVENT_COMMISSION_BREAKAWAY_PROBE_TERMINAL: "commission_breakaway_probe_terminal",
     EVENT_COMMISSION_BREAKAWAY_DISCOVERY_PLAN: "commission_breakaway_discovery_plan",
     EVENT_COMMISSION_BREAKAWAY_DISCOVERY_TERMINAL: "commission_breakaway_discovery_terminal",
@@ -2052,13 +2052,24 @@ BREAKAWAY_TERMINAL_CAUSE_NAMES = {
     19: "confirmation_evidence_excluded",
     20: "confirmation_safety_fault",
     21: "accepted",
+    22: "probe_excursion_evidence_invalid",
 }
 
 
 def _breakaway_terminal_cause_name(cause: int, protocol_version: int) -> str:
-    if cause == 1 and protocol_version >= 14:
+    if cause == 1 and protocol_version >= 15:
+        return "probe_no_repeatable_motion_at_authority"
+    if cause == 1 and protocol_version == 14:
         return "probe_no_productive_response_at_authority"
     return BREAKAWAY_TERMINAL_CAUSE_NAMES[cause]
+
+
+def _breakaway_terminal_cause_is_valid(cause: object, protocol_version: int) -> bool:
+    if not isinstance(cause, int):
+        return False
+    if protocol_version >= 15:
+        return cause in (0, 1) or 5 <= cause <= 22
+    return 0 <= cause <= 21
 
 
 # `BreakawayPhase` (breakaway_reporting.rs): which of the three campaign
@@ -2114,6 +2125,8 @@ BREAKAWAY_CHECKPOINT_NAMES = {
     39: "recovery_settle_current_input_sample",
     40: "recovery_settle_current_output_sample",
     41: "recovery_zero_boundary",
+    42: "probe_capture_interval_refusal",
+    43: "probe_excursion_fold_refusal",
 }
 
 BREAKAWAY_PROBE_EXCLUSION_REASON_NAMES = {
@@ -2135,7 +2148,7 @@ BREAKAWAY_PROBE_EXCLUSION_REASON_NAMES = {
 # `EVENT_COMMISSION_BREAKAWAY_*` marker, not globally unique against the
 # older velocity-sweep-evidence tag space -- see `decode_breakaway_record`.
 BREAKAWAY_TAG_PROBE_PLANNED = 0
-BREAKAWAY_TAG_DIRECTIONAL_BREAKAWAY = 1
+BREAKAWAY_TAG_PROBE_RESULT = 1
 BREAKAWAY_TAG_PROBE_TERMINAL = 2
 BREAKAWAY_TAG_DISCOVERY_PLANNED = 3
 BREAKAWAY_TAG_CEILING_SOURCE = 4
@@ -2182,7 +2195,30 @@ def decode_breakaway_record(
     _require(payload, 1, "breakaway evidence")
     cursor = _EvidenceCursor(payload)
     tag = cursor.take("B")
-    if tag == BREAKAWAY_TAG_PROBE_PLANNED and len(payload) in (23, 47):
+    if tag == BREAKAWAY_TAG_PROBE_PLANNED and protocol_version >= 15 and len(payload) == 53:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest", "Q"),
+                ("max_observations", "B"),
+                ("search_count", "B"),
+                ("p_start_raw", "H"),
+                ("p_top_raw", "H"),
+                ("workflow_digest", "Q"),
+                ("target_velocity_rpm", "i"),
+                ("hard_torque_limit", "H"),
+                ("usable_torque_limit", "H"),
+                ("pwm_hz", "I"),
+                ("encoder_counts_per_rev", "I"),
+                ("motion_threshold_counts", "I"),
+                ("max_capture_interval_us", "I"),
+            ),
+        )
+        decoded["family_size"] = None
+        decoded["record_kind"] = "breakaway_probe_planned"
+    elif tag == BREAKAWAY_TAG_PROBE_PLANNED and protocol_version <= 14 and len(payload) in (23, 47):
         decoded = _take_fields(
             cursor,
             (
@@ -2221,10 +2257,30 @@ def decode_breakaway_record(
                     "encoder_counts_per_rev": None,
                 }
             )
+        decoded["motion_threshold_counts"] = None
+        decoded["max_capture_interval_us"] = None
         decoded["record_kind"] = "breakaway_probe_planned"
-    elif tag == BREAKAWAY_TAG_DIRECTIONAL_BREAKAWAY and (
-        (protocol_version >= 14 and len(payload) == 23)
-        or (protocol_version <= 13 and len(payload) == 22)
+    elif tag == BREAKAWAY_TAG_PROBE_RESULT and protocol_version >= 15 and len(payload) == 23:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest", "Q"),
+                ("rung_index", "B"),
+                ("breakaway_p_raw", "H"),
+                ("motion_threshold_counts", "I"),
+                ("observation_count", "B"),
+            ),
+        )
+        decoded["record_kind"] = "breakaway_probe_resolved"
+    elif (
+        tag == BREAKAWAY_TAG_PROBE_RESULT
+        and protocol_version <= 14
+        and (
+            (protocol_version >= 14 and len(payload) == 23)
+            or (protocol_version <= 13 and len(payload) == 22)
+        )
     ):
         decoded = _take_fields(
             cursor,
@@ -2250,7 +2306,35 @@ def decode_breakaway_record(
         ):
             raise DecodeError("breakaway directional-breakaway disposition mask is invalid")
         decoded["record_kind"] = "breakaway_directional_breakaway"
-    elif tag == BREAKAWAY_TAG_PROBE_TERMINAL and len(payload) in (19, 20, 21):
+    elif tag == BREAKAWAY_TAG_PROBE_TERMINAL and protocol_version >= 15 and len(payload) == 18:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest", "Q"),
+                ("terminal_cause", "B"),
+                ("has_safety_fault", "B"),
+                ("fault_checkpoint", "B"),
+            ),
+        )
+        if not _breakaway_terminal_cause_is_valid(decoded["terminal_cause"], protocol_version):
+            raise DecodeError("breakaway probe terminal cause is invalid")
+        decoded["terminal_cause_name"] = _breakaway_terminal_cause_name(
+            int(decoded["terminal_cause"]), protocol_version
+        )
+        if decoded["fault_checkpoint"] not in BREAKAWAY_CHECKPOINT_NAMES:
+            raise DecodeError("breakaway probe terminal checkpoint is invalid")
+        decoded["fault_checkpoint_name"] = BREAKAWAY_CHECKPOINT_NAMES[decoded["fault_checkpoint"]]
+        decoded["family_size"] = None
+        decoded["exclusion_reason"] = None
+        decoded["exclusion_reason_name"] = None
+        decoded["record_kind"] = "breakaway_probe_terminal"
+    elif (
+        tag == BREAKAWAY_TAG_PROBE_TERMINAL
+        and protocol_version <= 14
+        and len(payload) in (19, 20, 21)
+    ):
         decoded = _take_fields(
             cursor,
             (
@@ -2262,7 +2346,7 @@ def decode_breakaway_record(
                 ("has_safety_fault", "B"),
             ),
         )
-        if decoded["terminal_cause"] not in BREAKAWAY_TERMINAL_CAUSE_NAMES:
+        if not _breakaway_terminal_cause_is_valid(decoded["terminal_cause"], protocol_version):
             raise DecodeError("breakaway probe terminal cause is invalid")
         decoded["terminal_cause_name"] = _breakaway_terminal_cause_name(
             int(decoded["terminal_cause"]), protocol_version
@@ -2315,7 +2399,8 @@ def decode_breakaway_record(
             raise DecodeError("breakaway ceiling binding source is invalid")
         decoded["record_kind"] = "breakaway_ceiling_source"
     elif tag == BREAKAWAY_TAG_RAW_OBSERVATION and (
-        (protocol_version >= 14 and len(payload) == 104)
+        (protocol_version >= 15 and len(payload) == 116)
+        or (protocol_version == 14 and len(payload) == 104)
         or (protocol_version <= 13 and len(payload) == 99)
     ):
         decoded = _take_fields(
@@ -2367,6 +2452,27 @@ def decode_breakaway_record(
         else:
             decoded["drift_ratio_ppm"] = None
             decoded["post_fit_lag_one_state"] = None
+        if protocol_version >= 15:
+            decoded.update(
+                _take_fields(
+                    cursor,
+                    (
+                        ("stroke_min_displacement_counts", "i"),
+                        ("stroke_max_displacement_counts", "i"),
+                        ("capture_max_interval_us", "I"),
+                    ),
+                )
+            )
+            if decoded["phase"] == 0 and not (
+                decoded["stroke_min_displacement_counts"]
+                <= 0
+                <= decoded["stroke_max_displacement_counts"]
+            ):
+                raise DecodeError("breakaway raw observation extrema are invalid")
+        else:
+            decoded["stroke_min_displacement_counts"] = None
+            decoded["stroke_max_displacement_counts"] = None
+            decoded["capture_max_interval_us"] = None
         decoded["record_kind"] = "breakaway_raw_observation"
     elif tag == BREAKAWAY_TAG_DISCOVERY_TERMINAL and len(payload) == 28:
         decoded = _take_fields(
@@ -2382,7 +2488,7 @@ def decode_breakaway_record(
                 ("has_safety_fault", "B"),
             ),
         )
-        if decoded["terminal_cause"] not in BREAKAWAY_TERMINAL_CAUSE_NAMES:
+        if not _breakaway_terminal_cause_is_valid(decoded["terminal_cause"], protocol_version):
             raise DecodeError("breakaway discovery terminal cause is invalid")
         decoded["terminal_cause_name"] = _breakaway_terminal_cause_name(
             int(decoded["terminal_cause"]), protocol_version
@@ -2461,7 +2567,7 @@ def decode_breakaway_record(
                 ("has_safety_fault", "B"),
             ),
         )
-        if decoded["terminal_cause"] not in BREAKAWAY_TERMINAL_CAUSE_NAMES:
+        if not _breakaway_terminal_cause_is_valid(decoded["terminal_cause"], protocol_version):
             raise DecodeError("breakaway confirmation terminal cause is invalid")
         decoded["terminal_cause_name"] = _breakaway_terminal_cause_name(
             int(decoded["terminal_cause"]), protocol_version
@@ -2512,7 +2618,7 @@ def decode_breakaway_record(
         )
         if decoded["phase"] not in BREAKAWAY_PHASE_NAMES:
             raise DecodeError("breakaway campaign terminal phase is invalid")
-        if decoded["terminal_cause"] not in BREAKAWAY_TERMINAL_CAUSE_NAMES:
+        if not _breakaway_terminal_cause_is_valid(decoded["terminal_cause"], protocol_version):
             raise DecodeError("breakaway campaign terminal cause is invalid")
         decoded["terminal_cause_name"] = _breakaway_terminal_cause_name(
             int(decoded["terminal_cause"]), protocol_version
@@ -2534,7 +2640,8 @@ def decode_breakaway_record(
         )
         if decoded["direction"] not in (0, 1):
             raise DecodeError("breakaway probe decision direction is invalid")
-        if decoded["disposition"] not in (0, 1, 2):
+        valid_dispositions = (0, 1) if protocol_version >= 15 else (0, 1, 2)
+        if decoded["disposition"] not in valid_dispositions:
             raise DecodeError("breakaway probe decision disposition is invalid")
         decoded["record_kind"] = "breakaway_probe_decision"
     else:

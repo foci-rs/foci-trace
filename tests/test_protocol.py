@@ -207,8 +207,9 @@ def test_decodes_version_nine_pptm_velocity_diagnostic() -> None:
 
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_OBSERVATION, payload) + payload)
 
-    assert PROTOCOL_VERSION == 14
+    assert PROTOCOL_VERSION == 15
     assert 13 in SUPPORTED_PROTOCOL_VERSIONS
+    assert 14 in SUPPORTED_PROTOCOL_VERSIONS
     assert frame.payload["pid_velocity_actual"] is None
     assert frame.payload["actual_velocity_pptm"] == 176
 
@@ -217,8 +218,8 @@ def test_decode_frame_rejects_a_version_beyond_the_supported_range() -> None:
     # A version past the supported range is rejected; historical versions stay
     # decodable so committed captures still replay.
     payload = bytes(88)
-    with pytest.raises(DecodeError, match="unsupported protocol version 15"):
-        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=15) + payload)
+    with pytest.raises(DecodeError, match="unsupported protocol version 16"):
+        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=16) + payload)
 
 
 def test_rejects_velocity_observation_with_both_diagnostic_kinds() -> None:
@@ -2208,7 +2209,7 @@ _BW_PLAN_DIGEST = 0x1122_3344_5566_7788
 _BW_PRIOR_PLAN_DIGEST = 0x99AA_BBCC_DDEE_FF00
 
 
-def _bw_probe_planned() -> bytes:
+def _bw_probe_planned_v14() -> bytes:
     return bytes([0]) + struct.pack(
         "<IHQHBBHHQiHHII",
         _BW_RUN_SEQUENCE,
@@ -2225,6 +2226,27 @@ def _bw_probe_planned() -> bytes:
         0x3132,
         0x3334_3536,
         0x3738_3940,
+    )
+
+
+def _bw_probe_planned() -> bytes:
+    return bytes([0]) + struct.pack(
+        "<IHQBBHHQiHHIIII",
+        _BW_RUN_SEQUENCE,
+        _BW_EVIDENCE_SEQUENCE,
+        _BW_PLAN_DIGEST,
+        0x11,
+        0x12,
+        0x1314,
+        0x1516,
+        0x1718_1920_2122_2324,
+        -0x2526_2728,
+        0x2930,
+        0x3132,
+        0x3334_3536,
+        0x3738_3940,
+        0x4142_4344,
+        0x4546_4748,
     )
 
 
@@ -2256,11 +2278,24 @@ def _bw_directional_breakaway_v13() -> bytes:
     )
 
 
-def _bw_directional_breakaway() -> bytes:
+def _bw_directional_breakaway_v14() -> bytes:
     return _bw_directional_breakaway_v13() + bytes([0b11])
 
 
-def _bw_probe_terminal() -> bytes:
+def _bw_probe_resolved() -> bytes:
+    return bytes([1]) + struct.pack(
+        "<IHQBHIB",
+        _BW_RUN_SEQUENCE,
+        _BW_EVIDENCE_SEQUENCE,
+        _BW_PLAN_DIGEST,
+        3,
+        0x0910,
+        0x1112_1314,
+        17,
+    )
+
+
+def _bw_probe_terminal_v14() -> bytes:
     return bytes([2]) + struct.pack(
         "<IHQHBBBB",
         _BW_RUN_SEQUENCE,
@@ -2271,6 +2306,18 @@ def _bw_probe_terminal() -> bytes:
         0,
         0,
         3,
+    )
+
+
+def _bw_probe_terminal(*, cause: int = 22, checkpoint: int = 42) -> bytes:
+    return bytes([2]) + struct.pack(
+        "<IHQBBB",
+        _BW_RUN_SEQUENCE,
+        _BW_EVIDENCE_SEQUENCE,
+        _BW_PLAN_DIGEST,
+        cause,
+        0,
+        checkpoint,
     )
 
 
@@ -2373,14 +2420,36 @@ def _bw_raw_observation_v13() -> bytes:
     )
 
 
-def _bw_raw_observation(*, stationarity_code: int = 4, post_fit_lag_one_state: int = 2) -> bytes:
+def _bw_raw_observation_v14(
+    *, stationarity_code: int = 4, post_fit_lag_one_state: int = 2
+) -> bytes:
     payload = bytearray(_bw_raw_observation_v13())
     payload[51] = stationarity_code
     payload.extend(struct.pack("<IB", 0x1112_1314, post_fit_lag_one_state))
     return bytes(payload)
 
 
-def _bw_probe_decision() -> bytes:
+def _bw_raw_observation(
+    *,
+    phase: int = 1,
+    stationarity_code: int = 4,
+    post_fit_lag_one_state: int = 2,
+    minimum: int = -0x1516_1718,
+    maximum: int = 0x2122_2324,
+    max_interval_us: int = 0x2526_2728,
+) -> bytes:
+    payload = bytearray(
+        _bw_raw_observation_v14(
+            stationarity_code=stationarity_code,
+            post_fit_lag_one_state=post_fit_lag_one_state,
+        )
+    )
+    payload[15] = phase
+    payload.extend(struct.pack("<iiI", minimum, maximum, max_interval_us))
+    return bytes(payload)
+
+
+def _bw_probe_decision(disposition: int = 1) -> bytes:
     return bytes([13]) + struct.pack(
         "<IHQBBB",
         _BW_RUN_SEQUENCE,
@@ -2388,7 +2457,7 @@ def _bw_probe_decision() -> bytes:
         _BW_PLAN_DIGEST,
         1,
         3,
-        1,
+        disposition,
     )
 
 
@@ -2504,14 +2573,13 @@ def test_decode_breakaway_probe_planned_matches_the_firmware_golden_bytes() -> N
     from foci_trace.protocol import decode_breakaway_record
 
     payload = _bw_probe_planned()
-    assert len(payload) == 47
+    assert len(payload) == 53
     decoded = decode_breakaway_record(payload)
     assert decoded["record_kind"] == "breakaway_probe_planned"
     assert decoded["tag"] == 0
     assert decoded["run_sequence"] == _BW_RUN_SEQUENCE
     assert decoded["evidence_sequence"] == _BW_EVIDENCE_SEQUENCE
     assert decoded["plan_digest"] == _BW_PLAN_DIGEST
-    assert decoded["family_size"] == 0x0910
     assert decoded["max_observations"] == 0x11
     assert decoded["search_count"] == 0x12
     assert decoded["p_start_raw"] == 0x1314
@@ -2522,28 +2590,44 @@ def test_decode_breakaway_probe_planned_matches_the_firmware_golden_bytes() -> N
     assert decoded["usable_torque_limit"] == 0x3132
     assert decoded["pwm_hz"] == 0x3334_3536
     assert decoded["encoder_counts_per_rev"] == 0x3738_3940
+    assert decoded["motion_threshold_counts"] == 0x4142_4344
+    assert decoded["max_capture_interval_us"] == 0x4546_4748
+
+
+def test_decode_breakaway_probe_planned_preserves_v14_shape() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    decoded = decode_breakaway_record(_bw_probe_planned_v14(), protocol_version=14)
+    assert decoded["family_size"] == 0x0910
+    assert decoded["motion_threshold_counts"] is None
 
 
 def test_decode_breakaway_probe_planned_preserves_historical_capture_support() -> None:
     from foci_trace.protocol import decode_breakaway_record
 
-    decoded = decode_breakaway_record(_bw_probe_planned_legacy())
+    decoded = decode_breakaway_record(_bw_probe_planned_legacy(), protocol_version=13)
     assert decoded["record_kind"] == "breakaway_probe_planned"
     assert decoded["workflow_digest"] is None
 
 
-def test_decode_breakaway_directional_breakaway_matches_the_firmware_golden_bytes() -> None:
+def test_decode_breakaway_probe_resolved_matches_the_firmware_golden_bytes() -> None:
     from foci_trace.protocol import decode_breakaway_record
 
-    payload = _bw_directional_breakaway()
+    payload = _bw_probe_resolved()
     assert len(payload) == 23
     decoded = decode_breakaway_record(payload)
+    assert decoded["record_kind"] == "breakaway_probe_resolved"
+    assert decoded["rung_index"] == 3
+    assert decoded["breakaway_p_raw"] == 0x0910
+    assert decoded["motion_threshold_counts"] == 0x1112_1314
+    assert decoded["observation_count"] == 17
+
+
+def test_decode_breakaway_directional_breakaway_preserves_v14_shape() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    decoded = decode_breakaway_record(_bw_directional_breakaway_v14(), protocol_version=14)
     assert decoded["record_kind"] == "breakaway_directional_breakaway"
-    assert decoded["direction"] == 1
-    assert decoded["inert_present"] == 1
-    assert decoded["inert_p_raw"] == 0x0910
-    assert decoded["moving_p_raw"] == 0x1112
-    assert decoded["observations"] == 6
     assert decoded["lower_disposition_mask"] == 0b11
 
 
@@ -2558,16 +2642,14 @@ def test_decode_breakaway_probe_terminal_matches_the_firmware_golden_bytes() -> 
     from foci_trace.protocol import decode_breakaway_record
 
     payload = _bw_probe_terminal()
-    assert len(payload) == 21
+    assert len(payload) == 18
     decoded = decode_breakaway_record(payload)
     assert decoded["record_kind"] == "breakaway_probe_terminal"
-    assert decoded["family_size"] == 0x0910
-    assert decoded["terminal_cause"] == 4
+    assert decoded["terminal_cause"] == 22
+    assert decoded["terminal_cause_name"] == "probe_excursion_evidence_invalid"
     assert decoded["has_safety_fault"] == 0
-    assert decoded["fault_checkpoint"] == 0
-    assert decoded["fault_checkpoint_name"] == "none"
-    assert decoded["exclusion_reason"] == 3
-    assert decoded["exclusion_reason_name"] == "settle_rest_unconfirmed"
+    assert decoded["fault_checkpoint"] == 42
+    assert decoded["fault_checkpoint_name"] == "probe_capture_interval_refusal"
 
 
 @pytest.mark.parametrize(
@@ -2579,7 +2661,7 @@ def test_decode_breakaway_probe_terminal_preserves_historical_capture_support(
 ) -> None:
     from foci_trace.protocol import decode_breakaway_record
 
-    decoded = decode_breakaway_record(payload)
+    decoded = decode_breakaway_record(payload, protocol_version=13)
     assert decoded["record_kind"] == "breakaway_probe_terminal"
     assert decoded["fault_checkpoint"] == fault_checkpoint
     assert decoded["exclusion_reason"] == 0
@@ -2591,14 +2673,34 @@ def test_breakaway_terminal_cause_one_uses_protocol_versioned_spelling() -> None
 
     v13 = decode_breakaway_record(_bw_probe_terminal_v10(), protocol_version=13)
     v14 = decode_breakaway_record(_bw_probe_terminal_v10(), protocol_version=14)
+    v15 = decode_breakaway_record(_bw_probe_terminal(cause=1, checkpoint=0), protocol_version=15)
     assert v13["terminal_cause_name"] == "probe_no_motion_at_authority"
     assert v14["terminal_cause_name"] == "probe_no_productive_response_at_authority"
+    assert v15["terminal_cause_name"] == "probe_no_repeatable_motion_at_authority"
+
+
+@pytest.mark.parametrize("cause", [2, 3, 4])
+def test_breakaway_probe_terminal_rejects_reserved_v15_causes(cause: int) -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    with pytest.raises(DecodeError, match="cause is invalid"):
+        decode_breakaway_record(_bw_probe_terminal(cause=cause, checkpoint=0))
+
+
+@pytest.mark.parametrize("cause", [2, 3, 4])
+def test_breakaway_probe_terminal_preserves_v14_cause_meanings(cause: int) -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    payload = bytearray(_bw_probe_terminal_v14())
+    payload[17] = cause
+    decoded = decode_breakaway_record(bytes(payload), protocol_version=14)
+    assert decoded["terminal_cause"] == cause
 
 
 def test_decode_breakaway_probe_terminal_rejects_unknown_checkpoint() -> None:
     from foci_trace.protocol import DecodeError, decode_breakaway_record
 
-    payload = _bw_probe_terminal_v11()[:-1] + bytes([42])
+    payload = _bw_probe_terminal(cause=1, checkpoint=44)
     with pytest.raises(DecodeError, match="checkpoint is invalid"):
         decode_breakaway_record(payload)
 
@@ -2606,9 +2708,9 @@ def test_decode_breakaway_probe_terminal_rejects_unknown_checkpoint() -> None:
 def test_decode_breakaway_probe_terminal_rejects_unknown_exclusion_reason() -> None:
     from foci_trace.protocol import DecodeError, decode_breakaway_record
 
-    payload = _bw_probe_terminal()[:-1] + bytes([11])
+    payload = _bw_probe_terminal_v14()[:-1] + bytes([11])
     with pytest.raises(DecodeError, match="exclusion reason is invalid"):
-        decode_breakaway_record(payload)
+        decode_breakaway_record(payload, protocol_version=14)
 
 
 @pytest.mark.parametrize(
@@ -2627,7 +2729,9 @@ def test_decode_breakaway_probe_terminal_preserves_exact_stationarity_exclusion(
 ) -> None:
     from foci_trace.protocol import decode_breakaway_record
 
-    decoded = decode_breakaway_record(_bw_probe_terminal()[:-1] + bytes([reason]))
+    decoded = decode_breakaway_record(
+        _bw_probe_terminal_v14()[:-1] + bytes([reason]), protocol_version=14
+    )
     assert decoded["exclusion_reason_name"] == name
 
 
@@ -2666,7 +2770,7 @@ def test_decode_breakaway_raw_observation_matches_the_firmware_golden_bytes() ->
     from foci_trace.protocol import decode_breakaway_record
 
     payload = _bw_raw_observation()
-    assert len(payload) == 104
+    assert len(payload) == 116
     decoded = decode_breakaway_record(payload)
     assert decoded["record_kind"] == "breakaway_raw_observation"
     assert decoded["plan_digest"] == _BW_PLAN_DIGEST
@@ -2690,6 +2794,26 @@ def test_decode_breakaway_raw_observation_matches_the_firmware_golden_bytes() ->
     assert decoded["disturbance_high_q16"] == 0x0506_0708
     assert decoded["drift_ratio_ppm"] == 0x1112_1314
     assert decoded["post_fit_lag_one_state"] == 2
+    assert decoded["stroke_min_displacement_counts"] == -0x1516_1718
+    assert decoded["stroke_max_displacement_counts"] == 0x2122_2324
+    assert decoded["capture_max_interval_us"] == 0x2526_2728
+
+
+@pytest.mark.parametrize("max_interval_us", [0, 2_001])
+def test_decode_breakaway_raw_observation_retains_interval_refusal_evidence(
+    max_interval_us: int,
+) -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    decoded = decode_breakaway_record(_bw_raw_observation(max_interval_us=max_interval_us))
+    assert decoded["capture_max_interval_us"] == max_interval_us
+
+
+def test_decode_breakaway_raw_observation_rejects_non_monotone_extrema() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    with pytest.raises(DecodeError, match="extrema"):
+        decode_breakaway_record(_bw_raw_observation(phase=0, minimum=1, maximum=2))
 
 
 def test_decode_breakaway_raw_observation_preserves_v13_shape_without_inference() -> None:
@@ -2698,6 +2822,15 @@ def test_decode_breakaway_raw_observation_preserves_v13_shape_without_inference(
     decoded = decode_breakaway_record(_bw_raw_observation_v13(), protocol_version=13)
     assert decoded["drift_ratio_ppm"] is None
     assert decoded["post_fit_lag_one_state"] is None
+
+
+def test_decode_breakaway_raw_observation_preserves_v14_shape() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    decoded = decode_breakaway_record(_bw_raw_observation_v14(), protocol_version=14)
+    assert decoded["drift_ratio_ppm"] == 0x1112_1314
+    assert decoded["stroke_min_displacement_counts"] is None
+    assert decoded["capture_max_interval_us"] is None
 
 
 @pytest.mark.parametrize("state", [0, 1])
@@ -2728,10 +2861,13 @@ def test_decode_breakaway_raw_observation_rejects_unknown_v14_lag_state() -> Non
         decode_breakaway_record(_bw_raw_observation(post_fit_lag_one_state=3))
 
 
-def test_decode_breakaway_probe_decision_matches_the_firmware_golden_bytes() -> None:
+@pytest.mark.parametrize("disposition", [0, 1])
+def test_decode_breakaway_probe_decision_matches_the_firmware_golden_bytes(
+    disposition: int,
+) -> None:
     from foci_trace.protocol import decode_breakaway_record
 
-    payload = _bw_probe_decision()
+    payload = _bw_probe_decision(disposition)
     assert len(payload) == 18
     decoded = decode_breakaway_record(payload)
     assert decoded == {
@@ -2740,10 +2876,24 @@ def test_decode_breakaway_probe_decision_matches_the_firmware_golden_bytes() -> 
         "plan_digest": _BW_PLAN_DIGEST,
         "direction": 1,
         "rung_index": 3,
-        "disposition": 1,
+        "disposition": disposition,
         "record_kind": "breakaway_probe_decision",
         "tag": 13,
     }
+
+
+def test_decode_breakaway_probe_decision_preserves_v14_transient_disposition() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    decoded = decode_breakaway_record(_bw_probe_decision(2), protocol_version=14)
+    assert decoded["disposition"] == 2
+
+
+def test_decode_breakaway_probe_decision_rejects_v15_transient_disposition() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    with pytest.raises(DecodeError, match="disposition is invalid"):
+        decode_breakaway_record(_bw_probe_decision(2), protocol_version=15)
 
 
 def test_decode_breakaway_raw_observation_rejects_an_invalid_phase() -> None:
@@ -2875,7 +3025,7 @@ def test_breakaway_event_ids_match_the_firmware_trace_events_table() -> None:
         EVENT_COMMISSION_BREAKAWAY_DISCOVERY_MARGIN,
         EVENT_COMMISSION_BREAKAWAY_DISCOVERY_PLAN,
         EVENT_COMMISSION_BREAKAWAY_DISCOVERY_TERMINAL,
-        EVENT_COMMISSION_BREAKAWAY_PROBE_DERIVED,
+        EVENT_COMMISSION_BREAKAWAY_PROBE_RESULT,
         EVENT_COMMISSION_BREAKAWAY_PROBE_DECISION,
         EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN,
         EVENT_COMMISSION_BREAKAWAY_PROBE_TERMINAL,
@@ -2885,7 +3035,7 @@ def test_breakaway_event_ids_match_the_firmware_trace_events_table() -> None:
 
     assert EVENT_COMMISSION_REST_SELECTION_DIAGNOSTIC == 151
     assert EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN == 152
-    assert EVENT_COMMISSION_BREAKAWAY_PROBE_DERIVED == 153
+    assert EVENT_COMMISSION_BREAKAWAY_PROBE_RESULT == 153
     assert EVENT_COMMISSION_BREAKAWAY_PROBE_TERMINAL == 154
     assert EVENT_COMMISSION_BREAKAWAY_DISCOVERY_PLAN == 155
     assert EVENT_COMMISSION_BREAKAWAY_DISCOVERY_TERMINAL == 156
@@ -2897,7 +3047,7 @@ def test_breakaway_event_ids_match_the_firmware_trace_events_table() -> None:
     assert EVENT_COMMISSION_BREAKAWAY_PROBE_DECISION == 162
     assert BREAKAWAY_CAMPAIGN_EVENT_IDS == (
         EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN,
-        EVENT_COMMISSION_BREAKAWAY_PROBE_DERIVED,
+        EVENT_COMMISSION_BREAKAWAY_PROBE_RESULT,
         EVENT_COMMISSION_BREAKAWAY_PROBE_TERMINAL,
         EVENT_COMMISSION_BREAKAWAY_DISCOVERY_PLAN,
         EVENT_COMMISSION_BREAKAWAY_DISCOVERY_TERMINAL,
