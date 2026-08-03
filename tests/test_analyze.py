@@ -7,6 +7,7 @@ import pytest
 
 from foci_trace.analyze import (
     CaptureAnalysis,
+    analysis_to_json,
     analyze_capture,
     audit_outer_safety_timing,
     format_analysis,
@@ -51,19 +52,19 @@ def _breakaway_probe_plan_payload(
     run_sequence: int,
     evidence_sequence: int,
     plan_digest: int,
-    family_size: int,
     max_observations: int,
     search_count: int,
     p_start_raw: int,
     p_top_raw: int,
+    motion_threshold_counts: int = 63,
+    max_capture_interval_us: int = 2_000,
 ) -> bytes:
-    """Encode the complete v12 probe-plan record used by analyzer fixtures."""
+    """Encode the complete v15 probe-plan record used by analyzer fixtures."""
     return bytes([0]) + struct.pack(
-        "<IHQHBBHHQiHHII",
+        "<IHQBBHHQiHHIIII",
         run_sequence,
         evidence_sequence,
         plan_digest,
-        family_size,
         max_observations,
         search_count,
         p_start_raw,
@@ -74,6 +75,8 @@ def _breakaway_probe_plan_payload(
         _BREAKAWAY_PROBE_CONTEXT["usable_torque_limit"],
         _BREAKAWAY_PROBE_CONTEXT["pwm_hz"],
         _BREAKAWAY_PROBE_CONTEXT["encoder_counts_per_rev"],
+        motion_threshold_counts,
+        max_capture_interval_us,
     )
 
 
@@ -2630,6 +2633,17 @@ def test_acceptance_matrix_audit_keeps_its_namespace_in_output() -> None:
     assert "observed_bound_q=35" in rendered
 
 
+def test_breakaway_campaign_audit_is_serialized_in_both_json_views() -> None:
+    audit = {
+        "matches_firmware": True,
+        "probe_replay": {"resolved_rung_index": 3, "breakaway_p_raw": 8},
+    }
+    analysis = CaptureAnalysis(devices=[], breakaway_campaign_audits=[audit])
+
+    assert analysis_to_json(analysis)["breakaway_campaigns"] == [audit]
+    assert velocity_analysis_to_json(analysis)["breakaway_campaigns"] == [audit]
+
+
 def test_recovery_records_route_to_their_owning_stage(monkeypatch) -> None:
     import foci_trace.analyze as analyze
 
@@ -2888,10 +2902,15 @@ def test_analyze_capture_reconstructs_a_breakaway_campaign_from_ftrc_frames() ->
 
     p_start_raw, p_top_raw = 2, 8
     search_grid = breakaway_build_search_grid(p_start_raw, p_top_raw)
-    family_size = 16
-    max_observations = 8
+    motion_threshold_counts = 63
+    max_capture_interval_us = 2_000
+    max_observations = 128
     probe_digest = breakaway_probe_plan_digest(
-        search_grid, family_size, max_observations, **_BREAKAWAY_PROBE_CONTEXT
+        search_grid,
+        motion_threshold_counts,
+        max_capture_interval_us,
+        max_observations,
+        **_BREAKAWAY_PROBE_CONTEXT,
     )
 
     def bw_event_payload(event_id: int, sequence: int) -> bytes:
@@ -2907,13 +2926,12 @@ def test_analyze_capture_reconstructs_a_breakaway_campaign_from_ftrc_frames() ->
         run_sequence=7,
         evidence_sequence=1,
         plan_digest=probe_digest,
-        family_size=family_size,
         max_observations=max_observations,
         search_count=len(search_grid),
         p_start_raw=p_start_raw,
         p_top_raw=p_top_raw,
     )
-    probe_terminal = bytes([2]) + struct.pack("<IHQHBBB", 7, 2, probe_digest, family_size, 6, 0, 17)
+    probe_terminal = bytes([2]) + struct.pack("<IHQBBB", 7, 2, probe_digest, 6, 0, 17)
     campaign_terminal = bytes([12]) + struct.pack("<IHBBBQ", 7, 3, 0, 6, 0, 0)
 
     output = io.BytesIO()
@@ -2974,10 +2992,15 @@ def test_analyze_capture_rejects_in_phase_motion_before_the_breakaway_probe_plan
     from foci_trace.velocity_measurement import breakaway_probe_plan_digest
 
     search_grid = [2, 3, 4, 6, 8]
-    family_size = 16
-    max_observations = 8
+    motion_threshold_counts = 63
+    max_capture_interval_us = 2_000
+    max_observations = 128
     probe_digest = breakaway_probe_plan_digest(
-        search_grid, family_size, max_observations, **_BREAKAWAY_PROBE_CONTEXT
+        search_grid,
+        motion_threshold_counts,
+        max_capture_interval_us,
+        max_observations,
+        **_BREAKAWAY_PROBE_CONTEXT,
     )
 
     def bw_event_payload(event_id: int, sequence: int) -> bytes:
@@ -2989,13 +3012,12 @@ def test_analyze_capture_rejects_in_phase_motion_before_the_breakaway_probe_plan
         run_sequence=7,
         evidence_sequence=1,
         plan_digest=probe_digest,
-        family_size=family_size,
         max_observations=max_observations,
         search_count=len(search_grid),
         p_start_raw=2,
         p_top_raw=8,
     )
-    probe_terminal = bytes([2]) + struct.pack("<IHQHBB", 7, 2, probe_digest, family_size, 1, 0)
+    probe_terminal = bytes([2]) + struct.pack("<IHQBBB", 7, 2, probe_digest, 1, 0, 0)
     campaign_terminal = bytes([12]) + struct.pack("<IHBBBQ", 7, 3, 0, 1, 0, 0)
 
     output = io.BytesIO()
@@ -3070,10 +3092,15 @@ def test_analyze_capture_does_not_flag_prior_phase_motion_as_premature() -> None
     from foci_trace.velocity_measurement import breakaway_probe_plan_digest
 
     search_grid = [2, 3, 4, 6, 8]
-    family_size = 16
-    max_observations = 8
+    motion_threshold_counts = 63
+    max_capture_interval_us = 2_000
+    max_observations = 128
     probe_digest = breakaway_probe_plan_digest(
-        search_grid, family_size, max_observations, **_BREAKAWAY_PROBE_CONTEXT
+        search_grid,
+        motion_threshold_counts,
+        max_capture_interval_us,
+        max_observations,
+        **_BREAKAWAY_PROBE_CONTEXT,
     )
 
     def bw_event_payload(event_id: int, sequence: int) -> bytes:
@@ -3085,13 +3112,12 @@ def test_analyze_capture_does_not_flag_prior_phase_motion_as_premature() -> None
         run_sequence=7,
         evidence_sequence=1,
         plan_digest=probe_digest,
-        family_size=family_size,
         max_observations=max_observations,
         search_count=len(search_grid),
         p_start_raw=2,
         p_top_raw=8,
     )
-    probe_terminal = bytes([2]) + struct.pack("<IHQHBB", 7, 2, probe_digest, family_size, 1, 0)
+    probe_terminal = bytes([2]) + struct.pack("<IHQBBB", 7, 2, probe_digest, 1, 0, 0)
     campaign_terminal = bytes([12]) + struct.pack("<IHBBBQ", 7, 3, 0, 1, 0, 0)
 
     output = io.BytesIO()

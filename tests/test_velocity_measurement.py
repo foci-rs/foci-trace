@@ -29,7 +29,7 @@ from foci_trace.velocity_measurement import (
     breakaway_plan_additive_discovery_ladder,
     breakaway_probe_plan_digest,
     breakaway_realize_candidate_additive_ladder,
-    breakaway_replay_binary_search,
+    breakaway_replay_upward_probe,
     breakaway_required_relative_se_permille,
     classify_absolute_rate,
     plan_rung_origin_recovery,
@@ -58,8 +58,9 @@ def test_breakaway_probe_plan_digest_matches_the_firmware_context_fixture() -> N
     assert (
         breakaway_probe_plan_digest(
             [3, 5, 6, 9],
-            16,
-            8,
+            63,
+            2_000,
+            128,
             workflow_digest=_BREAKAWAY_WORKFLOW_DIGEST,
             target_velocity_rpm=_BREAKAWAY_TARGET_VELOCITY_RPM,
             hard_torque_limit=_BREAKAWAY_HARD_TORQUE_LIMIT,
@@ -67,7 +68,7 @@ def test_breakaway_probe_plan_digest_matches_the_firmware_context_fixture() -> N
             pwm_hz=_BREAKAWAY_PWM_HZ,
             encoder_counts_per_rev=_BREAKAWAY_ENCODER_COUNTS_PER_REV,
         )
-        == 0x2581_C2DA_8114_9F64
+        == 0x58E4_3362_740F_DD86
     )
 
 
@@ -3012,6 +3013,9 @@ def _bw_raw_observation(
     disturbance_high_q16: int = 1000,
     drift_ratio_ppm: int = 0,
     post_fit_lag_one_state: int = 2,
+    stroke_min_displacement_counts: int = 0,
+    stroke_max_displacement_counts: int = 0,
+    capture_max_interval_us: int = 1_000,
 ) -> bytes:
     """Build a tag-5 `BreakawayRawObservation` record's raw bytes.
 
@@ -3063,7 +3067,17 @@ def _bw_raw_observation(
         disturbance_high_q16,
     )
     return (
-        head + variance_bytes + tail + struct.pack("<IB", drift_ratio_ppm, post_fit_lag_one_state)
+        head
+        + variance_bytes
+        + tail
+        + struct.pack(
+            "<IBiiI",
+            drift_ratio_ppm,
+            post_fit_lag_one_state,
+            stroke_min_displacement_counts,
+            stroke_max_displacement_counts,
+            capture_max_interval_us,
+        )
     )
 
 
@@ -3184,11 +3198,13 @@ class _BreakawayCampaignBuilder:
         self.p_start_raw = 2
         self.p_top_raw = 1_088
         self.search_grid = breakaway_build_search_grid(self.p_start_raw, self.p_top_raw)
-        self.family_size = 16
-        self.max_observations = 8
+        self.motion_threshold_counts = 63
+        self.max_capture_interval_us = 2_000
+        self.max_observations = 128
         self.probe_digest = breakaway_probe_plan_digest(
             self.search_grid,
-            self.family_size,
+            self.motion_threshold_counts,
+            self.max_capture_interval_us,
             self.max_observations,
             workflow_digest=_BREAKAWAY_WORKFLOW_DIGEST,
             target_velocity_rpm=_BREAKAWAY_TARGET_VELOCITY_RPM,
@@ -3229,17 +3245,16 @@ class _BreakawayCampaignBuilder:
         return self.search_grid.index(self.breakaway_raw)
 
     def probe_strokes(self) -> int:
-        return breakaway_replay_binary_search(len(self.search_grid), self.moving_index())
+        return self.moving_index() * 2 + 4
 
     def probe_plan_tick(self, *, sequence: int = 1, plan_digest: int | None = None) -> dict:
         digest = self.probe_digest if plan_digest is None else plan_digest
         raw = _bw_tag(
             0,
-            "IHQHBBHHQiHHII",
+            "IHQBBHHQiHHIIII",
             self.run_sequence,
             sequence,
             digest,
-            self.family_size,
             self.max_observations,
             len(self.search_grid),
             self.p_start_raw,
@@ -3250,6 +3265,8 @@ class _BreakawayCampaignBuilder:
             _BREAKAWAY_USABLE_TORQUE_LIMIT,
             _BREAKAWAY_PWM_HZ,
             _BREAKAWAY_ENCODER_COUNTS_PER_REV,
+            self.motion_threshold_counts,
+            self.max_capture_interval_us,
         )
         return {
             "event_id": 152,
@@ -3258,142 +3275,152 @@ class _BreakawayCampaignBuilder:
             "records": [_bw_record(raw)],
         }
 
-    def _probe_trajectory(self) -> list[tuple[int, int]]:
-        """Return `(rung_index, disposition)` commits for one direction."""
-        moving_index = self.moving_index()
-        lo, hi = 0, len(self.search_grid)
-        trajectory: list[tuple[int, int]] = []
-        while lo < hi:
-            tested = lo + (hi - lo) // 2
-            disposition = 2 if tested >= moving_index else 0
-            trajectory.append((tested, disposition))
-            if disposition == 2:
-                hi = tested
+    def _probe_trajectory(
+        self,
+        resolved_index: int | None = None,
+        failed_repeat_rungs: set[int] | None = None,
+    ) -> list[tuple[int, int, int, int]]:
+        """Return `(rung, direction, slot, moved)` commits for the upward walk."""
+        if resolved_index is None:
+            resolved_index = self.moving_index()
+        failed_repeat_rungs = failed_repeat_rungs or set()
+        trajectory: list[tuple[int, int, int, int]] = []
+        for rung_index in range(resolved_index):
+            if rung_index in failed_repeat_rungs:
+                trajectory.extend(
+                    (
+                        (rung_index, 0, 0, 1),
+                        (rung_index, 1, 0, 1),
+                        (rung_index, 0, 1, 0),
+                        (rung_index, 1, 1, 1),
+                    )
+                )
             else:
-                lo = tested + 1
-        if moving_index > 0:
-            trajectory.append((moving_index - 1, 0))
-        trajectory.append((moving_index, 2))
+                trajectory.extend(((rung_index, 0, 0, 0), (rung_index, 1, 0, 0)))
+        if resolved_index < len(self.search_grid):
+            trajectory.extend(
+                (
+                    (resolved_index, 0, 0, 1),
+                    (resolved_index, 1, 0, 1),
+                    (resolved_index, 0, 1, 1),
+                    (resolved_index, 1, 1, 1),
+                )
+            )
         return trajectory
 
     def probe_stream_ticks(
-        self, *, sequence: int = 2, plan_digest: int | None = None
+        self,
+        *,
+        sequence: int = 2,
+        plan_digest: int | None = None,
+        resolved_index: int | None = None,
+        failed_repeat_rungs: set[int] | None = None,
     ) -> list[dict]:
         """Build recovered probe raw/decision pairs for both directions."""
         digest = self.probe_digest if plan_digest is None else plan_digest
         ticks: list[dict] = []
         evidence_sequence = sequence
-        for direction in (0, 1):
-            for slot, (rung_index, disposition) in enumerate(self._probe_trajectory()):
-                productive = disposition == 2
-                settled_low = 100 if productive and direction == 0 else -100
-                settled_high = 200 if productive and direction == 0 else 100
-                if productive and direction == 1:
-                    settled_low, settled_high = -200, -100
-                raw = _bw_raw_observation(
-                    self.run_sequence,
-                    evidence_sequence,
-                    digest,
-                    0,
-                    rung_index,
-                    slot,
-                    direction,
-                    150 if direction == 0 else -150,
-                    100,
-                    1_000,
-                    settled_rate_low_q=settled_low,
-                    settled_rate_high_q=settled_high,
-                )
-                ticks.append(
-                    {
-                        "event_id": 160,
-                        "timestamp_ticks": 1_200 + evidence_sequence,
-                        "sequence": evidence_sequence,
-                        "records": [_bw_record(raw)],
-                    }
-                )
-                evidence_sequence += 1
-                decision = _bw_tag(
-                    13,
-                    "IHQBBB",
-                    self.run_sequence,
-                    evidence_sequence,
-                    digest,
-                    direction,
-                    rung_index,
-                    disposition,
-                )
-                ticks.append(
-                    {
-                        "event_id": 162,
-                        "timestamp_ticks": 1_200 + evidence_sequence,
-                        "sequence": evidence_sequence,
-                        "records": [_bw_record(decision)],
-                    }
-                )
-                evidence_sequence += 1
+        if resolved_index is None:
+            resolved_index = self.moving_index()
+        for rung_index, direction, slot, moved in self._probe_trajectory(
+            resolved_index, failed_repeat_rungs
+        ):
+            settled_low = 100 if moved and direction == 0 else -100
+            settled_high = 200 if moved and direction == 0 else 100
+            if moved and direction == 1:
+                settled_low, settled_high = -200, -100
+            minimum = -self.motion_threshold_counts if moved and direction == 1 else 0
+            maximum = self.motion_threshold_counts if moved and direction == 0 else 0
+            raw = _bw_raw_observation(
+                self.run_sequence,
+                evidence_sequence,
+                digest,
+                0,
+                rung_index,
+                slot,
+                direction,
+                150 if direction == 0 else -150,
+                100,
+                1_000,
+                settled_rate_low_q=settled_low,
+                settled_rate_high_q=settled_high,
+                stroke_min_displacement_counts=minimum,
+                stroke_max_displacement_counts=maximum,
+            )
+            ticks.append(
+                {
+                    "event_id": 160,
+                    "timestamp_ticks": 1_200 + evidence_sequence,
+                    "sequence": evidence_sequence,
+                    "records": [_bw_record(raw)],
+                }
+            )
+            evidence_sequence += 1
+            decision = _bw_tag(
+                13,
+                "IHQBBB",
+                self.run_sequence,
+                evidence_sequence,
+                digest,
+                direction,
+                rung_index,
+                moved,
+            )
+            ticks.append(
+                {
+                    "event_id": 162,
+                    "timestamp_ticks": 1_200 + evidence_sequence,
+                    "sequence": evidence_sequence,
+                    "records": [_bw_record(decision)],
+                }
+            )
+            evidence_sequence += 1
         return ticks
 
-    def probe_derived_tick(
+    def probe_result_tick(
         self,
         *,
-        sequence: int = 40,
+        sequence: int = 90,
         plan_digest: int | None = None,
         observations: int | None = None,
     ) -> dict:
         digest = self.probe_digest if plan_digest is None else plan_digest
         strokes = self.probe_strokes() if observations is None else observations
-        forward = _bw_tag(
+        result = _bw_tag(
             1,
-            "IHQBBHHBB",
+            "IHQBHIB",
             self.run_sequence,
             sequence,
             digest,
-            0,
-            1,
-            self.floor_raw,
+            self.moving_index(),
             self.breakaway_raw,
+            self.motion_threshold_counts,
             strokes,
-            0b01,
-        )
-        reverse = _bw_tag(
-            1,
-            "IHQBBHHBB",
-            self.run_sequence,
-            sequence,
-            digest,
-            1,
-            1,
-            self.floor_raw,
-            self.breakaway_raw,
-            strokes,
-            0b01,
         )
         return {
             "event_id": 153,
             "timestamp_ticks": 2_000,
             "sequence": sequence,
-            "records": [_bw_record(forward), _bw_record(reverse)],
+            "records": [_bw_record(result)],
         }
 
     def probe_terminal_tick(
         self,
         *,
         sequence: int = 4,
-        terminal_cause: int = 4,
-        exclusion_reason: int = 1,
+        terminal_cause: int = 22,
+        has_safety_fault: int = 0,
+        fault_checkpoint: int = 42,
     ) -> dict:
         raw = _bw_tag(
             2,
-            "IHQHBBBB",
+            "IHQBBB",
             self.run_sequence,
             sequence,
             self.probe_digest,
-            self.family_size,
             terminal_cause,
-            0,
-            0,
-            exclusion_reason,
+            has_safety_fault,
+            fault_checkpoint,
         )
         return {
             "event_id": 154,
@@ -3405,7 +3432,7 @@ class _BreakawayCampaignBuilder:
     def discovery_plan_tick(
         self,
         *,
-        sequence: int = 41,
+        sequence: int = 100,
         plan_digest: int | None = None,
         prior_plan_digest: int | None = None,
     ) -> dict:
@@ -3452,7 +3479,7 @@ class _BreakawayCampaignBuilder:
     def discovery_ticks(
         self,
         *,
-        sequence: int = 50,
+        sequence: int = 110,
         plan_digest: int | None = None,
         prior_plan_digest: int | None = None,
         terminal_cause: int = 0,
@@ -3626,7 +3653,7 @@ class _BreakawayCampaignBuilder:
     def confirmation_plan_tick(
         self,
         *,
-        sequence: int = 150,
+        sequence: int = 400,
         plan_digest: int | None = None,
         prior_plan_digest: int | None = None,
         family_size: int = 8,
@@ -3659,7 +3686,7 @@ class _BreakawayCampaignBuilder:
     def confirmation_ticks(
         self,
         *,
-        sequence: int = 160,
+        sequence: int = 410,
         plan_digest: int | None = None,
         prior_plan_digest: int | None = None,
         accepted: int = 1,
@@ -3841,7 +3868,7 @@ class _BreakawayCampaignBuilder:
     def campaign_terminal_tick(
         self,
         *,
-        sequence: int = 250,
+        sequence: int = 500,
         timestamp_ticks: int = 7_000,
         phase: int = 2,
         terminal_cause: int = 21,
@@ -3869,7 +3896,7 @@ class _BreakawayCampaignBuilder:
         return [
             self.probe_plan_tick(),
             *self.probe_stream_ticks(),
-            self.probe_derived_tick(),
+            self.probe_result_tick(),
             self.discovery_plan_tick(),
             *self.discovery_ticks(),
             self.confirmation_plan_tick(),
@@ -3941,13 +3968,37 @@ def test_breakaway_plan_additive_discovery_ladder_chooses_the_spec_worked_exampl
     ]
 
 
-def test_breakaway_replay_binary_search_reproduces_the_worst_case_stroke_count() -> None:
-    """A 32-boundary grid needs at most 6 bisections plus 2 bracket repeats (spec section 4)."""
-    grid = breakaway_build_search_grid(1, 32_768)
-    assert len(grid) <= 33
-    for moving_index in range(len(grid)):
-        strokes = breakaway_replay_binary_search(len(grid), moving_index)
-        assert strokes <= 8
+def test_breakaway_replay_upward_probe_reconstructs_the_128_stroke_bound() -> None:
+    builder = _BreakawayCampaignBuilder()
+    builder.p_start_raw = 1
+    builder.p_top_raw = 65_535
+    builder.search_grid = breakaway_build_search_grid(builder.p_start_raw, builder.p_top_raw)
+    assert len(builder.search_grid) == 32
+    builder.probe_digest = breakaway_probe_plan_digest(
+        builder.search_grid,
+        builder.motion_threshold_counts,
+        builder.max_capture_interval_us,
+        builder.max_observations,
+        workflow_digest=_BREAKAWAY_WORKFLOW_DIGEST,
+        target_velocity_rpm=_BREAKAWAY_TARGET_VELOCITY_RPM,
+        hard_torque_limit=_BREAKAWAY_HARD_TORQUE_LIMIT,
+        usable_torque_limit=_BREAKAWAY_USABLE_TORQUE_LIMIT,
+        pwm_hz=_BREAKAWAY_PWM_HZ,
+        encoder_counts_per_rev=_BREAKAWAY_ENCODER_COUNTS_PER_REV,
+    )
+    ticks = [
+        builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(
+            resolved_index=len(builder.search_grid),
+            failed_repeat_rungs=set(range(len(builder.search_grid))),
+        ),
+    ]
+
+    replay = breakaway_replay_upward_probe(builder.search_grid, ticks)
+
+    assert replay["resolved_rung_index"] is None
+    assert replay["committed_observations"] == 128
+    assert replay["expected_terminal"] == {"terminal_cause": 1}
 
 
 def test_audit_breakaway_campaign_accepts_a_self_consistent_campaign() -> None:
@@ -3964,89 +4015,127 @@ def test_audit_breakaway_campaign_accepts_a_self_consistent_campaign() -> None:
     assert result["workflow_duration_ms"] == pytest.approx(6.0)
 
 
-def test_audit_breakaway_replays_a_transient_lower_endpoint_and_mixed_mask() -> None:
+def test_audit_breakaway_campaign_detects_a_tampered_probe_result() -> None:
     builder = _BreakawayCampaignBuilder()
     ticks = builder.accepted_campaign_ticks()
-    lower_index = builder.moving_index() - 1
-    changed = False
-    for position, tick in enumerate(ticks[:-1]):
+    result_tick = next(tick for tick in ticks if tick["event_id"] == 153)
+    result_tick["records"][0][1]["observation_count"] += 1
+
+    result = audit_breakaway_campaign(ticks)
+
+    assert result["matches_firmware"] is False
+    assert any("probe result observation_count" in item for item in result["mismatches"])
+
+
+def test_breakaway_replay_upward_probe_accepts_motion_at_the_threshold() -> None:
+    builder = _BreakawayCampaignBuilder()
+    ticks = [builder.probe_plan_tick(), *builder.probe_stream_ticks(resolved_index=0)]
+
+    replay = breakaway_replay_upward_probe(builder.search_grid, ticks)
+
+    assert replay["resolved_rung_index"] == 0
+    assert replay["committed_observations"] == 4
+
+
+def test_breakaway_replay_upward_probe_treats_threshold_minus_one_as_no_motion() -> None:
+    builder = _BreakawayCampaignBuilder()
+    stream = builder.probe_stream_ticks(resolved_index=len(builder.search_grid))
+    stream[0]["records"][0][1]["stroke_max_displacement_counts"] = (
+        builder.motion_threshold_counts - 1
+    )
+
+    replay = breakaway_replay_upward_probe(
+        builder.search_grid, [builder.probe_plan_tick(), *stream]
+    )
+
+    assert replay["resolved_rung_index"] is None
+    assert replay["expected_terminal"] == {"terminal_cause": 1}
+
+
+def test_breakaway_replay_upward_probe_ignores_stationarity_for_motion() -> None:
+    builder = _BreakawayCampaignBuilder()
+    ticks = [builder.probe_plan_tick(), *builder.probe_stream_ticks(resolved_index=0)]
+    for tick in ticks:
         if tick["event_id"] != 160:
             continue
         observation = tick["records"][0][1]
-        if (
-            observation["phase"] == 0
-            and observation["direction"] == 0
-            and observation["rung_index"] == lower_index
-        ):
-            decision = ticks[position + 1]["records"][0][1]
-            observation["stationarity_code"] = 6
-            observation["settled_rate_low_q"] = 100
-            observation["settled_rate_high_q"] = 200
-            observation["drift_ratio_ppm"] = 300_000
-            observation["post_fit_lag_one_state"] = 2
-            decision["disposition"] = 1
-            changed = True
-            break
-    assert changed
-    directional = next(
-        record
-        for tick in ticks
-        if tick["event_id"] == 153
-        for _raw, record in tick["records"]
-        if record["direction"] == 0
-    )
-    directional["lower_disposition_mask"] = 0b11
+        observation["stationarity_code"] = 6
+        observation["settled_rate_low_q"] = 0
+        observation["settled_rate_high_q"] = 0
+        observation["post_fit_lag_one_state"] = 0
 
-    result = audit_breakaway_campaign(ticks)
+    replay = breakaway_replay_upward_probe(builder.search_grid, ticks)
 
-    assert result["matches_firmware"] is True, result["mismatches"]
-    assert result["probe_replay"]["directions"][0]["lower_disposition_mask"] == 0b11
-
-
-@pytest.mark.parametrize(("lag_state", "reason"), [(0, 1), (1, 8)])
-def test_audit_breakaway_replays_lag_one_probe_terminals(lag_state: int, reason: int) -> None:
-    builder = _BreakawayCampaignBuilder()
-    raw_tick = builder.probe_stream_ticks()[0]
-    observation = raw_tick["records"][0][1]
-    observation["stationarity_code"] = 6
-    observation["settled_rate_low_q"] = 100
-    observation["settled_rate_high_q"] = 200
-    observation["drift_ratio_ppm"] = 300_000
-    observation["post_fit_lag_one_state"] = lag_state
-    ticks = [
-        builder.probe_plan_tick(),
-        raw_tick,
-        builder.probe_terminal_tick(sequence=3, terminal_cause=4, exclusion_reason=reason),
-        builder.campaign_terminal_tick(
-            sequence=4,
-            phase=0,
-            terminal_cause=4,
-            accepted=0,
-            stage_c_plan_digest=0,
-        ),
-    ]
-
-    result = audit_breakaway_campaign(ticks)
-
-    assert result["matches_firmware"] is True, result["mismatches"]
-    assert result["probe_replay"]["expected_terminal"] == {
-        "kind": "terminal",
-        "terminal_cause": 4,
-        "exclusion_reason": reason,
+    assert replay["resolved_rung_index"] == 0
+    assert replay["observations"][0]["stationarity_diagnostic"] == {
+        "stationarity_code": 6,
+        "settled_rate_low_q": 0,
+        "settled_rate_high_q": 0,
+        "drift_ratio_ppm": 0,
+        "post_fit_lag_one_state": 0,
     }
 
 
-def test_audit_breakaway_does_not_commit_raw_evidence_when_recovery_fails() -> None:
+def test_breakaway_replay_upward_probe_prefers_commanded_motion_when_both_sides_move() -> None:
+    builder = _BreakawayCampaignBuilder()
+    ticks = [builder.probe_plan_tick(), *builder.probe_stream_ticks(resolved_index=0)]
+    first = ticks[1]["records"][0][1]
+    first["stroke_min_displacement_counts"] = -builder.motion_threshold_counts
+
+    replay = breakaway_replay_upward_probe(builder.search_grid, ticks)
+
+    assert replay["resolved_rung_index"] == 0
+    assert replay["observations"][0]["commanded_excursion_counts"] == 63
+    assert replay["observations"][0]["opposite_excursion_counts"] == 63
+
+
+def test_breakaway_replay_upward_probe_advances_after_a_failed_repeat() -> None:
+    builder = _BreakawayCampaignBuilder()
+    ticks = [
+        builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(resolved_index=1, failed_repeat_rungs={0}),
+    ]
+
+    replay = breakaway_replay_upward_probe(builder.search_grid, ticks)
+
+    assert replay["resolved_rung_index"] == 1
+    assert replay["committed_observations"] == 8
+
+
+@pytest.mark.parametrize(("interval", "terminal"), [(0, 22), (2_000, None), (2_001, 22)])
+def test_breakaway_replay_upward_probe_applies_the_capture_interval_gate(
+    interval: int, terminal: int | None
+) -> None:
     builder = _BreakawayCampaignBuilder()
     raw_tick = builder.probe_stream_ticks()[0]
+    raw_tick["records"][0][1]["capture_max_interval_us"] = interval
     ticks = [
         builder.probe_plan_tick(),
         raw_tick,
-        builder.probe_terminal_tick(sequence=3, terminal_cause=4, exclusion_reason=4),
+    ]
+    if terminal is None:
+        ticks.append(builder.probe_stream_ticks()[1])
+
+    replay = breakaway_replay_upward_probe(builder.search_grid, ticks)
+
+    assert replay["expected_terminal"] == (
+        {"terminal_cause": terminal} if terminal is not None else None
+    )
+    assert replay["committed_observations"] == (1 if terminal is None else 0)
+
+
+def test_audit_breakaway_pairs_interval_refusal_with_cause_22() -> None:
+    builder = _BreakawayCampaignBuilder()
+    raw_tick = builder.probe_stream_ticks()[0]
+    raw_tick["records"][0][1]["capture_max_interval_us"] = 0
+    ticks = [
+        builder.probe_plan_tick(),
+        raw_tick,
+        builder.probe_terminal_tick(sequence=3),
         builder.campaign_terminal_tick(
             sequence=4,
             phase=0,
-            terminal_cause=4,
+            terminal_cause=22,
             accepted=0,
             stage_c_plan_digest=0,
         ),
@@ -4054,8 +4143,95 @@ def test_audit_breakaway_does_not_commit_raw_evidence_when_recovery_fails() -> N
 
     result = audit_breakaway_campaign(ticks)
 
+    assert result["matches_firmware"] is True, result["mismatches"]
+    assert result["probe_replay"]["expected_terminal"] == {"terminal_cause": 22}
+
+
+def test_breakaway_replay_upward_probe_forbids_a_decision_after_interval_refusal() -> None:
+    builder = _BreakawayCampaignBuilder()
+    stream = builder.probe_stream_ticks()[:2]
+    stream[0]["records"][0][1]["capture_max_interval_us"] = 0
+
+    with pytest.raises(ValueError, match="independently terminates"):
+        breakaway_replay_upward_probe(builder.search_grid, [builder.probe_plan_tick(), *stream])
+
+
+def test_breakaway_replay_upward_probe_rejects_wrong_direction_excursion() -> None:
+    builder = _BreakawayCampaignBuilder()
+    raw_tick = builder.probe_stream_ticks()[0]
+    raw_tick["records"][0][1]["stroke_min_displacement_counts"] = -builder.motion_threshold_counts
+
+    replay = breakaway_replay_upward_probe(
+        builder.search_grid, [builder.probe_plan_tick(), raw_tick]
+    )
+
+    assert replay["expected_terminal"] == {"terminal_cause": 6}
+
+
+def test_breakaway_replay_upward_probe_keeps_recovery_interruption_uncommitted() -> None:
+    builder = _BreakawayCampaignBuilder()
+    raw_tick = builder.probe_stream_ticks()[0]
+
+    replay = breakaway_replay_upward_probe(
+        builder.search_grid, [builder.probe_plan_tick(), raw_tick]
+    )
+
+    assert replay["committed_observations"] == 0
+    assert replay["expected_terminal"] is None
+    assert len(replay["uncommitted_raw"]) == 1
+
+
+def test_audit_breakaway_accepts_a_recovery_fault_without_advancing_the_probe() -> None:
+    builder = _BreakawayCampaignBuilder()
+    raw_tick = builder.probe_stream_ticks()[0]
+    ticks = [
+        builder.probe_plan_tick(),
+        raw_tick,
+        builder.probe_terminal_tick(
+            sequence=3, terminal_cause=6, has_safety_fault=1, fault_checkpoint=17
+        ),
+        builder.campaign_terminal_tick(
+            sequence=4,
+            phase=0,
+            terminal_cause=6,
+            accepted=0,
+            stage_c_plan_digest=0,
+        ),
+    ]
+
+    result = audit_breakaway_campaign(ticks)
+
+    assert result["matches_firmware"] is True, result["mismatches"]
     assert result["probe_replay"]["committed_observations"] == 0
-    assert len(result["probe_replay"]["uncommitted_raw"]) == 1
+
+
+def test_breakaway_replay_upward_probe_rejects_malformed_extrema() -> None:
+    builder = _BreakawayCampaignBuilder()
+    raw_tick = builder.probe_stream_ticks()[0]
+    raw_tick["records"][0][1]["stroke_min_displacement_counts"] = 1
+
+    with pytest.raises(ValueError, match="zero baseline"):
+        breakaway_replay_upward_probe(builder.search_grid, [builder.probe_plan_tick(), raw_tick])
+
+
+def test_breakaway_replay_upward_probe_rejects_nonzero_extrema_without_an_interval() -> None:
+    builder = _BreakawayCampaignBuilder()
+    raw_tick = builder.probe_stream_ticks()[0]
+    observation = raw_tick["records"][0][1]
+    observation["capture_max_interval_us"] = 0
+    observation["stroke_max_displacement_counts"] = 1
+
+    with pytest.raises(ValueError, match="no measured interval"):
+        breakaway_replay_upward_probe(builder.search_grid, [builder.probe_plan_tick(), raw_tick])
+
+
+def test_breakaway_replay_upward_probe_rejects_evidence_after_resolution() -> None:
+    builder = _BreakawayCampaignBuilder()
+    stream = builder.probe_stream_ticks(resolved_index=0)
+    stream.extend(builder.probe_stream_ticks(resolved_index=0)[:2])
+
+    with pytest.raises(ValueError, match="became terminal"):
+        breakaway_replay_upward_probe(builder.search_grid, [builder.probe_plan_tick(), *stream])
 
 
 def test_audit_breakaway_rejects_probe_decision_sequence_disagreement() -> None:
@@ -4076,6 +4252,26 @@ def test_audit_breakaway_rejects_probe_decision_digest_disagreement() -> None:
     decision_tick["records"][0][1]["plan_digest"] ^= 0xFF
 
     with pytest.raises(ValueError, match="does not chain to its owning plan"):
+        audit_breakaway_campaign(ticks)
+
+
+def test_audit_breakaway_rejects_probe_decision_disposition_disagreement() -> None:
+    builder = _BreakawayCampaignBuilder()
+    ticks = builder.accepted_campaign_ticks()
+    decision_tick = next(tick for tick in ticks if tick["event_id"] == 162)
+    decision_tick["records"][0][1]["disposition"] ^= 1
+
+    with pytest.raises(ValueError, match="disposition disagrees"):
+        audit_breakaway_campaign(ticks)
+
+
+def test_audit_breakaway_rejects_probe_evidence_after_its_result() -> None:
+    builder = _BreakawayCampaignBuilder()
+    ticks = builder.accepted_campaign_ticks()
+    result_index = next(index for index, tick in enumerate(ticks) if tick["event_id"] == 153)
+    ticks[result_index + 1 : result_index + 1] = builder.probe_stream_ticks(sequence=80)[:2]
+
+    with pytest.raises(ValueError, match="continues after"):
         audit_breakaway_campaign(ticks)
 
 
@@ -4131,7 +4327,7 @@ def test_audit_breakaway_campaign_accepts_a_non_nominatable_rung_leaving_a_colle
     ticks = [
         builder.probe_plan_tick(),
         *builder.probe_stream_ticks(),
-        builder.probe_derived_tick(),
+        builder.probe_result_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(
             margins=[
@@ -4182,7 +4378,7 @@ def test_audit_breakaway_flags_a_confirmation_collected_mask_that_omits_received
     ticks = [
         builder.probe_plan_tick(),
         *builder.probe_stream_ticks(),
-        builder.probe_derived_tick(),
+        builder.probe_result_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
@@ -4208,7 +4404,7 @@ def test_audit_breakaway_collected_mask_counts_a_stroke_with_no_reduced_record()
     ticks = [
         builder.probe_plan_tick(),
         *builder.probe_stream_ticks(),
-        builder.probe_derived_tick(),
+        builder.probe_result_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
@@ -4237,12 +4433,12 @@ def test_audit_breakaway_rejects_a_ninth_duplicate_confirmation_stroke() -> None
     confirmation = builder.confirmation_ticks()  # eight raw ticks (160..167) + terminal
     atom = _bw_synthetic_atom(75.0, 0.01, 0)
     ninth = _bw_raw_observation(
-        builder.run_sequence, 168, builder.confirmation_digest, 2, 0, 0, 0, *atom
+        builder.run_sequence, 418, builder.confirmation_digest, 2, 0, 0, 0, *atom
     )
     ninth_tick = {
         "event_id": 160,
         "timestamp_ticks": 5_800,
-        "sequence": 168,
+        "sequence": 418,
         "records": [_bw_record(ninth)],
     }
     # Splice the ninth raw observation in before the confirmation terminal.
@@ -4250,7 +4446,7 @@ def test_audit_breakaway_rejects_a_ninth_duplicate_confirmation_stroke() -> None
     ticks = [
         builder.probe_plan_tick(),
         *builder.probe_stream_ticks(),
-        builder.probe_derived_tick(),
+        builder.probe_result_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
@@ -4272,12 +4468,12 @@ def test_audit_breakaway_rejects_a_malformed_confirmation_aborted_before_its_ter
         {
             "event_id": 160,
             "timestamp_ticks": 5_800 + position,
-            "sequence": 100 + position,
+            "sequence": 410 + position,
             "records": [
                 _bw_record(
                     _bw_raw_observation(
                         builder.run_sequence,
-                        100 + position,
+                        410 + position,
                         builder.confirmation_digest,
                         2,
                         0,
@@ -4293,7 +4489,7 @@ def test_audit_breakaway_rejects_a_malformed_confirmation_aborted_before_its_ter
     ticks = [
         builder.probe_plan_tick(),
         *builder.probe_stream_ticks(),
-        builder.probe_derived_tick(),
+        builder.probe_result_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
@@ -4311,7 +4507,7 @@ def test_audit_breakaway_accepts_a_partial_confirmation_with_honest_collected_ma
     ticks = [
         builder.probe_plan_tick(),
         *builder.probe_stream_ticks(),
-        builder.probe_derived_tick(),
+        builder.probe_result_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
@@ -4334,7 +4530,7 @@ def _bw_streamed_identity_campaign() -> list[dict]:
     return [
         builder.probe_plan_tick(),
         *builder.probe_stream_ticks(),
-        builder.probe_derived_tick(),
+        builder.probe_result_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
@@ -4399,7 +4595,7 @@ def test_audit_breakaway_campaign_ranks_a_raw_observation_marker_by_its_phase() 
     ticks = [
         builder.probe_plan_tick(),
         *builder.probe_stream_ticks(),
-        builder.probe_derived_tick(),
+        builder.probe_result_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
@@ -4416,7 +4612,7 @@ def test_audit_breakaway_campaign_flags_a_workflow_duration_over_its_reserved_bu
     ticks = [
         builder.probe_plan_tick(),
         *builder.probe_stream_ticks(),
-        builder.probe_derived_tick(),
+        builder.probe_result_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
@@ -4437,7 +4633,7 @@ def test_audit_breakaway_campaign_rejects_reordered_phases() -> None:
         builder.probe_plan_tick(),
         *builder.probe_stream_ticks(),
         builder.discovery_plan_tick(),
-        builder.probe_derived_tick(),  # probe after discovery: reordered
+        builder.probe_result_tick(),  # probe result after discovery: reordered
         *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
         *builder.confirmation_ticks(),
@@ -4459,7 +4655,7 @@ def test_audit_breakaway_campaign_rejects_a_digest_chain_break() -> None:
     ticks = [
         builder.probe_plan_tick(),
         *builder.probe_stream_ticks(),
-        builder.probe_derived_tick(),
+        builder.probe_result_tick(),
         builder.discovery_plan_tick(prior_plan_digest=0xBAD_D1CE57),
         *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
@@ -4475,7 +4671,7 @@ def test_audit_breakaway_campaign_rejects_a_family_four_one_rung_confirmation() 
     ticks = [
         builder.probe_plan_tick(),
         *builder.probe_stream_ticks(),
-        builder.probe_derived_tick(),
+        builder.probe_result_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
         builder.confirmation_plan_tick(family_size=4),
@@ -4491,7 +4687,7 @@ def test_audit_breakaway_campaign_rejects_an_accepted_confirmation_with_incomple
     ticks = [
         builder.probe_plan_tick(),
         *builder.probe_stream_ticks(),
-        builder.probe_derived_tick(),
+        builder.probe_result_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
@@ -4522,7 +4718,7 @@ def test_audit_breakaway_campaign_rejects_an_accepted_confirmation_with_a_raw_in
     ticks = [
         builder.probe_plan_tick(),
         *builder.probe_stream_ticks(),
-        builder.probe_derived_tick(),
+        builder.probe_result_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
@@ -4546,7 +4742,7 @@ def test_audit_breakaway_campaign_rejects_a_confirmed_p_that_does_not_match_the_
     ticks = [
         builder.probe_plan_tick(),
         *builder.probe_stream_ticks(),
-        builder.probe_derived_tick(),
+        builder.probe_result_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
@@ -4571,7 +4767,7 @@ def test_audit_breakaway_campaign_rejects_a_wrong_confirmation_slot_schedule() -
     ticks = [
         builder.probe_plan_tick(),
         *builder.probe_stream_ticks(),
-        builder.probe_derived_tick(),
+        builder.probe_result_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
@@ -4594,7 +4790,7 @@ def test_audit_breakaway_campaign_rejects_an_accepted_confirmation_missing_raw_e
     ticks = [
         builder.probe_plan_tick(),
         *builder.probe_stream_ticks(),
-        builder.probe_derived_tick(),
+        builder.probe_result_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
@@ -4611,14 +4807,16 @@ def test_audit_breakaway_campaign_rejects_a_second_candidate_after_failure() -> 
     ticks = [
         builder.probe_plan_tick(),
         *builder.probe_stream_ticks(),
-        builder.probe_derived_tick(),
+        builder.probe_result_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
-        builder.confirmation_plan_tick(sequence=100),
-        *builder.confirmation_ticks(sequence=101, accepted=0, terminal_cause=15),
-        builder.confirmation_plan_tick(sequence=200),
-        *builder.confirmation_ticks(sequence=201, accepted=0, terminal_cause=15),
-        builder.campaign_terminal_tick(accepted=0, terminal_cause=15, stage_c_plan_digest=0),
+        builder.confirmation_plan_tick(sequence=400),
+        *builder.confirmation_ticks(sequence=410, accepted=0, terminal_cause=15),
+        builder.confirmation_plan_tick(sequence=500),
+        *builder.confirmation_ticks(sequence=510, accepted=0, terminal_cause=15),
+        builder.campaign_terminal_tick(
+            sequence=600, accepted=0, terminal_cause=15, stage_c_plan_digest=0
+        ),
     ]
     with pytest.raises(ValueError, match="second confirmation candidate"):
         audit_breakaway_campaign(ticks)
@@ -4629,7 +4827,7 @@ def test_audit_breakaway_campaign_rejects_stage_c_after_unsuccessful_confirmatio
     ticks = [
         builder.probe_plan_tick(),
         *builder.probe_stream_ticks(),
-        builder.probe_derived_tick(),
+        builder.probe_result_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
@@ -4647,7 +4845,7 @@ def test_audit_breakaway_campaign_flags_a_wrong_reported_digest_as_a_mismatch_no
     ticks = [
         builder.probe_plan_tick(plan_digest=builder.probe_digest ^ 0xFF),
         *builder.probe_stream_ticks(plan_digest=builder.probe_digest ^ 0xFF),
-        builder.probe_derived_tick(plan_digest=builder.probe_digest ^ 0xFF),
+        builder.probe_result_tick(plan_digest=builder.probe_digest ^ 0xFF),
         builder.discovery_plan_tick(prior_plan_digest=builder.probe_digest ^ 0xFF),
         *builder.discovery_ticks(prior_plan_digest=builder.probe_digest ^ 0xFF),
         builder.confirmation_plan_tick(),
@@ -4672,7 +4870,7 @@ def test_audit_breakaway_campaign_reports_additive_ladder_resolution_budget_exce
     ticks = [
         builder.probe_plan_tick(),
         *builder.probe_stream_ticks(),
-        builder.probe_derived_tick(),
+        builder.probe_result_tick(),
         builder.campaign_terminal_tick(
             phase=1, terminal_cause=10, accepted=0, stage_c_plan_digest=0
         ),
@@ -4690,7 +4888,7 @@ def test_audit_breakaway_campaign_reports_target_band_skipped_from_a_real_discov
     ticks = [
         builder.probe_plan_tick(),
         *builder.probe_stream_ticks(),
-        builder.probe_derived_tick(),
+        builder.probe_result_tick(),
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(terminal_cause=7, margins=[]),
         builder.campaign_terminal_tick(

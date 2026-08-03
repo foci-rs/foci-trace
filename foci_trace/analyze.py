@@ -3215,6 +3215,7 @@ def analysis_to_json(analysis: CaptureAnalysis) -> dict[str, object]:
             for report in analysis.devices
         ],
         "commissioning": commissioning_report_to_json(analysis.commissioning),
+        "breakaway_campaigns": analysis.breakaway_campaign_audits,
         "contour_segments": [
             {
                 "segment_index": segment.segment_index,
@@ -3262,6 +3263,8 @@ def velocity_analysis_to_json(analysis: CaptureAnalysis) -> dict[str, object]:
         result["integral_responses"] = analysis.velocity_integral_audits
     if analysis.acceptance_matrix_audits:
         result["acceptance_matrices"] = analysis.acceptance_matrix_audits
+    if analysis.breakaway_campaign_audits:
+        result["breakaway_campaigns"] = analysis.breakaway_campaign_audits
     return result
 
 

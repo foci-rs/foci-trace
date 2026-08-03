@@ -5357,9 +5357,6 @@ _BW_REQUIRED_HALF_WIDTH_FRACTION = 1.0 / 15.0
 # `BreakawayTerminalCause::Accepted` (breakaway_reporting.rs).
 _BW_TERMINAL_CAUSE_ACCEPTED = 21
 _BW_STATIONARITY_EXCESSIVE_DRIFT = 6
-_BW_PROBE_DISPOSITION_INERT = 0
-_BW_PROBE_DISPOSITION_TRANSIENT = 1
-_BW_PROBE_DISPOSITION_PRODUCTIVE = 2
 
 # `BREAKAWAY_STAGE_B_SCHEMA_REVISION` (combined_plan.rs): the rules revision
 # `AdditiveDiscoveryPlanned.schema_revision` reports, so an offline decoder can
@@ -5697,7 +5694,7 @@ def _bw_rung_response_bounds_percent(
 
 BREAKAWAY_EVENT_ID_NAMES = {
     152: "probe_plan",
-    153: "probe_derived",
+    153: "probe_result",
     154: "probe_terminal",
     155: "discovery_plan",
     156: "discovery_terminal",
@@ -5911,7 +5908,8 @@ def breakaway_build_search_grid(p_start_raw: int, p_top_raw: int) -> list[int]:
 
 def breakaway_probe_plan_digest(
     search_gains: list[int],
-    confidence_family_size: int,
+    motion_threshold_counts: int,
+    max_capture_interval_us: int,
     maximum_observations: int,
     *,
     workflow_digest: int,
@@ -5926,7 +5924,8 @@ def breakaway_probe_plan_digest(
     digest = _bw_fnv1a_extend(digest, len(search_gains), 1)
     for gain in search_gains:
         digest = _bw_fnv1a_extend(digest, gain, 2)
-    digest = _bw_fnv1a_extend(digest, confidence_family_size, 2)
+    digest = _bw_fnv1a_extend(digest, motion_threshold_counts, 4)
+    digest = _bw_fnv1a_extend(digest, max_capture_interval_us, 4)
     digest = _bw_fnv1a_extend(digest, maximum_observations, 1)
     digest = _bw_fnv1a_extend(digest, workflow_digest, 8)
     digest = _bw_fnv1a_extend(digest, target_velocity_rpm & 0xFFFF_FFFF, 4)
@@ -5937,166 +5936,120 @@ def breakaway_probe_plan_digest(
     return digest
 
 
-def _bw_classify_probe_observation(observation: dict[str, object]) -> dict[str, int | str]:
-    """Port the probe-local productive-response classifier.
-
-    The result is either a committed cursor disposition (`0` inert, `1`
-    transient, `2` productive) or the probe terminal cause and evidence reason
-    that firmware must report.  The `ExcessiveDrift` branch intentionally has
-    probe-local authority precedence; the shared sweep classifier is unchanged.
-    """
-    settled_low = int(observation["settled_rate_low_q"])
-    settled_high = int(observation["settled_rate_high_q"])
-    deficit_low = int(observation["deficit_low_q"])
-    deficit_high = int(observation["deficit_high_q"])
-    usable = int(observation["usable_torque_limit"])
-    hard = int(observation["hard_torque_limit"])
-    predicted = int(observation["predicted_torque_target_abs"])
-    stationarity = int(observation["stationarity_code"])
-    forward = int(observation["direction"]) == 0
-
-    valid_intervals = settled_low <= settled_high and deficit_low <= deficit_high and usable <= hard
-    wrong_direction = settled_high < 0 if forward else settled_low > 0
-    moving = settled_low > 0 if forward else settled_high < 0
-
-    def terminal(cause: int, exclusion_reason: int = 0) -> dict[str, int | str]:
-        return {
-            "kind": "terminal",
-            "terminal_cause": cause,
-            "exclusion_reason": exclusion_reason,
-        }
-
-    if stationarity == _BW_STATIONARITY_EXCESSIVE_DRIFT:
-        drift = observation.get("drift_ratio_ppm")
-        if (
-            not valid_intervals
-            or drift is None
-            or int(drift) == NO_REPORTABLE_DRIFT_RATIO_PPM
-            or int(drift) <= MAX_MOVING_DRIFT_PPM
-        ):
-            return terminal(4, 1)
-        if predicted >= hard or wrong_direction:
-            return terminal(6)
-        if predicted >= usable:
-            return terminal(5)
-        lag_state = observation.get("post_fit_lag_one_state")
-        if lag_state == 0:
-            return terminal(4, 1)
-        if lag_state == 1:
-            return terminal(4, 8)
-        if lag_state != 2:
-            return terminal(4, 1)
-        contains_zero = settled_low <= 0 <= settled_high
-        return {
-            "kind": "decision",
-            "disposition": (
-                _BW_PROBE_DISPOSITION_INERT if contains_zero else _BW_PROBE_DISPOSITION_TRANSIENT
-            ),
-        }
-
-    if not valid_intervals:
-        return terminal(4, 1)
-    if predicted >= hard or wrong_direction:
-        return terminal(6)
-    if stationarity != 0:
-        return terminal(4, stationarity + 4)
-    if not moving:
-        return {"kind": "decision", "disposition": _BW_PROBE_DISPOSITION_INERT}
-    if predicted >= usable:
-        return terminal(5)
-    deficit_resolved = deficit_low > 0 if forward else deficit_high < 0
-    if not deficit_resolved:
-        return {"kind": "decision", "disposition": _BW_PROBE_DISPOSITION_PRODUCTIVE}
-    if int(observation["disturbance_present"]) == 0:
-        return terminal(4, 1)
-    return {"kind": "decision", "disposition": _BW_PROBE_DISPOSITION_PRODUCTIVE}
-
-
 @dataclass
-class _BreakawayProbeCursorReplay:
-    """Host-side port of one directional `BreakawaySearchCursor`."""
+class _UpwardBreakawayProbeReplay:
+    """Host-side port of the shared `UpwardBreakawayCursor`."""
 
     rung_count: int
-    lo: int = 0
-    hi: int = 0
-    stage: str = "bisecting"
-    pending_index: int = 0
+    rung_index: int = 0
+    stage: str = "initial_forward"
     observations: int = 0
-    boundary_inert: int | None = None
-    boundary_moving: int | None = None
-    lower_disposition_mask: int = 0
+    initial_forward_moved: bool = False
+    repeat_forward_moved: bool = False
 
     @classmethod
-    def start(cls, rung_count: int) -> "_BreakawayProbeCursorReplay":
+    def start(cls, rung_count: int) -> "_UpwardBreakawayProbeReplay":
         if rung_count <= 0:
             raise ValueError("probe cursor requires a non-empty search grid")
-        return cls(rung_count, hi=rung_count, pending_index=rung_count // 2)
+        return cls(rung_count)
 
-    def advance(self, disposition: int) -> tuple[str, int | dict[str, int | None]]:
-        if disposition not in (
-            _BW_PROBE_DISPOSITION_INERT,
-            _BW_PROBE_DISPOSITION_TRANSIENT,
-            _BW_PROBE_DISPOSITION_PRODUCTIVE,
-        ):
-            raise ValueError("probe cursor disposition is invalid")
+    def expected_stroke(self) -> tuple[int, int, int]:
+        """Return `(rung_index, direction, direction-local slot_index)`."""
+        if self.stage == "terminal":
+            raise ValueError("probe evidence continues after the cursor became terminal")
+        return {
+            "initial_forward": (self.rung_index, 0, 0),
+            "initial_reverse": (self.rung_index, 1, 0),
+            "repeat_forward": (self.rung_index, 0, 1),
+            "repeat_reverse": (self.rung_index, 1, 1),
+        }[self.stage]
+
+    def advance(self, moved: bool) -> tuple[str, int | None]:
         self.observations += 1
-        productive = disposition == _BW_PROBE_DISPOSITION_PRODUCTIVE
-        if self.stage == "bisecting":
-            tested = self.pending_index
-            if productive:
-                self.hi = tested
-            else:
-                self.lo = tested + 1
-                self.lower_disposition_mask = 1 << disposition
-            if self.lo < self.hi:
-                self.pending_index = self.lo + (self.hi - self.lo) // 2
-                return "probe", self.pending_index
-            if self.lo >= self.rung_count:
-                self.stage = "confirm_all_inert"
-                self.pending_index = self.rung_count - 1
-                return "probe", self.pending_index
-            self.boundary_moving = self.lo
-            self.boundary_inert = self.lo - 1 if self.lo > 0 else None
-            if self.boundary_inert is not None:
-                self.stage = "confirm_inert"
-                self.pending_index = self.boundary_inert
-            else:
-                self.stage = "confirm_moving"
-                self.pending_index = self.lo
-            return "probe", self.pending_index
-        if self.stage == "confirm_inert":
-            if productive:
-                return "terminal", {"terminal_cause": 2, "exclusion_reason": 0}
-            self.lower_disposition_mask |= 1 << disposition
-            self.stage = "confirm_moving"
-            if self.boundary_moving is None:
-                raise ValueError("probe cursor has no productive boundary")
-            self.pending_index = self.boundary_moving
-            return "probe", self.pending_index
-        if self.stage == "confirm_moving":
-            if not productive:
-                return "terminal", {"terminal_cause": 2, "exclusion_reason": 0}
-            if self.boundary_moving is None:
-                raise ValueError("probe cursor has no productive boundary")
-            return "resolved", {
-                "inert_index": self.boundary_inert,
-                "moving_index": self.boundary_moving,
-                "observations": self.observations,
-                "lower_disposition_mask": self.lower_disposition_mask,
-            }
-        if self.stage == "confirm_all_inert":
-            cause = 2 if productive else 1
-            return "terminal", {"terminal_cause": cause, "exclusion_reason": 0}
-        raise ValueError(f"unknown probe cursor stage {self.stage}")
+        if self.stage == "initial_forward":
+            self.initial_forward_moved = moved
+            self.stage = "initial_reverse"
+            return "probe", None
+        if self.stage == "initial_reverse":
+            if self.initial_forward_moved and moved:
+                self.stage = "repeat_forward"
+                return "probe", None
+            return self._advance_rung()
+        if self.stage == "repeat_forward":
+            self.repeat_forward_moved = moved
+            self.stage = "repeat_reverse"
+            return "probe", None
+        if self.stage == "repeat_reverse":
+            if self.repeat_forward_moved and moved:
+                self.stage = "terminal"
+                return "resolved", self.rung_index
+            return self._advance_rung()
+        raise ValueError("probe evidence continues after the cursor became terminal")
+
+    def _advance_rung(self) -> tuple[str, int | None]:
+        self.rung_index += 1
+        if self.rung_index >= self.rung_count:
+            self.stage = "terminal"
+            return "terminal", 1
+        self.stage = "initial_forward"
+        self.initial_forward_moved = False
+        self.repeat_forward_moved = False
+        return "probe", None
 
 
-def _bw_replay_probe(ticks: list[dict[str, object]], search_grid: list[int]) -> dict[str, object]:
-    """Replay committed v14 probe decisions from raw evidence.
+def _bw_classify_probe_excursion(
+    observation: dict[str, object], motion_threshold_counts: int, max_capture_interval_us: int
+) -> tuple[bool | None, int | None]:
+    """Return `(moved, terminal_cause)` from physical probe evidence alone."""
+    interval = int(observation["capture_max_interval_us"])
+    if interval == 0:
+        if (
+            int(observation["stroke_min_displacement_counts"]) != 0
+            or int(observation["stroke_max_displacement_counts"]) != 0
+        ):
+            raise ValueError("probe record with no measured interval has nonzero extrema")
+        return None, 22
+    if interval > max_capture_interval_us:
+        return None, 22
+    predicted = int(observation["predicted_torque_target_abs"])
+    if predicted >= int(observation["hard_torque_limit"]):
+        return None, 6
+    commanded, opposite = _bw_probe_excursion_counts(observation)
+    if commanded >= motion_threshold_counts:
+        moved = True
+    elif opposite >= motion_threshold_counts:
+        return None, 6
+    else:
+        moved = False
+    if moved and predicted >= int(observation["usable_torque_limit"]):
+        return None, 5
+    return moved, None
 
-    A raw observation is provisional until the immediately following recovered
-    decision names it.  A final raw record without a decision is retained as a
-    recovery-failure breadcrumb and never mutates the reconstructed cursor.
-    """
+
+def _bw_probe_excursion_counts(observation: dict[str, object]) -> tuple[int, int]:
+    """Derive commanded and opposite excursion from one structural record."""
+    minimum = int(observation["stroke_min_displacement_counts"])
+    maximum = int(observation["stroke_max_displacement_counts"])
+    if minimum > 0 or maximum < 0:
+        raise ValueError("probe excursion extrema do not contain the zero baseline")
+    forward = int(observation["direction"]) == 0
+    commanded = maximum if forward else -minimum
+    opposite = -minimum if forward else maximum
+    return commanded, opposite
+
+
+def breakaway_replay_upward_probe(
+    search_grid: list[int], ticks: list[dict[str, object]]
+) -> dict[str, object]:
+    """Reconstruct the v15 upward walk without trusting firmware decisions."""
+    if not ticks:
+        raise ValueError("upward probe replay requires campaign ticks")
+    plan = _bw_single_record(ticks[0], "breakaway_probe_planned")
+    threshold = int(plan["motion_threshold_counts"])
+    max_interval = int(plan["max_capture_interval_us"])
+    maximum_observations = int(plan["max_observations"])
+    if threshold <= 0 or max_interval <= 0 or maximum_observations <= 0:
+        raise ValueError("upward probe plan contains a zero decision constant or budget")
     streamed: list[dict[str, object]] = []
     for tick in ticks:
         if tick["event_id"] == 160:
@@ -6105,24 +6058,64 @@ def _bw_replay_probe(ticks: list[dict[str, object]], search_grid: list[int]) -> 
                 streamed.append(raw[0])
         elif tick["event_id"] == 162:
             streamed.extend(_bw_tick_records_by_kind(tick, "breakaway_probe_decision"))
+    raw_count = sum(record.get("record_kind") == "breakaway_raw_observation" for record in streamed)
+    if raw_count > maximum_observations:
+        raise ValueError("probe raw evidence exceeds its planned observation budget")
 
-    cursors = [_BreakawayProbeCursorReplay.start(len(search_grid)) for _ in range(2)]
-    resolved: list[dict[str, int | None] | None] = [None, None]
+    cursor = _UpwardBreakawayProbeReplay.start(len(search_grid))
+    resolved_rung_index: int | None = None
     committed = 0
     uncommitted_raw: list[dict[str, object]] = []
+    observation_audit: list[dict[str, object]] = []
     expected_terminal: dict[str, int | str] | None = None
     index = 0
     while index < len(streamed):
         raw = streamed[index]
         if raw.get("record_kind") != "breakaway_raw_observation":
             raise ValueError("probe decision has no preceding raw observation")
-        classification = _bw_classify_probe_observation(raw)
+        expected_rung, expected_direction, expected_slot = cursor.expected_stroke()
+        for field_name, expected in (
+            ("rung_index", expected_rung),
+            ("direction", expected_direction),
+            ("slot_index", expected_slot),
+        ):
+            if int(raw[field_name]) != expected:
+                raise ValueError(
+                    f"probe raw observation {field_name} does not match the reconstructed cursor"
+                )
+        commanded_excursion, opposite_excursion = _bw_probe_excursion_counts(raw)
+        moved, terminal_cause = _bw_classify_probe_excursion(raw, threshold, max_interval)
+        observation_report = {
+            "evidence_sequence": int(raw["evidence_sequence"]),
+            "rung_index": int(raw["rung_index"]),
+            "p_raw": search_grid[int(raw["rung_index"])],
+            "direction": int(raw["direction"]),
+            "slot_index": int(raw["slot_index"]),
+            "stroke_min_displacement_counts": int(raw["stroke_min_displacement_counts"]),
+            "stroke_max_displacement_counts": int(raw["stroke_max_displacement_counts"]),
+            "commanded_excursion_counts": commanded_excursion,
+            "opposite_excursion_counts": opposite_excursion,
+            "capture_max_interval_us": int(raw["capture_max_interval_us"]),
+            "moved": moved,
+            "terminal_cause": terminal_cause,
+            "committed": False,
+            "stationarity_diagnostic": {
+                "stationarity_code": int(raw["stationarity_code"]),
+                "settled_rate_low_q": int(raw["settled_rate_low_q"]),
+                "settled_rate_high_q": int(raw["settled_rate_high_q"]),
+                "drift_ratio_ppm": int(raw["drift_ratio_ppm"]),
+                "post_fit_lag_one_state": int(raw["post_fit_lag_one_state"]),
+            },
+        }
+        observation_audit.append(observation_report)
         decision = streamed[index + 1] if index + 1 < len(streamed) else None
         if decision is None or decision.get("record_kind") != "breakaway_probe_decision":
             if index + 1 != len(streamed):
                 raise ValueError("uncommitted probe raw observation is not the final probe record")
             uncommitted_raw.append(raw)
-            expected_terminal = classification if classification["kind"] == "terminal" else None
+            expected_terminal = (
+                {"terminal_cause": terminal_cause} if terminal_cause is not None else None
+            )
             break
 
         if int(decision["evidence_sequence"]) != int(raw["evidence_sequence"]) + 1:
@@ -6130,27 +6123,19 @@ def _bw_replay_probe(ticks: list[dict[str, object]], search_grid: list[int]) -> 
         for field_name in ("run_sequence", "plan_digest", "direction", "rung_index"):
             if int(decision[field_name]) != int(raw[field_name]):
                 raise ValueError(f"probe decision {field_name} disagrees with its raw observation")
-        if classification["kind"] != "decision":
+        if terminal_cause is not None:
             raise ValueError("probe decision commits raw evidence that independently terminates")
-        if int(decision["disposition"]) != int(classification["disposition"]):
+        if int(decision["disposition"]) != int(bool(moved)):
             raise ValueError("probe decision disposition disagrees with independent classification")
-
-        direction = int(raw["direction"])
-        if direction == 1 and resolved[0] is None:
-            raise ValueError("reverse probe decision precedes the resolved forward direction")
-        cursor = cursors[direction]
-        if resolved[direction] is not None:
-            raise ValueError("probe decision follows a resolved direction")
-        if int(raw["rung_index"]) != cursor.pending_index:
-            raise ValueError(
-                "probe decision rung does not match the independently reconstructed cursor"
-            )
-        step, value = cursor.advance(int(classification["disposition"]))
+        observation_report["committed"] = True
+        step, value = cursor.advance(bool(moved))
         committed += 1
+        if committed > maximum_observations:
+            raise ValueError("probe evidence exceeds its planned observation budget")
         if step == "resolved":
-            resolved[direction] = value  # type: ignore[assignment]
+            resolved_rung_index = int(value)  # type: ignore[arg-type]
         elif step == "terminal":
-            expected_terminal = value  # type: ignore[assignment]
+            expected_terminal = {"terminal_cause": int(value)}
             if index + 2 != len(streamed):
                 raise ValueError(
                     "probe evidence continues after an independently terminal decision"
@@ -6158,43 +6143,15 @@ def _bw_replay_probe(ticks: list[dict[str, object]], search_grid: list[int]) -> 
         index += 2
 
     return {
-        "directions": resolved,
+        "resolved_rung_index": resolved_rung_index,
+        "breakaway_p_raw": (
+            search_grid[resolved_rung_index] if resolved_rung_index is not None else None
+        ),
         "committed_observations": committed,
         "uncommitted_raw": uncommitted_raw,
+        "observations": observation_audit,
         "expected_terminal": expected_terminal,
     }
-
-
-def breakaway_replay_binary_search(rung_count: int, moving_index: int) -> int:
-    """Replay `BreakawaySearchCursor`'s bisection and return its stroke count.
-
-    Port of `breakaway_search.rs`'s `advance_bisecting`/`advance_confirm_*`:
-    given the grid length and the *known resolved* moving index (recovered by
-    locating `moving_p_raw` in the reconstructed search grid), replay the
-    exact bisection trajectory -- the outcome fed back at each tested index is
-    determined purely by comparing it against `moving_index`, so the
-    trajectory is reproducible without the firmware ever having reported it.
-    Returns the stroke count including the mandatory bracket-confirmation
-    repeat(s) (spec section 4): one inert-confirm stroke when a predecessor
-    grid index exists, plus one moving-confirm stroke, always.
-    """
-    if not 0 <= moving_index < rung_count:
-        raise ValueError("moving index is outside the search grid")
-    lo, hi = 0, rung_count
-    observations = 0
-    while lo < hi:
-        tested = lo + (hi - lo) // 2
-        observations += 1
-        if tested >= moving_index:
-            hi = tested
-        else:
-            lo = tested + 1
-    if lo != moving_index:
-        raise ValueError("bisection did not resolve to the reported moving index")
-    if moving_index > 0:
-        observations += 1  # confirm inert
-    observations += 1  # confirm moving
-    return observations
 
 
 def breakaway_realize_candidate_additive_ladder(
@@ -6456,7 +6413,8 @@ def audit_breakaway_campaign(
     expected_probe_digest = (
         breakaway_probe_plan_digest(
             search_grid[: int(probe_planned["search_count"])],
-            int(probe_planned["family_size"]),
+            int(probe_planned["motion_threshold_counts"]),
+            int(probe_planned["max_capture_interval_us"]),
             int(probe_planned["max_observations"]),
             workflow_digest=int(probe_planned["workflow_digest"]),
             target_velocity_rpm=int(probe_planned["target_velocity_rpm"]),
@@ -6476,57 +6434,18 @@ def audit_breakaway_campaign(
             % (probe_planned["plan_digest"], expected_probe_digest)
         )
 
-    directional_breakaways: list[dict[str, object]] = []
-    for tick in ticks:
-        if tick["event_id"] == 153:
-            directional_breakaways.extend(
-                _bw_tick_records_by_kind(tick, "breakaway_directional_breakaway")
-            )
-            if int(tick["records"][0][1]["plan_digest"]) != int(probe_planned["plan_digest"]):  # type: ignore[index]
-                raise ValueError("breakaway probe-derived record's plan_digest does not chain")
-
-    for breakaway in directional_breakaways:
-        moving_p_raw = int(breakaway["moving_p_raw"])
-        inert_present = int(breakaway["inert_present"])
-        if moving_p_raw not in search_grid:
-            mismatches.append(
-                f"directional breakaway moving_p_raw {moving_p_raw} is not on the search grid"
-            )
-            continue
-        moving_index = search_grid.index(moving_p_raw)
-        if inert_present == 1:
-            inert_p_raw = int(breakaway["inert_p_raw"])
-            if moving_index == 0 or search_grid[moving_index - 1] != inert_p_raw:
-                mismatches.append(
-                    "directional breakaway bracket is not adjacent on the search grid: "
-                    f"inert_p_raw={inert_p_raw} moving_p_raw={moving_p_raw}"
-                )
-        elif moving_index != 0:
-            mismatches.append(
-                "directional breakaway reports no inert endpoint but moving_p_raw "
-                f"{moving_p_raw} is not the grid's smallest rung"
-            )
-        try:
-            expected_observations = breakaway_replay_binary_search(len(search_grid), moving_index)
-        except ValueError as error:
-            mismatches.append(f"directional breakaway bisection replay failed: {error}")
-            continue
-        if expected_observations != int(breakaway["observations"]):
-            mismatches.append(
-                "directional breakaway observations: firmware=%d offline=%d"
-                % (breakaway["observations"], expected_observations)
-            )
-        if int(breakaway["observations"]) > int(probe_planned["max_observations"]):
-            mismatches.append(
-                "directional breakaway observations %d exceeds the planned maximum %d"
-                % (breakaway["observations"], probe_planned["max_observations"])
-            )
-
-    resolved_breakaway_raw = (
-        min(int(item["moving_p_raw"]) for item in directional_breakaways)
-        if directional_breakaways
+    probe_result_ticks = [tick for tick in ticks if tick["event_id"] == 153]
+    if len(probe_result_ticks) > 1:
+        raise ValueError("breakaway campaign reports more than one probe result")
+    probe_result = (
+        _bw_single_record(probe_result_ticks[0], "breakaway_probe_resolved")
+        if probe_result_ticks
         else None
     )
+    if probe_result is not None and int(probe_result["plan_digest"]) != int(
+        probe_planned["plan_digest"]
+    ):
+        raise ValueError("breakaway probe result does not chain to its own plan digest")
 
     probe_terminal_tick = next((tick for tick in ticks if tick["event_id"] == 154), None)
     probe_terminal: dict[str, object] | None = None
@@ -6534,14 +6453,26 @@ def audit_breakaway_campaign(
         probe_terminal = _bw_single_record(probe_terminal_tick, "breakaway_probe_terminal")
         if int(probe_terminal["plan_digest"]) != int(probe_planned["plan_digest"]):
             raise ValueError("breakaway probe terminal does not chain to its own plan digest")
-        if (
-            int(probe_terminal["fault_checkpoint"]) != 0
-            and int(probe_terminal["terminal_cause"]) != 6
-        ):
+        if int(probe_terminal["fault_checkpoint"]) != 0 and int(
+            probe_terminal["terminal_cause"]
+        ) not in (6, 22):
             mismatches.append(
                 "probe terminal reports a fault checkpoint for non-safety cause %d"
                 % probe_terminal["terminal_cause"]
             )
+
+    if probe_result is not None and probe_terminal is not None:
+        raise ValueError("breakaway probe reports both a result and a terminal")
+    probe_end_tick = probe_result_ticks[0] if probe_result_ticks else probe_terminal_tick
+    if probe_end_tick is not None:
+        probe_end_index = ticks.index(probe_end_tick)
+        for later in ticks[probe_end_index + 1 :]:
+            later_is_probe_raw = later["event_id"] == 160 and any(
+                int(record["phase"]) == _BW_RAW_OBSERVATION_PHASE_PROBE
+                for record in _bw_tick_records_by_kind(later, "breakaway_raw_observation")
+            )
+            if later["event_id"] == 162 or later_is_probe_raw:
+                raise ValueError("probe evidence continues after its result or terminal")
 
     probe_stream_present = any(
         tick["event_id"] == 162
@@ -6554,62 +6485,55 @@ def audit_breakaway_campaign(
         )
         for tick in ticks
     )
-    v14_probe_summary = any(
-        breakaway.get("lower_disposition_mask") is not None for breakaway in directional_breakaways
+    probe_replay = (
+        breakaway_replay_upward_probe(search_grid, ticks) if probe_stream_present else None
     )
-    if v14_probe_summary and not probe_stream_present:
-        raise ValueError("v14 directional breakaway has no streamed probe decisions")
-    probe_replay = _bw_replay_probe(ticks, search_grid) if probe_stream_present else None
+    if probe_result is not None and probe_replay is None:
+        raise ValueError("breakaway probe result has no raw evidence to replay")
     if probe_replay is not None:
-        reported_by_direction = {
-            int(record["direction"]): record for record in directional_breakaways
-        }
-        if len(reported_by_direction) != len(directional_breakaways):
-            raise ValueError("probe-derived records repeat a direction")
-        for direction, replayed in enumerate(probe_replay["directions"]):  # type: ignore[index]
-            reported = reported_by_direction.get(direction)
-            if replayed is None:
-                if reported is not None:
-                    mismatches.append(
-                        f"direction {direction} reports a breakaway the probe replay did not resolve"
-                    )
-                continue
-            if reported is None:
+        replayed_rung = probe_replay["resolved_rung_index"]
+        if replayed_rung is None:
+            if probe_result is not None:
                 mismatches.append(
-                    f"direction {direction} probe replay resolved without a directional record"
+                    "firmware reports a probe result the upward replay did not resolve"
                 )
-                continue
-            expected_inert_index = replayed["inert_index"]
-            expected_inert_present = int(expected_inert_index is not None)
-            if int(reported["inert_present"]) != expected_inert_present:
-                mismatches.append(
-                    f"direction {direction} inert_present disagrees with probe replay"
-                )
-            elif (
-                expected_inert_index is not None
-                and int(reported["inert_p_raw"]) != search_grid[int(expected_inert_index)]
+        elif probe_result is None:
+            mismatches.append("upward replay resolved without a firmware probe result")
+        else:
+            for field, expected in (
+                ("rung_index", replayed_rung),
+                ("breakaway_p_raw", probe_replay["breakaway_p_raw"]),
+                ("motion_threshold_counts", probe_planned["motion_threshold_counts"]),
+                ("observation_count", probe_replay["committed_observations"]),
             ):
-                mismatches.append(f"direction {direction} inert_p_raw disagrees with probe replay")
-            expected_moving_p = search_grid[int(replayed["moving_index"])]
-            if int(reported["moving_p_raw"]) != expected_moving_p:
-                mismatches.append(f"direction {direction} moving_p_raw disagrees with probe replay")
-            for field in ("observations", "lower_disposition_mask"):
-                if int(reported[field]) != int(replayed[field]):
+                if int(probe_result[field]) != int(expected):
                     mismatches.append(
-                        f"direction {direction} {field}: firmware={reported[field]} "
-                        f"offline={replayed[field]}"
+                        f"probe result {field}: firmware={probe_result[field]} offline={expected}"
                     )
         expected_terminal = probe_replay["expected_terminal"]
         if expected_terminal is not None:
             if probe_terminal is None:
                 mismatches.append("probe replay terminated but firmware reported no probe terminal")
             else:
-                for field in ("terminal_cause", "exclusion_reason"):
-                    if int(probe_terminal[field]) != int(expected_terminal[field]):
-                        mismatches.append(
-                            f"probe {field}: firmware={probe_terminal[field]} "
-                            f"offline={expected_terminal[field]}"
-                        )
+                if int(probe_terminal["terminal_cause"]) != int(
+                    expected_terminal["terminal_cause"]
+                ):
+                    mismatches.append(
+                        "probe terminal_cause: firmware=%d offline=%d"
+                        % (probe_terminal["terminal_cause"], expected_terminal["terminal_cause"])
+                    )
+        elif probe_replay["uncommitted_raw"] and (
+            probe_terminal is None or int(probe_terminal["terminal_cause"]) != 6
+        ):
+            mismatches.append(
+                "probe raw observation has no decision without a recovery safety terminal"
+            )
+
+    resolved_breakaway_raw = (
+        int(probe_replay["breakaway_p_raw"])
+        if probe_replay is not None and probe_replay["breakaway_p_raw"] is not None
+        else None
+    )
 
     discovery_planned_tick = next((tick for tick in ticks if tick["event_id"] == 155), None)
     discovery_terminal_tick = next((tick for tick in ticks if tick["event_id"] == 156), None)
@@ -6631,7 +6555,7 @@ def audit_breakaway_campaign(
         ceiling_raw = int(discovery_planned["ceiling_p_raw"])
         if resolved_breakaway_raw is not None and breakaway_raw != resolved_breakaway_raw:
             mismatches.append(
-                "discovery breakaway_p_raw: reported=%d offline (min directional moving)=%d"
+                "discovery breakaway_p_raw: reported=%d offline upward replay=%d"
                 % (breakaway_raw, resolved_breakaway_raw)
             )
         # The per-rung ladder no longer rides the wire: the
@@ -7194,7 +7118,7 @@ def audit_breakaway_campaign(
         "probe_planned": probe_planned,
         "probe_digest_verified": probe_digest_verified,
         "search_grid": search_grid,
-        "directional_breakaways": directional_breakaways,
+        "probe_result": probe_result,
         "resolved_breakaway_p_raw": resolved_breakaway_raw,
         "probe_terminal": probe_terminal,
         "probe_replay": probe_replay,
