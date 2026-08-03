@@ -3968,6 +3968,16 @@ def test_breakaway_plan_additive_discovery_ladder_chooses_the_spec_worked_exampl
     ]
 
 
+def test_breakaway_plan_admits_the_measured_stepper_x_geometry() -> None:
+    """Replay must share firmware's provisional 3/2 characterization guard."""
+    best = breakaway_plan_additive_discovery_ladder(384, 543, 7_456, 4, 1_863_112)
+
+    assert best is not None
+    assert best["rung_count"] == 32
+    assert best["gains"][:3] == [384, 543, 774]
+    assert best["gains"][-1] == 7_456
+
+
 def test_breakaway_replay_upward_probe_reconstructs_the_128_stroke_bound() -> None:
     builder = _BreakawayCampaignBuilder()
     builder.p_start_raw = 1

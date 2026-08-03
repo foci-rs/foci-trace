@@ -5313,9 +5313,9 @@ _BW_MIN_STRUCTURAL_RUNGS = 5
 _BW_MAX_SWEEP_RUNGS = 32
 
 # `MAX_ADDITIVE_GAIN_RATIO_NUM` / `_DEN` (breakaway_plan.rs): provisional
-# additive first-gap resolution guard, 181/128.
-_BW_MAX_ADDITIVE_GAIN_RATIO_NUM = 181
-_BW_MAX_ADDITIVE_GAIN_RATIO_DEN = 128
+# additive first-gap resolution guard, 3/2.
+_BW_MAX_ADDITIVE_GAIN_RATIO_NUM = 3
+_BW_MAX_ADDITIVE_GAIN_RATIO_DEN = 2
 
 # `SWEEP_DIRECTION_COUNT` (sweep_plan.rs).
 _BW_SWEEP_DIRECTION_COUNT = 2
