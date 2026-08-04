@@ -104,6 +104,7 @@ EVENT_COMMISSION_BREAKAWAY_RAW_OBSERVATION = 160
 EVENT_COMMISSION_BREAKAWAY_DISCOVERY_MARGIN = 161
 EVENT_COMMISSION_BREAKAWAY_PROBE_DECISION = 162
 EVENT_COMMISSION_BREAKAWAY_RECOVERY_REST_REJECTED = 163
+EVENT_COMMISSION_BREAKAWAY_RECOVERY_ORIGIN_MISMATCH = 164
 EVENT_COMMISSION_DIAGNOSTIC_WARNING = 200
 
 # Every breakaway-campaign marker event id (152-162), in phase-emission order.
@@ -126,6 +127,7 @@ BREAKAWAY_CAMPAIGN_EVENT_IDS = (
     EVENT_COMMISSION_BREAKAWAY_DISCOVERY_MARGIN,
     EVENT_COMMISSION_BREAKAWAY_PROBE_DECISION,
     EVENT_COMMISSION_BREAKAWAY_RECOVERY_REST_REJECTED,
+    EVENT_COMMISSION_BREAKAWAY_RECOVERY_ORIGIN_MISMATCH,
 )
 
 _LEVEL_NAMES = {
@@ -2242,6 +2244,9 @@ BREAKAWAY_TAG_PROBE_DECISION = 13
 # rest window, so an accepted campaign carries none and a failing one
 # normally carries exactly the single rejection that ended it.
 BREAKAWAY_TAG_RECOVERY_REST_REJECTED = 14
+# Protocol 18. Emitted immediately before a `RecoveryOriginMismatch` fault,
+# carrying the measurement the fault itself does not.
+BREAKAWAY_TAG_RECOVERY_ORIGIN_MISMATCH = 15
 
 
 def decode_breakaway_record(
@@ -2839,6 +2844,52 @@ def decode_breakaway_record(
         decoded["scored_displacement_span_counts"] = scored_max - scored_min
         decoded["one_count_fallback_available"] = scored_max - scored_min <= 1
         decoded["record_kind"] = "breakaway_recovery_rest_rejected"
+    elif (
+        tag == BREAKAWAY_TAG_RECOVERY_ORIGIN_MISMATCH
+        and protocol_version >= 18
+        and len(payload) == 38
+    ):
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest", "Q"),
+                ("phase", "B"),
+                ("stage", "B"),
+                ("rung_index", "B"),
+                ("slot_index", "B"),
+                ("direction", "B"),
+                ("p_raw", "H"),
+                ("expected_start_offset_counts", "i"),
+                ("observed_position_counts", "i"),
+                ("delta_counts", "i"),
+                ("position_window_counts", "I"),
+            ),
+        )
+        if decoded["phase"] not in (0, 1, 2):
+            raise DecodeError("recovery origin mismatch phase is invalid")
+        if decoded["direction"] not in (0, 1):
+            raise DecodeError("recovery origin mismatch direction is invalid")
+        expected = int(decoded["expected_start_offset_counts"])
+        observed = int(decoded["observed_position_counts"])
+        delta = int(decoded["delta_counts"])
+        if observed - expected != delta:
+            raise DecodeError("recovery origin mismatch delta contradicts its offsets")
+        # The fault fires on exact inequality, so a zero delta cannot reach here.
+        if delta == 0:
+            raise DecodeError("recovery origin mismatch reports no discrepancy")
+        # The window check runs first, so a start offset beyond the window is
+        # contained rather than faulted and must never reach this record.
+        window = int(decoded["position_window_counts"])
+        if abs(expected) > window:
+            raise DecodeError("recovery origin mismatch start offset exceeds its window")
+        decoded["delta_abs_counts"] = abs(delta)
+        # The decisive derived fact: a single-count discrepancy is one
+        # outer-safety encoder sample landing between the tick that captured the
+        # origin and the tick recovery began -- a race, not a runaway.
+        decoded["single_sample_race"] = abs(delta) == 1
+        decoded["record_kind"] = "breakaway_recovery_origin_mismatch"
     else:
         raise DecodeError(f"unknown breakaway evidence tag {tag} (length {len(payload)})")
     cursor.finish()

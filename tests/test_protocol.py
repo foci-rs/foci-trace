@@ -3124,6 +3124,7 @@ def test_breakaway_event_ids_match_the_firmware_trace_events_table() -> None:
         EVENT_COMMISSION_BREAKAWAY_PROBE_TERMINAL,
         EVENT_COMMISSION_BREAKAWAY_RAW_OBSERVATION,
         EVENT_COMMISSION_BREAKAWAY_RECOVERY_REST_REJECTED,
+        EVENT_COMMISSION_BREAKAWAY_RECOVERY_ORIGIN_MISMATCH,
         EVENT_COMMISSION_REST_SELECTION_DIAGNOSTIC,
     )
 
@@ -3140,6 +3141,7 @@ def test_breakaway_event_ids_match_the_firmware_trace_events_table() -> None:
     assert EVENT_COMMISSION_BREAKAWAY_DISCOVERY_MARGIN == 161
     assert EVENT_COMMISSION_BREAKAWAY_PROBE_DECISION == 162
     assert EVENT_COMMISSION_BREAKAWAY_RECOVERY_REST_REJECTED == 163
+    assert EVENT_COMMISSION_BREAKAWAY_RECOVERY_ORIGIN_MISMATCH == 164
     assert BREAKAWAY_CAMPAIGN_EVENT_IDS == (
         EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN,
         EVENT_COMMISSION_BREAKAWAY_PROBE_RESULT,
@@ -3153,6 +3155,7 @@ def test_breakaway_event_ids_match_the_firmware_trace_events_table() -> None:
         EVENT_COMMISSION_BREAKAWAY_DISCOVERY_MARGIN,
         EVENT_COMMISSION_BREAKAWAY_PROBE_DECISION,
         EVENT_COMMISSION_BREAKAWAY_RECOVERY_REST_REJECTED,
+        EVENT_COMMISSION_BREAKAWAY_RECOVERY_ORIGIN_MISMATCH,
     )
 
 
@@ -3467,3 +3470,85 @@ def test_decode_breakaway_rest_rejected_rejects_inconsistent_displacement() -> N
 
     with pytest.raises(DecodeError, match="scored displacement is inconsistent"):
         decode_breakaway_record(_bw_rest_rejected(scored=(2, -2, 1)), protocol_version=18)
+
+
+def _bw_origin_mismatch(
+    *,
+    phase: int = 1,
+    direction: int = 1,
+    expected: int = -1481,
+    observed: int = -1480,
+    delta: int | None = None,
+    window: int = 4000,
+) -> bytes:
+    """Assemble the firmware's tag-15 golden bytes, field by field."""
+    if delta is None:
+        delta = observed - expected
+    payload = bytearray([15])
+    payload += struct.pack("<I", _BW_RUN_SEQUENCE)
+    payload += struct.pack("<H", _BW_EVIDENCE_SEQUENCE)
+    payload += struct.pack("<Q", _BW_PLAN_DIGEST)
+    payload += bytes([phase, 0, 7, 2, direction])
+    payload += struct.pack("<H", 181)
+    payload += struct.pack("<iiiI", expected, observed, delta, window)
+    return bytes(payload)
+
+
+def test_decode_breakaway_origin_mismatch_matches_the_firmware_golden_bytes() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    payload = _bw_origin_mismatch()
+    assert len(payload) == 38
+    decoded = decode_breakaway_record(payload, protocol_version=18)
+    assert decoded["record_kind"] == "breakaway_recovery_origin_mismatch"
+    assert decoded["tag"] == 15
+    assert decoded["expected_start_offset_counts"] == -1481
+    assert decoded["observed_position_counts"] == -1480
+    assert decoded["delta_counts"] == 1
+    assert decoded["position_window_counts"] == 4000
+
+
+def test_decode_breakaway_origin_mismatch_flags_a_single_sample_race() -> None:
+    """One count of discrepancy is one encoder sample, not a runaway."""
+    from foci_trace.protocol import decode_breakaway_record
+
+    race = decode_breakaway_record(_bw_origin_mismatch(), protocol_version=18)
+    assert race["delta_abs_counts"] == 1
+    assert race["single_sample_race"] is True
+
+    runaway = decode_breakaway_record(_bw_origin_mismatch(observed=-1431), protocol_version=18)
+    assert runaway["delta_abs_counts"] == 50
+    assert runaway["single_sample_race"] is False
+
+
+def test_decode_breakaway_origin_mismatch_requires_protocol_18() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    with pytest.raises(DecodeError, match="unknown breakaway evidence tag"):
+        decode_breakaway_record(_bw_origin_mismatch(), protocol_version=17)
+
+
+def test_decode_breakaway_origin_mismatch_rejects_a_contradictory_delta() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    with pytest.raises(DecodeError, match="delta contradicts its offsets"):
+        decode_breakaway_record(_bw_origin_mismatch(delta=7), protocol_version=18)
+
+
+def test_decode_breakaway_origin_mismatch_rejects_a_zero_discrepancy() -> None:
+    """The fault fires on exact inequality, so a zero delta is impossible."""
+    from foci_trace.protocol import decode_breakaway_record
+
+    with pytest.raises(DecodeError, match="reports no discrepancy"):
+        decode_breakaway_record(_bw_origin_mismatch(observed=-1481), protocol_version=18)
+
+
+def test_decode_breakaway_origin_mismatch_rejects_an_out_of_window_start() -> None:
+    """An out-of-window start offset is contained earlier, never faulted here."""
+    from foci_trace.protocol import decode_breakaway_record
+
+    with pytest.raises(DecodeError, match="start offset exceeds its window"):
+        decode_breakaway_record(
+            _bw_origin_mismatch(expected=-9000, observed=-8999, window=4000),
+            protocol_version=18,
+        )
