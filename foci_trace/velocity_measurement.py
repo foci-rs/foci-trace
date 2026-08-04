@@ -5704,6 +5704,8 @@ BREAKAWAY_EVENT_ID_NAMES = {
     160: "raw_observation",
     161: "discovery_rung_margin",
     162: "probe_decision",
+    163: "recovery_rest_rejected",
+    164: "recovery_origin_mismatch",
 }
 
 # Phase rank per marker event id: probe (0) must never follow discovery (1),
@@ -5732,13 +5734,25 @@ _BW_RAW_OBSERVATION_PHASE_DISCOVERY = 1
 _BW_RAW_OBSERVATION_PHASE_CONFIRMATION = 2
 
 
+# Markers whose owning phase is carried by the record rather than the id.
+# The raw-observation stream (160) shares one id across all three phases, and
+# the two protocol-18 recovery diagnostics (163, 164) are emitted from whichever
+# phase was running when their gate refused.
+_BW_PHASE_BEARING_MARKERS = {
+    160: "breakaway_raw_observation",
+    163: "breakaway_recovery_rest_rejected",
+    164: "breakaway_recovery_origin_mismatch",
+}
+
+
 def _bw_tick_phase_rank(tick: dict[str, object]) -> int:
-    """Phase rank of one marker tick, resolving the shared raw-observation
-    marker (160) from its record's `phase` field."""
+    """Phase rank of one marker tick, resolving phase-bearing markers from
+    their record's `phase` field."""
     event_id = tick["event_id"]
-    if event_id == 160:
-        observations = _bw_tick_records_by_kind(tick, "breakaway_raw_observation")
-        phase = int(observations[0]["phase"]) if observations else 0
+    record_kind = _BW_PHASE_BEARING_MARKERS.get(int(event_id))
+    if record_kind is not None:
+        records = _bw_tick_records_by_kind(tick, record_kind)
+        phase = int(records[0]["phase"]) if records else 0
         if phase == _BW_RAW_OBSERVATION_PHASE_CONFIRMATION:
             return 2
         if phase == _BW_RAW_OBSERVATION_PHASE_DISCOVERY:
