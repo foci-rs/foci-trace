@@ -2056,6 +2056,9 @@ BREAKAWAY_TERMINAL_CAUSE_NAMES = {
     20: "confirmation_safety_fault",
     21: "accepted",
     22: "probe_excursion_evidence_invalid",
+    23: "probe_internal_fault",
+    24: "discovery_internal_fault",
+    25: "confirmation_internal_fault",
 }
 
 
@@ -2070,7 +2073,11 @@ def _breakaway_terminal_cause_name(cause: int, protocol_version: int) -> str:
 def _breakaway_terminal_cause_is_valid(cause: object, protocol_version: int) -> bool:
     if not isinstance(cause, int):
         return False
-    if protocol_version >= 15:
+    if protocol_version >= 16:
+        # 23-25 split the non-safety internal faults out of the `*_safety_fault`
+        # causes, which previously reported `has_safety_fault = 0`.
+        return cause in (0, 1) or 5 <= cause <= 25
+    if protocol_version == 15:
         return cause in (0, 1) or 5 <= cause <= 22
     return 0 <= cause <= 21
 
