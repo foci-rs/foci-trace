@@ -809,7 +809,12 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             )
             if decoded["schema_revision"] >= 3 or len(payload) == 88:
                 decoded["limit_evidence_capability"] = cursor.take("B")
-            if decoded["schema_revision"] >= 8:
+            # The encoder writes this block only when the plan actually carries
+            # a combined selected response; a breakaway Stage-C plan has none
+            # and its record simply ends here. Presence is therefore signalled
+            # by remaining bytes, not by the schema revision alone.
+            decoded["combined_selected_response"] = False
+            if decoded["schema_revision"] >= 8 and cursor.offset < len(payload):
                 if cursor.take("B") != 1:
                     raise DecodeError("combined integral plan core is invalid")
                 decoded["combined_selected_response"] = True

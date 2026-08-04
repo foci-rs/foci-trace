@@ -719,6 +719,31 @@ def test_decodes_velocity_integral_recovery_plan_fragment() -> None:
     assert frame.payload["recovery_slot_count"] == 7
 
 
+def test_decodes_a_breakaway_stage_c_plan_core_without_a_combined_response() -> None:
+    """A breakaway Stage-C plan has `combined_selected_response: None`, and the
+    encoder writes the flag byte only in the `Some` branch -- so the record
+    simply ends. Reading a flag unconditionally at schema >= 8 runs off the end
+    and the record decodes as nothing, which is why breakaway captures carried
+    no `integral_plan_core` at all.
+    """
+    payload = bytearray([0])
+    payload.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
+    payload.extend(struct.pack("<BIHBIIH", 0, 0x05E2_1F75, 14, 0, 0x89AB_CDEF, 0x0123_4567, 951))
+    payload.extend(struct.pack("<IIII", 0, 0, 0, 0))
+    payload.extend(struct.pack("<BBB", 3, 3, 0))
+    payload.extend(struct.pack("<iiii", 0, 0, 0, 0))
+    payload.extend(
+        struct.pack("<IiIIBHBHHHB", 4_394, 264, 25_000, 4_000, 12, 56, 14, 112, 2_816, 2_534, 1)
+    )
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert frame.payload["record_kind"] == "integral_plan_core"
+    assert frame.payload["schema_revision"] == 14
+    assert frame.payload["final_p"] == 951
+    assert frame.payload["combined_selected_response"] is False
+
+
 def test_decodes_schema_six_velocity_integral_recovery_flags() -> None:
     payload = bytearray([0])
     payload.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))

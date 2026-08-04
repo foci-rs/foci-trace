@@ -827,10 +827,16 @@ def _compact_plan_marker(plan: dict[str, object], run_sequence: int) -> bytes:
     _append_integer(record, int(plan["hard_torque_limit"]), 2)
     _append_integer(record, int(plan["usable_torque_limit"]), 2)
     if int(plan["schema_revision"]) >= 8:
-        _append_integer(record, 1, 1)
-        for interval in plan["selected_response_intervals_q"]:  # type: ignore[union-attr]
-            _append_integer(record, int(interval[0]), 4, signed=True)
-            _append_integer(record, int(interval[1]), 4, signed=True)
+        # Firmware hashes the presence flag, then the intervals only when the
+        # plan actually carries a combined selected response. A breakaway
+        # Stage-C plan carries none, so hardcoding presence here both mis-hashes
+        # it and reads an absent key.
+        present = bool(plan.get("combined_selected_response"))
+        _append_integer(record, int(present), 1)
+        if present:
+            for interval in plan["selected_response_intervals_q"]:  # type: ignore[union-attr]
+                _append_integer(record, int(interval[0]), 4, signed=True)
+                _append_integer(record, int(interval[1]), 4, signed=True)
     return bytes(record)
 
 
