@@ -565,6 +565,10 @@ def _plan_records(plan: dict[str, object]) -> list[tuple[bytes, dict[str, object
             {
                 **common,
                 **{name: plan[name] for name in core_names},
+                # Firmware decodes this unconditionally on every schema revision
+                # (protocol.py's `integral_plan_core` branch defaults it False
+                # before the schema>=8 override below), so the fixture must too.
+                "combined_selected_response": False,
                 "record_kind": "integral_plan_core",
                 "plan_fragment": 0,
             },

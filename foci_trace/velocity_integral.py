@@ -1305,6 +1305,11 @@ def audit_velocity_integral(
             "velocity_primitive_current",
         )
     ]
+    # Acceptance-matrix runs cannot reach this caller: `_velocity_integral_audits`
+    # (analyze.py) collects `matrix_runs` first and filters every candidate with
+    # `int(item.payload["run_sequence"]) not in matrix_runs`, so the schedule
+    # here is derived from the Stage-C plan alone, not from is_acceptance_matrix.
+    stabilized_recovery_rest = bool(plan["combined_selected_response"])
     mismatches.extend(
         audit_scored_rest_grammar(
             [value for _raw, value in nonterminal],
@@ -1317,6 +1322,8 @@ def audit_velocity_integral(
             observation_kind="integral_observation",
             plan_digest=int(plan["plan_digest"]),
             label="Stage C",
+            stabilized_recovery_rest=stabilized_recovery_rest,
+            ordinary_rejection_tail=("velocity_primitive_current",),
         )
     )
     sequences = [int(value["evidence_sequence"]) for _raw, value in nonterminal]

@@ -1429,6 +1429,11 @@ def verify_scored_rest_selection(
     return reconstructed
 
 
+def _stream_at(stream: list, index: int) -> dict | None:
+    """Return stream[index], or None past either end."""
+    return stream[index] if 0 <= index < len(stream) else None
+
+
 def audit_scored_rest_grammar(
     records: list[dict[str, object]],
     terminal: dict[str, object],
@@ -1441,6 +1446,8 @@ def audit_scored_rest_grammar(
     observation_kind: str,
     plan_digest: int,
     label: str,
+    stabilized_recovery_rest: bool,
+    ordinary_rejection_tail: tuple[str, ...],
 ) -> list[str]:
     """Validate the fixed Event 151 joins for one commissioning stage."""
     selections = [record for record in records if record["record_kind"] == "rest_selection"]
@@ -1455,10 +1462,10 @@ def audit_scored_rest_grammar(
         successor = stream[index + 1]
         if kind == observation_kind:
             if (
-                previous.get("record_kind") != "rest_selection"
-                or int(previous.get("owner", -1)) not in ordinary_owners
-                or int(previous.get("rung_index", -1)) != int(record["rung_index"])
-                or int(previous.get("slot", -1)) != int(record["slot"])
+                successor.get("record_kind") != "rest_selection"
+                or int(successor.get("owner", -1)) not in ordinary_owners
+                or int(successor.get("rung_index", -1)) != int(record["rung_index"])
+                or int(successor.get("slot", -1)) != int(record["slot"])
             ):
                 mismatches.append(f"{label} observation lacks its causal scored-rest selection")
         elif kind == "recovery_rest":
@@ -1482,22 +1489,56 @@ def audit_scored_rest_grammar(
             mismatches.append(f"{label} scored-rest selection has the wrong identity")
         if owner in ordinary_owners:
             matched_observation = (
-                successor.get("record_kind") == observation_kind
-                and int(successor.get("rung_index", -1)) == int(record["rung_index"])
-                and int(successor.get("slot", -1)) == int(record["slot"])
+                previous.get("record_kind") == observation_kind
+                and int(previous.get("rung_index", -1)) == int(record["rung_index"])
+                and int(previous.get("slot", -1)) == int(record["slot"])
             )
-            terminal_rejection = (
-                successor is terminal
-                and int(record["disposition"]) == 2
-                and int(terminal.get("cause", -1)) == 53
-            )
-            if not (matched_observation or terminal_rejection):
-                mismatches.append(f"{label} scored-rest selection has the wrong successor")
+            if not matched_observation:
+                mismatches.append(f"{label} scored-rest selection has the wrong predecessor")
+            if int(record["disposition"]) == 2:
+                position = index + 1
+                intact = True
+                for expected_kind in ordinary_rejection_tail:
+                    entry = _stream_at(stream, position)
+                    if (
+                        entry is None
+                        or entry.get("record_kind") != expected_kind
+                        or int(entry.get("rung_index", -1)) != int(record["rung_index"])
+                        or int(entry.get("slot", -1)) != int(record["slot"])
+                    ):
+                        intact = False
+                        break
+                    position += 1
+                closing = _stream_at(stream, position)
+                if not intact or closing is not terminal or int(terminal.get("cause", -1)) != 53:
+                    mismatches.append(
+                        f"{label} rejected scored-rest selection lacks its causal terminal tail"
+                    )
         elif owner in recovery_owners:
-            if successor.get("record_kind") != "recovery_rest" or int(
+            rejected = int(record["disposition"]) == 2
+            if rejected and not stabilized_recovery_rest:
+                # An immediate-scored rejection faults straight to the terminal,
+                # with no recovery record and no Event 150. Require exactly that
+                # rather than exempting the case.
+                if successor is not terminal or int(terminal.get("cause", -1)) != 53:
+                    mismatches.append(
+                        f"{label} rejected recovery selection lacks its causal terminal"
+                    )
+            elif stabilized_recovery_rest:
+                if successor.get("record_kind") != "recovery_rest" or int(
+                    successor.get("rung_index", -1)
+                ) != int(record["rung_index"]):
+                    mismatches.append(f"{label} recovery selection does not precede Event 150")
+                elif rejected:
+                    closing = _stream_at(stream, index + 2)
+                    if closing is not terminal or int(terminal.get("cause", -1)) != 53:
+                        mismatches.append(
+                            f"{label} rejected recovery selection lacks its causal terminal"
+                        )
+            elif successor.get("record_kind") != "rung_origin_recovery" or int(
                 successor.get("rung_index", -1)
             ) != int(record["rung_index"]):
-                mismatches.append(f"{label} recovery selection does not precede Event 150")
+                mismatches.append(f"{label} recovery selection does not precede its recovery")
         else:
             mismatches.append(f"{label} scored-rest selection has the wrong owner")
     return mismatches
@@ -4148,11 +4189,18 @@ def _audit_stage_b_velocity_sweep(
     reported_digest = int(terminal["digest_low"]) | (int(terminal["digest_high"]) << 32)
     mismatches: list[str] = []
     plan_digest = int(plan["plan_digest_low"]) | (int(plan["plan_digest_high"]) << 32)
+    # `replay_stage_b_regions` is the only place `schema_revision_floor` and
+    # `combined_response_selected` are derived; the grammar audit needs both,
+    # so the replay runs here rather than at its original, later call site,
+    # and that later site reuses this result instead of calling twice.
+    projected_replay = replay_stage_b_regions(raw_observations, evidence_records)
+    schema_revision_floor = int(projected_replay["schema_revision"])
+    combined_response_selected = bool(projected_replay["combined_response_selected"])
     mismatches.extend(
         audit_scored_rest_grammar(
             [value for _raw, value in nonterminal],
             terminal,
-            schema_revision=int(plan.get("schema_revision", 1)),
+            schema_revision=schema_revision_floor,
             schema_floor=13,
             expected_stage=0,
             ordinary_owners=(0,),
@@ -4160,6 +4208,8 @@ def _audit_stage_b_velocity_sweep(
             observation_kind="observation",
             plan_digest=plan_digest,
             label="Stage B",
+            stabilized_recovery_rest=(schema_revision_floor == 14 or combined_response_selected),
+            ordinary_rejection_tail=(),
         )
     )
     recovery_records = [
@@ -4311,7 +4361,6 @@ def _audit_stage_b_velocity_sweep(
         else:
             previous = value
 
-    projected_replay = replay_stage_b_regions(raw_observations, evidence_records)
     replay = (
         _stage_b_fault_prefix_replay(projected_replay)
         if recovery_schema and fault_prefix

@@ -307,6 +307,79 @@ def test_complete_matrix_audit_reproduces_masks_counts_and_digest() -> None:
     assert len(audit["amplitudes"]) == 5
 
 
+_GRAMMAR_MISMATCH_MARKERS = ("scored-rest", "does not precede", "lacks its causal selection")
+
+
+def test_matrix_audit_enforces_the_stabilized_rejection_tail() -> None:
+    """`audit_acceptance_matrix` passes `stabilized_recovery_rest=True` and
+    `ordinary_rejection_tail=("velocity_primitive_current",)` at its call site
+    (acceptance_matrix.py:338); a test that only calls the grammar helper
+    directly would not catch a regression to `()` here. Existing matrix tests
+    run at schema 1 with no scored-rest selections, so the grammar exits below
+    its floor and stays green regardless -- this fixture is schema 4 to reach
+    the code path at all.
+
+    The fixture is not a fully firmware-consistent capture (no amplitude
+    records, mismatched terminal digest and workflow duration), so this only
+    asserts the absence of grammar-specific mismatches, not a clean audit."""
+    plan = _schema_two_plan()
+    plan.update({"schema_revision": 4, "run_sequence": 7, "plan_digest": 0})
+    plan["plan_digest"] = matrix_plan_digest(plan)
+    plan_fragments = [
+        (
+            bytes([fragment]),
+            {**plan, "fragment": fragment, "record_kind": "acceptance_matrix_plan"},
+        )
+        for fragment in range(3)
+    ]
+    observation = {
+        "record_kind": "integral_observation",
+        "run_sequence": 7,
+        "plan_digest": plan["plan_digest"],
+        "rung_index": 0,
+        "slot": 0,
+    }
+    selection = {
+        "record_kind": "rest_selection",
+        "run_sequence": 7,
+        "plan_digest": plan["plan_digest"],
+        "stage": 1,
+        "owner": 7,
+        "rung_index": 0,
+        "slot": 0,
+        "disposition": 2,
+    }
+    current = {
+        "record_kind": "velocity_primitive_current",
+        "run_sequence": 7,
+        "plan_digest": plan["plan_digest"],
+        "rung_index": 0,
+        "slot": 0,
+    }
+    terminal = {
+        "record_kind": "acceptance_matrix_terminal",
+        "run_sequence": 7,
+        "cause": 53,
+        "outcome": 1,
+        "digest": 0,
+    }
+    evidence: list[tuple[bytes, dict[str, object]]] = [
+        *plan_fragments,
+        (b"\x00", observation),
+        (b"\x01", selection),
+        (b"\x02", current),
+        (b"terminal", terminal),
+    ]
+
+    audit = audit_acceptance_matrix(evidence)
+
+    assert not any(
+        marker in mismatch
+        for mismatch in audit["mismatches"]
+        for marker in _GRAMMAR_MISMATCH_MARKERS
+    )
+
+
 def _audit(interval: list[int], robust: int, *, attempted: int = 0b11111) -> dict[str, object]:
     direction = {
         "availability": 0,

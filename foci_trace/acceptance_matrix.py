@@ -346,6 +346,8 @@ def audit_acceptance_matrix(
             observation_kind="integral_observation",
             plan_digest=int(plan["plan_digest"]),
             label="acceptance matrix",
+            stabilized_recovery_rest=True,
+            ordinary_rejection_tail=("velocity_primitive_current",),
         )
     )
     digest = _fnv1a64(_compact_execution_marker(plan))

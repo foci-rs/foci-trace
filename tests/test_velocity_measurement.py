@@ -21,6 +21,7 @@ from foci_trace.velocity_measurement import (
     analyze_stationary_tail,
     audit_breakaway_campaign,
     audit_rung_origin_recovery,
+    audit_scored_rest_grammar,
     audit_selected_recovery_rest,
     breakaway_build_search_grid,
     breakaway_confirmation_plan_digest,
@@ -668,8 +669,11 @@ def test_scored_rest_record_must_match_independent_recomputation() -> None:
 
 
 def test_scored_rest_grammar_requires_fixed_observation_and_recovery_joins() -> None:
-    from foci_trace.velocity_measurement import audit_scored_rest_grammar
-
+    """A scored-rest selection follows the observation it describes (R4): the
+    grammar had this backwards, requiring the selection first. This is the
+    same fixture as before the fix, reordered to the corrected sequence and
+    carrying the two new required keyword arguments; the swap at the end still
+    proves the untouched `recovery_rest` predecessor guard fires."""
     identity = {
         "run_sequence": 7,
         "stage": 0,
@@ -677,6 +681,7 @@ def test_scored_rest_grammar_requires_fixed_observation_and_recovery_joins() -> 
         "disposition": 0,
     }
     records = [
+        {"record_kind": "observation", "rung_index": 2, "slot": 3},
         {
             "record_kind": "rest_selection",
             "owner": 0,
@@ -684,7 +689,6 @@ def test_scored_rest_grammar_requires_fixed_observation_and_recovery_joins() -> 
             "slot": 3,
             **identity,
         },
-        {"record_kind": "observation", "rung_index": 2, "slot": 3},
         {
             "record_kind": "rest_selection",
             "owner": 1,
@@ -705,11 +709,272 @@ def test_scored_rest_grammar_requires_fixed_observation_and_recovery_joins() -> 
         "observation_kind": "observation",
         "plan_digest": 11,
         "label": "Stage B",
+        "stabilized_recovery_rest": True,
+        "ordinary_rejection_tail": (),
     }
 
     assert audit_scored_rest_grammar(records, terminal, **arguments) == []
     records[2], records[3] = records[3], records[2]
     assert audit_scored_rest_grammar(records, terminal, **arguments)
+
+
+_GRAMMAR_RUN_SEQUENCE = 7
+_GRAMMAR_PLAN_DIGEST = 11
+_GRAMMAR_STAGE = 1
+_GRAMMAR_ORDINARY_OWNERS = (3, 4, 6)
+_GRAMMAR_RECOVERY_OWNERS = (5,)
+_GRAMMAR_OBSERVATION_KIND = "integral_observation"
+
+
+def _grammar_identity(*, disposition: int) -> dict[str, object]:
+    return {
+        "run_sequence": _GRAMMAR_RUN_SEQUENCE,
+        "stage": _GRAMMAR_STAGE,
+        "plan_digest": _GRAMMAR_PLAN_DIGEST,
+        "disposition": disposition,
+    }
+
+
+def _grammar_observation(rung_index: int, slot: int) -> dict[str, object]:
+    return {"record_kind": _GRAMMAR_OBSERVATION_KIND, "rung_index": rung_index, "slot": slot}
+
+
+def _grammar_selection(
+    *, owner: int, rung_index: int, slot: int, disposition: int
+) -> dict[str, object]:
+    return {
+        "record_kind": "rest_selection",
+        "owner": owner,
+        "rung_index": rung_index,
+        "slot": slot,
+        **_grammar_identity(disposition=disposition),
+    }
+
+
+def _grammar_current(rung_index: int, slot: int) -> dict[str, object]:
+    return {"record_kind": "velocity_primitive_current", "rung_index": rung_index, "slot": slot}
+
+
+def _grammar_recovery_rest(rung_index: int) -> dict[str, object]:
+    return {"record_kind": "recovery_rest", "rung_index": rung_index}
+
+
+def _grammar_recovery(rung_index: int) -> dict[str, object]:
+    return {"record_kind": "rung_origin_recovery", "rung_index": rung_index}
+
+
+def _grammar_terminal(*, kind: str, cause: int) -> dict[str, object]:
+    return {"record_kind": kind, "run_sequence": _GRAMMAR_RUN_SEQUENCE, "cause": cause}
+
+
+def _grammar_arguments(
+    *,
+    label: str,
+    stabilized_recovery_rest: bool,
+    ordinary_rejection_tail: tuple[str, ...],
+) -> dict[str, object]:
+    return {
+        "schema_revision": 13,
+        "schema_floor": 12,
+        "expected_stage": _GRAMMAR_STAGE,
+        "ordinary_owners": _GRAMMAR_ORDINARY_OWNERS,
+        "recovery_owners": _GRAMMAR_RECOVERY_OWNERS,
+        "observation_kind": _GRAMMAR_OBSERVATION_KIND,
+        "plan_digest": _GRAMMAR_PLAN_DIGEST,
+        "label": label,
+        "stabilized_recovery_rest": stabilized_recovery_rest,
+        "ordinary_rejection_tail": ordinary_rejection_tail,
+    }
+
+
+def test_scored_rest_grammar_accepts_an_ordinary_selection_after_its_observation() -> None:
+    records = [
+        _grammar_observation(2, 3),
+        _grammar_selection(owner=3, rung_index=2, slot=3, disposition=0),
+    ]
+    terminal = _grammar_terminal(kind="integral_terminal", cause=0)
+    arguments = _grammar_arguments(
+        label="Stage C", stabilized_recovery_rest=False, ordinary_rejection_tail=()
+    )
+
+    assert audit_scored_rest_grammar(records, terminal, **arguments) == []
+
+
+def test_scored_rest_grammar_accepts_stage_c_ordinary_rejection_current_tail() -> None:
+    records = [
+        _grammar_observation(2, 3),
+        _grammar_selection(owner=3, rung_index=2, slot=3, disposition=2),
+        _grammar_current(2, 3),
+    ]
+    terminal = _grammar_terminal(kind="integral_terminal", cause=53)
+    arguments = _grammar_arguments(
+        label="Stage C",
+        stabilized_recovery_rest=False,
+        ordinary_rejection_tail=("velocity_primitive_current",),
+    )
+
+    assert audit_scored_rest_grammar(records, terminal, **arguments) == []
+
+
+def test_scored_rest_grammar_accepts_stage_b_ordinary_rejection_without_current() -> None:
+    records = [
+        _grammar_observation(2, 3),
+        _grammar_selection(owner=3, rung_index=2, slot=3, disposition=2),
+    ]
+    terminal = _grammar_terminal(kind="stage_b_terminal", cause=53)
+    arguments = _grammar_arguments(
+        label="Stage B", stabilized_recovery_rest=False, ordinary_rejection_tail=()
+    )
+
+    assert audit_scored_rest_grammar(records, terminal, **arguments) == []
+
+
+def test_scored_rest_grammar_accepts_an_immediate_recovery_selection() -> None:
+    records = [
+        _grammar_selection(owner=5, rung_index=2, slot=0xFF, disposition=0),
+        _grammar_recovery(2),
+    ]
+    terminal = _grammar_terminal(kind="integral_terminal", cause=0)
+    arguments = _grammar_arguments(
+        label="Stage C", stabilized_recovery_rest=False, ordinary_rejection_tail=()
+    )
+
+    assert audit_scored_rest_grammar(records, terminal, **arguments) == []
+
+
+def test_scored_rest_grammar_accepts_an_immediate_recovery_rejection() -> None:
+    records = [_grammar_selection(owner=5, rung_index=2, slot=0xFF, disposition=2)]
+    terminal = _grammar_terminal(kind="integral_terminal", cause=53)
+    arguments = _grammar_arguments(
+        label="Stage C", stabilized_recovery_rest=False, ordinary_rejection_tail=()
+    )
+
+    assert audit_scored_rest_grammar(records, terminal, **arguments) == []
+
+
+def test_scored_rest_grammar_accepts_a_stabilized_recovery_selection() -> None:
+    records = [
+        _grammar_selection(owner=5, rung_index=2, slot=0xFF, disposition=0),
+        _grammar_recovery_rest(2),
+        _grammar_recovery(2),
+    ]
+    terminal = _grammar_terminal(kind="integral_terminal", cause=0)
+    arguments = _grammar_arguments(
+        label="Stage C", stabilized_recovery_rest=True, ordinary_rejection_tail=()
+    )
+
+    assert audit_scored_rest_grammar(records, terminal, **arguments) == []
+
+
+def test_scored_rest_grammar_accepts_a_stabilized_recovery_rejection() -> None:
+    records = [
+        _grammar_selection(owner=5, rung_index=2, slot=0xFF, disposition=2),
+        _grammar_recovery_rest(2),
+    ]
+    terminal = _grammar_terminal(kind="integral_terminal", cause=53)
+    arguments = _grammar_arguments(
+        label="Stage C", stabilized_recovery_rest=True, ordinary_rejection_tail=()
+    )
+
+    assert audit_scored_rest_grammar(records, terminal, **arguments) == []
+
+
+def test_scored_rest_grammar_rejects_a_stabilized_recovery_missing_event_150() -> None:
+    records = [
+        _grammar_selection(owner=5, rung_index=2, slot=0xFF, disposition=0),
+        _grammar_recovery(2),
+    ]
+    terminal = _grammar_terminal(kind="integral_terminal", cause=0)
+    arguments = _grammar_arguments(
+        label="Stage C", stabilized_recovery_rest=True, ordinary_rejection_tail=()
+    )
+
+    assert audit_scored_rest_grammar(records, terminal, **arguments) == [
+        "Stage C recovery selection does not precede Event 150"
+    ]
+
+
+def test_scored_rest_grammar_rejects_stage_c_rejection_missing_its_current_record() -> None:
+    """The disposition-2 tail is enforced, not merely exempted: a Stage-C
+    rejection missing its Current record must be reported, not silently
+    accepted the way the pre-fix grammar accepted any rejection."""
+    records = [
+        _grammar_observation(2, 3),
+        _grammar_selection(owner=3, rung_index=2, slot=3, disposition=2),
+    ]
+    terminal = _grammar_terminal(kind="integral_terminal", cause=53)
+    arguments = _grammar_arguments(
+        label="Stage C",
+        stabilized_recovery_rest=False,
+        ordinary_rejection_tail=("velocity_primitive_current",),
+    )
+
+    assert audit_scored_rest_grammar(records, terminal, **arguments) == [
+        "Stage C rejected scored-rest selection lacks its causal terminal tail"
+    ]
+
+
+def test_scored_rest_grammar_rejects_a_rejection_tail_with_an_extra_record() -> None:
+    records = [
+        _grammar_observation(2, 3),
+        _grammar_selection(owner=3, rung_index=2, slot=3, disposition=2),
+        {"record_kind": "integral_rung", "rung_index": 2, "slot": 3},
+    ]
+    terminal = _grammar_terminal(kind="stage_b_terminal", cause=53)
+    arguments = _grammar_arguments(
+        label="Stage B", stabilized_recovery_rest=False, ordinary_rejection_tail=()
+    )
+
+    assert audit_scored_rest_grammar(records, terminal, **arguments) == [
+        "Stage B rejected scored-rest selection lacks its causal terminal tail"
+    ]
+
+
+def test_scored_rest_grammar_rejects_an_ordinary_rejection_with_the_wrong_cause() -> None:
+    records = [
+        _grammar_observation(2, 3),
+        _grammar_selection(owner=3, rung_index=2, slot=3, disposition=2),
+    ]
+    terminal = _grammar_terminal(kind="stage_b_terminal", cause=0)
+    arguments = _grammar_arguments(
+        label="Stage B", stabilized_recovery_rest=False, ordinary_rejection_tail=()
+    )
+
+    assert audit_scored_rest_grammar(records, terminal, **arguments) == [
+        "Stage B rejected scored-rest selection lacks its causal terminal tail"
+    ]
+
+
+def test_scored_rest_grammar_rejects_an_immediate_recovery_rejection_with_a_recovery() -> None:
+    """A rejection emits no recovery record at all; a rejected immediate-scored
+    selection followed by `rung_origin_recovery` must be reported."""
+    records = [
+        _grammar_selection(owner=5, rung_index=2, slot=0xFF, disposition=2),
+        _grammar_recovery(2),
+    ]
+    terminal = _grammar_terminal(kind="integral_terminal", cause=53)
+    arguments = _grammar_arguments(
+        label="Stage C", stabilized_recovery_rest=False, ordinary_rejection_tail=()
+    )
+
+    assert audit_scored_rest_grammar(records, terminal, **arguments) == [
+        "Stage C rejected recovery selection lacks its causal terminal"
+    ]
+
+
+def test_scored_rest_grammar_rejects_a_stabilized_recovery_with_the_wrong_cause() -> None:
+    records = [
+        _grammar_selection(owner=5, rung_index=2, slot=0xFF, disposition=2),
+        _grammar_recovery_rest(2),
+    ]
+    terminal = _grammar_terminal(kind="integral_terminal", cause=0)
+    arguments = _grammar_arguments(
+        label="Stage C", stabilized_recovery_rest=True, ordinary_rejection_tail=()
+    )
+
+    assert audit_scored_rest_grammar(records, terminal, **arguments) == [
+        "Stage C rejected recovery selection lacks its causal terminal"
+    ]
 
 
 def test_sweep_confidence_width_matches_firmware_single_precision(monkeypatch) -> None:
