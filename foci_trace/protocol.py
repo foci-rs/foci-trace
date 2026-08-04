@@ -2135,6 +2135,8 @@ COMMISSION_ERROR_NAMES = {
     67: "schedule_period_zero",
     68: "schedule_early_invocation",
     69: "schedule_deadline_overflow",
+    70: "primitive_already_open",
+    71: "primitive_start_in_future",
 }
 
 # `BreakawayPhase` (breakaway_reporting.rs): which of the three campaign
