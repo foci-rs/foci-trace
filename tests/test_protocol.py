@@ -207,7 +207,7 @@ def test_decodes_version_nine_pptm_velocity_diagnostic() -> None:
 
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_OBSERVATION, payload) + payload)
 
-    assert PROTOCOL_VERSION == 16
+    assert PROTOCOL_VERSION == 17
     assert 13 in SUPPORTED_PROTOCOL_VERSIONS
     assert 14 in SUPPORTED_PROTOCOL_VERSIONS
     assert frame.payload["pid_velocity_actual"] is None
@@ -218,8 +218,8 @@ def test_decode_frame_rejects_a_version_beyond_the_supported_range() -> None:
     # A version past the supported range is rejected; historical versions stay
     # decodable so committed captures still replay.
     payload = bytes(88)
-    with pytest.raises(DecodeError, match="unsupported protocol version 17"):
-        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=17) + payload)
+    with pytest.raises(DecodeError, match="unsupported protocol version 18"):
+        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=18) + payload)
 
 
 def test_rejects_velocity_observation_with_both_diagnostic_kinds() -> None:
@@ -717,6 +717,30 @@ def test_decodes_velocity_integral_recovery_plan_fragment() -> None:
     assert frame.payload["recovery_nominal_slot_us"] == 1_816_958
     assert frame.payload["recovery_maximum_slot_us"] == 3_000_000
     assert frame.payload["recovery_slot_count"] == 7
+
+
+def test_breakaway_discovery_terminal_names_the_error_behind_an_internal_fault() -> None:
+    """A `*_internal_fault` terminal must say why, not just that it stopped.
+
+    Without the error code the 2026-08-03 intermittent was unattributable: the
+    terminal reported `discovery_internal_fault` and nothing else. A capture
+    predating the field reports `None` rather than 0, so "no error" and "field
+    absent" stay distinct.
+    """
+    from foci_trace.protocol import decode_breakaway_record
+
+    base = bytes([6]) + struct.pack("<IHQQHBBB", 7, 3, 0x1122, 0x3344, 128, 24, 0, 0)
+    assert len(base) == 28
+
+    old = decode_breakaway_record(base, protocol_version=16)
+    assert old["record_kind"] == "breakaway_discovery_terminal"
+    assert old["error_code"] is None
+    assert old["error_code_name"] is None
+
+    new = decode_breakaway_record(base + bytes([66]), protocol_version=17)
+    assert new["terminal_cause_name"] == "discovery_internal_fault"
+    assert new["error_code"] == 66
+    assert new["error_code_name"] == "discovery_band_not_selected"
 
 
 def test_decodes_a_breakaway_stage_c_plan_core_without_a_combined_response() -> None:

@@ -7,13 +7,34 @@ import struct
 from typing import Any
 
 FRAME_MAGIC = 0x43525446
-# Version 16 adds the measured `moving_pid_output_peak` to the breakaway
+# Version 17 adds `error_code` to the breakaway discovery terminal, so a
+# `*_internal_fault` terminal names the CommissionError behind it instead of
+# leaving the fault unattributable.
+# Version 16 added the measured `moving_pid_output_peak` to the breakaway
 # raw-observation record, so a current-headroom terminus can be attributed to
 # the open-loop model term or to measured demand.
 # Version 15 replaced the productive-boundary probe with physical excursion.
 # Historical versions remain readable through their versioned record shapes.
-PROTOCOL_VERSION = 16
-SUPPORTED_PROTOCOL_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
+PROTOCOL_VERSION = 17
+SUPPORTED_PROTOCOL_VERSIONS = (
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+)
 HEADER_LEN = 32
 
 FRAME_TYPE_CRITICAL = 1
@@ -2087,6 +2108,32 @@ def _breakaway_terminal_cause_is_valid(cause: object, protocol_version: int) -> 
     return 0 <= cause <= 21
 
 
+# `CommissionError::status_code()` values reachable from a breakaway terminal.
+# Deliberately a subset, not a copy of the host's full table: klipper-foci's
+# `COMMISSION_ERROR_NAMES` is authoritative and duplicating all of it here would
+# drift. An unlisted code decodes with `error_code` set and `error_code_name`
+# `None`, so nothing is lost.
+COMMISSION_ERROR_NAMES = {
+    3: "spi",
+    17: "safety_envelope_violation",
+    47: "invalid_schedule",
+    52: "analysis_overrun",
+    53: "velocity_rest_not_confirmed",
+    54: "invalid_current_limit",
+    55: "evidence_buffer_full",
+    56: "rung_index_out_of_range",
+    57: "plan_contract_changed",
+    58: "recovery_plan_failed",
+    59: "encoder_domain_invalid",
+    60: "missing_capture_state",
+    61: "search_grid_invalid",
+    62: "target_rate_invalid",
+    63: "zero_elapsed_sample",
+    64: "campaign_plan_invalid",
+    65: "stage_c_authority_denied",
+    66: "discovery_band_not_selected",
+}
+
 # `BreakawayPhase` (breakaway_reporting.rs): which of the three campaign
 # drivers owns a `BreakawayCampaignTerminal` closure record.
 BREAKAWAY_PHASE_NAMES = {
@@ -2498,7 +2545,7 @@ def decode_breakaway_record(
         else:
             decoded["moving_pid_output_peak"] = None
         decoded["record_kind"] = "breakaway_raw_observation"
-    elif tag == BREAKAWAY_TAG_DISCOVERY_TERMINAL and len(payload) == 28:
+    elif tag == BREAKAWAY_TAG_DISCOVERY_TERMINAL and len(payload) in (28, 29):
         decoded = _take_fields(
             cursor,
             (
@@ -2517,6 +2564,10 @@ def decode_breakaway_record(
         decoded["terminal_cause_name"] = _breakaway_terminal_cause_name(
             int(decoded["terminal_cause"]), protocol_version
         )
+        # Present from protocol 17. Absent records report `None` rather than 0,
+        # so "no error" and "this capture predates the field" stay distinct.
+        decoded["error_code"] = cursor.take("B") if len(payload) == 29 else None
+        decoded["error_code_name"] = COMMISSION_ERROR_NAMES.get(decoded["error_code"])
         decoded["record_kind"] = "breakaway_discovery_terminal"
     elif tag == BREAKAWAY_TAG_DISCOVERY_RUNG_MARGIN and len(payload) == 38:
         decoded = _take_fields(
