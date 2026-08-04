@@ -2137,6 +2137,7 @@ COMMISSION_ERROR_NAMES = {
     69: "schedule_deadline_overflow",
     70: "primitive_already_open",
     71: "primitive_start_in_future",
+    72: "recovery_origin_mismatch",
 }
 
 # `BreakawayPhase` (breakaway_reporting.rs): which of the three campaign
