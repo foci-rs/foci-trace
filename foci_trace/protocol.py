@@ -2132,6 +2132,9 @@ COMMISSION_ERROR_NAMES = {
     64: "campaign_plan_invalid",
     65: "stage_c_authority_denied",
     66: "discovery_band_not_selected",
+    67: "schedule_period_zero",
+    68: "schedule_early_invocation",
+    69: "schedule_deadline_overflow",
 }
 
 # `BreakawayPhase` (breakaway_reporting.rs): which of the three campaign
