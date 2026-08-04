@@ -15,7 +15,7 @@ FRAME_MAGIC = 0x43525446
 # the open-loop model term or to measured demand.
 # Version 15 replaced the productive-boundary probe with physical excursion.
 # Historical versions remain readable through their versioned record shapes.
-PROTOCOL_VERSION = 17
+PROTOCOL_VERSION = 18
 SUPPORTED_PROTOCOL_VERSIONS = (
     1,
     2,
@@ -34,6 +34,7 @@ SUPPORTED_PROTOCOL_VERSIONS = (
     15,
     16,
     17,
+    18,
 )
 HEADER_LEN = 32
 
@@ -102,6 +103,7 @@ EVENT_COMMISSION_BREAKAWAY_CAMPAIGN_TERMINAL = 159
 EVENT_COMMISSION_BREAKAWAY_RAW_OBSERVATION = 160
 EVENT_COMMISSION_BREAKAWAY_DISCOVERY_MARGIN = 161
 EVENT_COMMISSION_BREAKAWAY_PROBE_DECISION = 162
+EVENT_COMMISSION_BREAKAWAY_RECOVERY_REST_REJECTED = 163
 EVENT_COMMISSION_DIAGNOSTIC_WARNING = 200
 
 # Every breakaway-campaign marker event id (152-162), in phase-emission order.
@@ -123,6 +125,7 @@ BREAKAWAY_CAMPAIGN_EVENT_IDS = (
     EVENT_COMMISSION_BREAKAWAY_RAW_OBSERVATION,
     EVENT_COMMISSION_BREAKAWAY_DISCOVERY_MARGIN,
     EVENT_COMMISSION_BREAKAWAY_PROBE_DECISION,
+    EVENT_COMMISSION_BREAKAWAY_RECOVERY_REST_REJECTED,
 )
 
 _LEVEL_NAMES = {
@@ -2235,6 +2238,10 @@ BREAKAWAY_TAG_CONFIRMATION_TERMINAL = 10
 BREAKAWAY_TAG_CONFIRMATION_OBSERVATION = 11
 BREAKAWAY_TAG_CAMPAIGN_TERMINAL = 12
 BREAKAWAY_TAG_PROBE_DECISION = 13
+# Protocol 18. Emitted only when the scored-rest selector rejected a recovery
+# rest window, so an accepted campaign carries none and a failing one
+# normally carries exactly the single rejection that ended it.
+BREAKAWAY_TAG_RECOVERY_REST_REJECTED = 14
 
 
 def decode_breakaway_record(
@@ -2725,6 +2732,113 @@ def decode_breakaway_record(
         if decoded["disposition"] not in valid_dispositions:
             raise DecodeError("breakaway probe decision disposition is invalid")
         decoded["record_kind"] = "breakaway_probe_decision"
+    elif (
+        tag == BREAKAWAY_TAG_RECOVERY_REST_REJECTED
+        and protocol_version >= 18
+        and len(payload) == 83
+    ):
+        decoded = _take_fields(
+            cursor,
+            (
+                ("run_sequence", "I"),
+                ("evidence_sequence", "H"),
+                ("plan_digest", "Q"),
+                ("phase", "B"),
+                ("stage", "B"),
+                ("rung_index", "B"),
+                ("slot_index", "B"),
+                ("direction", "B"),
+                ("p_raw", "H"),
+                ("structural_code_64", "B"),
+                ("structural_code_128", "B"),
+                ("structural_code_256", "B"),
+                ("interval_present_mask", "B"),
+                ("usable_mask", "B"),
+                ("zero_compatible_mask", "B"),
+                ("selected_mask", "B"),
+                ("selected_suffix_len", "H"),
+                ("disposition", "B"),
+            ),
+        )
+        decoded["intervals_q"] = [[cursor.take("q"), cursor.take("q")] for _ in range(3)]
+        decoded.update(
+            _take_fields(
+                cursor,
+                (
+                    ("scored_net_displacement_counts", "b"),
+                    ("scored_min_displacement_counts", "b"),
+                    ("scored_max_displacement_counts", "b"),
+                ),
+            )
+        )
+
+        if decoded["phase"] not in (0, 1, 2):
+            raise DecodeError("rejected recovery rest phase is invalid")
+        if decoded["direction"] not in (0, 1):
+            raise DecodeError("rejected recovery rest direction is invalid")
+        # Only rejections are ever reported; an acceptance reaching the wire
+        # would mean the firmware-side gate regressed.
+        if decoded["disposition"] != 2:
+            raise DecodeError("rejected recovery rest carries a non-rejected disposition")
+
+        structural = [
+            int(decoded["structural_code_64"]),
+            int(decoded["structural_code_128"]),
+            int(decoded["structural_code_256"]),
+        ]
+        if any(code not in range(6) for code in structural):
+            raise DecodeError("rejected recovery rest structural code is invalid")
+
+        masks = {
+            "interval_present_mask": int(decoded["interval_present_mask"]),
+            "usable_mask": int(decoded["usable_mask"]),
+            "zero_compatible_mask": int(decoded["zero_compatible_mask"]),
+            "selected_mask": int(decoded["selected_mask"]),
+        }
+        if any(value & ~0b111 for value in masks.values()):
+            raise DecodeError("rejected recovery rest mask has a reserved bit set")
+        # A rejection is exactly the absence of a selected suffix.
+        if masks["selected_mask"] != 0 or int(decoded["selected_suffix_len"]) != 0:
+            raise DecodeError("rejected recovery rest names a selected suffix")
+        # Zero-compatibility is a refinement of usability, and both refine
+        # interval presence, so each mask must be a subset of the last.
+        if masks["zero_compatible_mask"] & ~masks["usable_mask"]:
+            raise DecodeError("rejected recovery rest zero mask exceeds its usable mask")
+        if masks["usable_mask"] & ~masks["interval_present_mask"]:
+            raise DecodeError("rejected recovery rest usable mask exceeds its present mask")
+        # A structurally usable suffix is exactly one whose code is `Usable`.
+        expected_usable = sum(1 << index for index, code in enumerate(structural) if code == 0)
+        if masks["usable_mask"] != expected_usable:
+            raise DecodeError("rejected recovery rest usable mask contradicts its codes")
+
+        for index, interval in enumerate(decoded["intervals_q"]):
+            present = bool(masks["interval_present_mask"] & (1 << index))
+            if not present and interval != [0, 0]:
+                raise DecodeError("absent recovery rest interval carries a value")
+            if present and interval[0] > interval[1]:
+                raise DecodeError("rejected recovery rest interval is reversed")
+            zero_compatible = bool(masks["zero_compatible_mask"] & (1 << index))
+            contains_zero = present and interval[0] <= 0 <= interval[1]
+            usable = bool(masks["usable_mask"] & (1 << index))
+            if zero_compatible != (usable and contains_zero):
+                raise DecodeError("rejected recovery rest zero-compatibility is inconsistent")
+
+        scored_min = int(decoded["scored_min_displacement_counts"])
+        scored_max = int(decoded["scored_max_displacement_counts"])
+        scored_net = int(decoded["scored_net_displacement_counts"])
+        if not scored_min <= scored_net <= scored_max:
+            raise DecodeError("rejected recovery rest scored displacement is inconsistent")
+        # The firmware accumulator clamps its running sum to this band.
+        if not all(-2 <= value <= 2 for value in (scored_min, scored_net, scored_max)):
+            raise DecodeError("rejected recovery rest displacement escapes its clamp")
+
+        decoded["structural_codes"] = structural
+        # The decisive derived fact: the one-count fallback is only offered when
+        # the scored window's displacement span is at most one count, so a span
+        # of two or more means the statistical route was the only route.
+        decoded["scored_displacement_span_counts"] = scored_max - scored_min
+        decoded["one_count_fallback_available"] = scored_max - scored_min <= 1
+        decoded["record_kind"] = "breakaway_recovery_rest_rejected"
     else:
         raise DecodeError(f"unknown breakaway evidence tag {tag} (length {len(payload)})")
     cursor.finish()

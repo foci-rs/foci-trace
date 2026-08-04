@@ -207,7 +207,7 @@ def test_decodes_version_nine_pptm_velocity_diagnostic() -> None:
 
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_OBSERVATION, payload) + payload)
 
-    assert PROTOCOL_VERSION == 17
+    assert PROTOCOL_VERSION == 18
     assert 13 in SUPPORTED_PROTOCOL_VERSIONS
     assert 14 in SUPPORTED_PROTOCOL_VERSIONS
     assert frame.payload["pid_velocity_actual"] is None
@@ -218,8 +218,8 @@ def test_decode_frame_rejects_a_version_beyond_the_supported_range() -> None:
     # A version past the supported range is rejected; historical versions stay
     # decodable so committed captures still replay.
     payload = bytes(88)
-    with pytest.raises(DecodeError, match="unsupported protocol version 18"):
-        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=18) + payload)
+    with pytest.raises(DecodeError, match="unsupported protocol version 19"):
+        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=19) + payload)
 
 
 def test_rejects_velocity_observation_with_both_diagnostic_kinds() -> None:
@@ -3123,6 +3123,7 @@ def test_breakaway_event_ids_match_the_firmware_trace_events_table() -> None:
         EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN,
         EVENT_COMMISSION_BREAKAWAY_PROBE_TERMINAL,
         EVENT_COMMISSION_BREAKAWAY_RAW_OBSERVATION,
+        EVENT_COMMISSION_BREAKAWAY_RECOVERY_REST_REJECTED,
         EVENT_COMMISSION_REST_SELECTION_DIAGNOSTIC,
     )
 
@@ -3138,6 +3139,7 @@ def test_breakaway_event_ids_match_the_firmware_trace_events_table() -> None:
     assert EVENT_COMMISSION_BREAKAWAY_RAW_OBSERVATION == 160
     assert EVENT_COMMISSION_BREAKAWAY_DISCOVERY_MARGIN == 161
     assert EVENT_COMMISSION_BREAKAWAY_PROBE_DECISION == 162
+    assert EVENT_COMMISSION_BREAKAWAY_RECOVERY_REST_REJECTED == 163
     assert BREAKAWAY_CAMPAIGN_EVENT_IDS == (
         EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN,
         EVENT_COMMISSION_BREAKAWAY_PROBE_RESULT,
@@ -3150,6 +3152,7 @@ def test_breakaway_event_ids_match_the_firmware_trace_events_table() -> None:
         EVENT_COMMISSION_BREAKAWAY_RAW_OBSERVATION,
         EVENT_COMMISSION_BREAKAWAY_DISCOVERY_MARGIN,
         EVENT_COMMISSION_BREAKAWAY_PROBE_DECISION,
+        EVENT_COMMISSION_BREAKAWAY_RECOVERY_REST_REJECTED,
     )
 
 
@@ -3327,3 +3330,140 @@ def test_assemble_breakaway_ticks_raises_on_a_frame_that_does_not_decode() -> No
     ]
     with pytest.raises(DecodeError):
         assemble_breakaway_ticks(frames)
+
+
+def _bw_rest_rejected(
+    *,
+    structural_codes: tuple[int, int, int] = (0, 3, 2),
+    interval_present_mask: int = 0b111,
+    usable_mask: int = 0b001,
+    zero_compatible_mask: int = 0b000,
+    selected_mask: int = 0,
+    selected_suffix_len: int = 0,
+    disposition: int = 2,
+    intervals: tuple[tuple[int, int], ...] = (
+        (0x0102030405060708, 0x1112131415161718),
+        (0x2122232425262728, 0x3132333435363738),
+        (-0x5152535455565758, -0x4142434445464748),
+    ),
+    scored: tuple[int, int, int] = (-2, -2, 1),
+) -> bytes:
+    """Assemble the firmware's tag-14 golden bytes, field by field.
+
+    Mirrors `encode_recovery_rest_rejected`'s push order exactly, so a firmware
+    field reorder or width change breaks these tests rather than silently
+    shifting every field after it.
+    """
+    payload = bytearray([14])
+    payload += struct.pack("<I", _BW_RUN_SEQUENCE)
+    payload += struct.pack("<H", _BW_EVIDENCE_SEQUENCE)
+    payload += struct.pack("<Q", _BW_PLAN_DIGEST)
+    payload += bytes([1, 2, 0x0F, 0x03, 1])
+    payload += struct.pack("<H", 181)
+    payload += bytes(structural_codes)
+    payload += bytes([interval_present_mask, usable_mask, zero_compatible_mask, selected_mask])
+    payload += struct.pack("<H", selected_suffix_len)
+    payload += bytes([disposition])
+    for low, high in intervals:
+        payload += struct.pack("<qq", low, high)
+    payload += struct.pack("<bbb", *scored)
+    return bytes(payload)
+
+
+def test_decode_breakaway_rest_rejected_matches_the_firmware_golden_bytes() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    payload = _bw_rest_rejected()
+    assert len(payload) == 83
+    decoded = decode_breakaway_record(payload, protocol_version=18)
+    assert decoded["record_kind"] == "breakaway_recovery_rest_rejected"
+    assert decoded["tag"] == 14
+    assert decoded["phase"] == 1
+    assert decoded["stage"] == 2
+    assert decoded["rung_index"] == 15
+    assert decoded["slot_index"] == 3
+    assert decoded["direction"] == 1
+    assert decoded["p_raw"] == 181
+    assert decoded["structural_codes"] == [0, 3, 2]
+    assert decoded["scored_min_displacement_counts"] == -2
+    assert decoded["scored_max_displacement_counts"] == 1
+
+
+def test_decode_breakaway_rest_rejected_derives_the_fallback_availability() -> None:
+    """The one-count fallback is offered only for a span of at most one count.
+
+    This derived pair is the whole point of the record: it separates a rest
+    rejection that had a safety net from one that never had one.
+    """
+    from foci_trace.protocol import decode_breakaway_record
+
+    wide = decode_breakaway_record(_bw_rest_rejected(scored=(-2, -2, 1)), protocol_version=18)
+    assert wide["scored_displacement_span_counts"] == 3
+    assert wide["one_count_fallback_available"] is False
+
+    narrow = decode_breakaway_record(_bw_rest_rejected(scored=(0, 0, 1)), protocol_version=18)
+    assert narrow["scored_displacement_span_counts"] == 1
+    assert narrow["one_count_fallback_available"] is True
+
+
+def test_decode_breakaway_rest_rejected_requires_protocol_18() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    with pytest.raises(DecodeError, match="unknown breakaway evidence tag"):
+        decode_breakaway_record(_bw_rest_rejected(), protocol_version=17)
+
+
+def test_decode_breakaway_rest_rejected_rejects_an_accepted_disposition() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    with pytest.raises(DecodeError, match="non-rejected disposition"):
+        decode_breakaway_record(_bw_rest_rejected(disposition=0), protocol_version=18)
+
+
+def test_decode_breakaway_rest_rejected_rejects_a_selected_suffix() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    with pytest.raises(DecodeError, match="names a selected suffix"):
+        decode_breakaway_record(
+            _bw_rest_rejected(selected_mask=0b001, selected_suffix_len=64),
+            protocol_version=18,
+        )
+
+
+def test_decode_breakaway_rest_rejected_rejects_a_usable_mask_contradiction() -> None:
+    """`usable_mask` is a pure function of the structural codes."""
+    from foci_trace.protocol import decode_breakaway_record
+
+    with pytest.raises(DecodeError, match="usable mask contradicts its codes"):
+        decode_breakaway_record(_bw_rest_rejected(structural_codes=(3, 3, 2)), protocol_version=18)
+
+
+def test_decode_breakaway_rest_rejected_rejects_a_missed_zero_compatibility() -> None:
+    """A usable suffix whose interval spans zero must be marked compatible."""
+    from foci_trace.protocol import decode_breakaway_record
+
+    with pytest.raises(DecodeError, match="zero-compatibility is inconsistent"):
+        decode_breakaway_record(
+            _bw_rest_rejected(
+                intervals=(
+                    (-0x0102030405060708, 0x1112131415161718),
+                    (0x2122232425262728, 0x3132333435363738),
+                    (-0x5152535455565758, -0x4142434445464748),
+                )
+            ),
+            protocol_version=18,
+        )
+
+
+def test_decode_breakaway_rest_rejected_rejects_displacement_outside_the_clamp() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    with pytest.raises(DecodeError, match="escapes its clamp"):
+        decode_breakaway_record(_bw_rest_rejected(scored=(-3, -3, 1)), protocol_version=18)
+
+
+def test_decode_breakaway_rest_rejected_rejects_inconsistent_displacement() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    with pytest.raises(DecodeError, match="scored displacement is inconsistent"):
+        decode_breakaway_record(_bw_rest_rejected(scored=(2, -2, 1)), protocol_version=18)
