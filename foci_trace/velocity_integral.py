@@ -53,6 +53,32 @@ _RECOVERY_STABILIZATION_US = 500_000
 _STABILIZED_RECOVERY_SCHEDULE_CODE = 1
 _U128_MAX = (1 << 128) - 1
 
+# Stage-C evidence schema revisions, mirrored from firmware. Every revision
+# belongs to exactly one acquisition workflow, and no two workflows share one:
+#
+#   1..7  standalone Stage C (`STAGE_C_EVIDENCE_SCHEMA_REVISION = 7`,
+#         `integral_plan.rs:24`), planned by `plan_velocity_integral_response`
+#         with `combined_selected_response: None`.
+#   8..13 the combined P-then-I workflow
+#         (`FIRST_COMBINED_STAGE_C_SCHEMA_REVISION = 8`,
+#         `COMBINED_STAGE_C_SCHEMA_REVISION = 13`, `combined_plan.rs:20,22`).
+#         `plan_combined_velocity_integral_response` is the only builder in
+#         that range and it always supplies `Some(selected)`.
+#   14    the breakaway-seeded campaign
+#         (`BREAKAWAY_STAGE_C_SCHEMA_REVISION = 14`, `combined_plan.rs:40`),
+#         planned by `plan_breakaway_velocity_integral_response` with
+#         `combined_selected_response: None`.
+#
+# The workflow is therefore a property of the schema revision alone. Deriving
+# it from the capture's own `combined_selected_response` instead lets a
+# self-consistent schema-8-to-13 capture that simply omits the selected
+# response -- a shape firmware cannot emit -- claim the standalone workflow and
+# escape every combined-terminal rule.
+_STANDALONE_STAGE_C_SCHEMA_REVISION = 7
+_FIRST_COMBINED_STAGE_C_SCHEMA_REVISION = 8
+_COMBINED_STAGE_C_SCHEMA_REVISION = 13
+_BREAKAWAY_STAGE_C_SCHEMA_REVISION = 14
+
 
 class UnsupportedIntegralRepresentationError(ValueError):
     """Raised when a firmware build has no declared integral-gain domain."""
@@ -104,6 +130,29 @@ def plan_slot_order(plan: dict[str, object]) -> int:
     return (int(plan.get("flags", 0)) & _PLAN_SLOT_ORDER_MASK) >> _PLAN_SLOT_ORDER_SHIFT
 
 
+def stage_c_schema_is_known(schema_revision: int) -> bool:
+    """Return whether one Stage-C evidence schema revision exists in firmware."""
+    return 1 <= schema_revision <= _BREAKAWAY_STAGE_C_SCHEMA_REVISION
+
+
+def stage_c_combined_workflow(schema_revision: int) -> bool:
+    """Return whether one Stage-C schema revision is a combined P-then-I run.
+
+    This is the offline equivalent of firmware's
+    `VelocityIntegralExecutionPlan::combined_workflow`
+    (`combined_selected_response.is_some()`, `integral_plan.rs:508`), derived
+    from the schema revision rather than from the capture's own field so a
+    capture cannot declare its own workflow. Schemas 8 through 13 are the
+    combined range; 7 and below are standalone and 14 is the breakaway
+    campaign, neither of which carries a combined selected response.
+    """
+    return (
+        _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION
+        <= schema_revision
+        <= _COMBINED_STAGE_C_SCHEMA_REVISION
+    )
+
+
 def integral_numerator_for_build(build_revision: int | None) -> int:
     """Return the integral normalization recorded by one firmware build."""
     if build_revision == _LEGACY_Q8_8_BUILD_REVISION:
@@ -132,26 +181,32 @@ def _append_integer(buffer: bytearray, value: int, size: int, *, signed: bool = 
 
 def integral_plan_digest(plan: dict[str, object]) -> int:
     """Recompute the firmware Stage-C plan digest over every immutable input."""
+    schema_revision = int(plan["schema_revision"])
+    combined_workflow = stage_c_combined_workflow(schema_revision)
     encoded = bytearray()
     _append_integer(encoded, int(plan["build_revision"]), 4)
-    _append_integer(encoded, int(plan["schema_revision"]), 2)
+    _append_integer(encoded, schema_revision, 2)
     _append_integer(encoded, int(plan["channel"]), 1)
     _append_integer(encoded, int(plan["stage_b_plan_digest"]), 8)
     _append_integer(encoded, int(plan["final_p"]), 2)
     for membership in plan["directional_memberships"]:  # type: ignore[union-attr]
         _append_integer(encoded, int(membership), 4)
-    if int(plan["schema_revision"]) >= 7:
+    if schema_revision >= 7:
         _append_integer(encoded, int(plan["stage_b_joint_membership"]), 4)
     _append_integer(encoded, int(plan["joint_membership"]), 4)
-    if int(plan["schema_revision"]) >= 4:
+    if schema_revision >= 4:
         for validity in plan["directional_validity"]:  # type: ignore[union-attr]
             _append_integer(encoded, int(validity), 1)
         _append_integer(encoded, int(bool(plan["reduced_margin"])), 1)
     for interval in plan["directional_pooled_intervals"]:  # type: ignore[union-attr]
         _append_integer(encoded, int(interval[0]), 4, signed=True)
         _append_integer(encoded, int(interval[1]), 4, signed=True)
-    if int(plan["schema_revision"]) >= 8:
-        selected = bool(plan["combined_selected_response"])
+    if schema_revision >= _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION:
+        # Firmware hashes the presence byte from
+        # `combined_selected_response.is_some()` and the intervals only behind
+        # it, so a breakaway plan (schema 14) hashes a bare zero and carries no
+        # `selected_response_intervals_q` key at all.
+        selected = bool(plan.get("combined_selected_response", False))
         _append_integer(encoded, int(selected), 1)
         if selected:
             _append_integer(encoded, int(plan["final_p"]), 2)
@@ -171,13 +226,20 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     _append_integer(encoded, int(plan["expected_observations"]), 2)
     for name in ("moving_stroke_us", "zero_settle_us", "analysis_budget_us"):
         _append_integer(encoded, int(plan[name]), 4)
-    if int(plan["schema_revision"]) >= 9:
+    if schema_revision >= 9 and combined_workflow:
+        # Firmware gates both of these on the *combined* workflow, not on the
+        # schema alone (`integral_plan.rs:439-445` hashes them only when
+        # `combined_selected_response.is_some()`). Every schema in 9..13 is
+        # combined, so this reproduces every archived digest unchanged, while
+        # the breakaway schema 14 -- which emits no
+        # `slot_transition_allowance_us` at all, on the wire or in the hash
+        # (`integral_reporting.rs:316-321`) -- correctly hashes neither.
         _append_integer(encoded, int(plan["slot_transition_allowance_us"]), 4)
-        if int(plan["schema_revision"]) == 11 and bool(plan["combined_selected_response"]):
+        if schema_revision == 11:
             _append_integer(encoded, _STABILIZED_RECOVERY_SCHEDULE_CODE, 1)
     for name in ("nominal_workflow_ms", "maximum_workflow_ms"):
         _append_integer(encoded, int(plan[name]), 4)
-    if int(plan["schema_revision"]) >= 2:
+    if schema_revision >= 2:
         for name in (
             "recovery_origin_band_counts",
             "recovery_nominal_slot_us",
@@ -187,15 +249,15 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
         _append_integer(encoded, int(plan["recovery_slot_count"]), 1)
     _append_integer(encoded, int(plan["hard_torque_limit"]), 2)
     _append_integer(encoded, int(plan["usable_torque_limit"]), 2)
-    if int(plan["schema_revision"]) >= 3:
+    if schema_revision >= 3:
         _append_integer(encoded, int(plan["limit_evidence_capability"]), 1)
-    if int(plan["schema_revision"]) >= 6:
+    if schema_revision >= 6:
         _append_integer(
             encoded,
             int(bool(int(plan["flags"]) & _PLAN_RECOVERY_QUANTIZATION_EXPOSED)),
             1,
         )
-    if int(plan["schema_revision"]) >= 7:
+    if schema_revision >= 7:
         _append_integer(
             encoded,
             int(bool(int(plan["flags"]) & _PLAN_PROBE_CONSTRAINED_TEST_POINT)),
@@ -258,7 +320,7 @@ def derive_integral_ladder(
     build_revision: int | None,
 ) -> dict[str, object]:
     """Reconstruct the cap-only whole-octave positive-I ladder."""
-    if schema_revision not in range(1, 14):
+    if not stage_c_schema_is_known(schema_revision):
         raise ValueError("unsupported Stage-C evidence schema")
     if shortest_suffix_us < 2:
         raise ValueError("shortest suffix must contain at least two microseconds")
@@ -289,7 +351,14 @@ def derive_integral_ladder(
     while candidate <= i_top_cap:
         rungs.append(candidate)
         candidate <<= 1
-    if schema_revision >= 8 and rungs[-1] != i_top_cap:
+    # Only the combined workflow appends the exact cap:
+    # `plan_velocity_integral_response_from_source` picks
+    # `build_combined_integral_ladder` when `append_exact_cap` is set, and only
+    # `plan_combined_velocity_integral_response` sets it
+    # (`integral_plan.rs:1217`). The breakaway plan at schema 14 passes
+    # `append_exact_cap: false` (`integral_plan.rs:1438`) and so keeps the
+    # plain whole-octave ladder, exactly like the standalone schemas below 8.
+    if stage_c_combined_workflow(schema_revision) and rungs[-1] != i_top_cap:
         rungs.append(i_top_cap)
     family_size = (len(rungs) + 2) * _I_OBSERVATIONS_PER_DIRECTION
     if len(rungs) < 3:
@@ -883,6 +952,27 @@ def _direction_consensus(
 def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
     build_revision = plan.get("build_revision")
     integral_numerator_for_build(build_revision if isinstance(build_revision, int) else None)
+    schema_revision = int(plan["schema_revision"])
+    if not stage_c_schema_is_known(schema_revision):
+        mismatches.append(
+            f"plan schema revision {schema_revision} is outside the firmware Stage-C range"
+        )
+        return
+    # The schema revision, not the capture's own field, names the workflow that
+    # built this plan; see the schema-revision block at the top of this module.
+    # Enforcing the mapping here is what stops a self-consistent schema-8-to-13
+    # capture from omitting its selected response -- along with Event 150, the
+    # combined recovery-flag bit and the combined terminal tail -- and passing
+    # as a standalone run. Every derivation below, and the recovery schedule
+    # and terminal expectations in `audit_velocity_integral`, read the workflow
+    # from the schema once this check has confirmed the two agree.
+    combined_workflow = stage_c_combined_workflow(schema_revision)
+    if bool(plan.get("combined_selected_response", False)) != combined_workflow:
+        mismatches.append(
+            "plan combined selected response contradicts its schema workflow: "
+            f"schema={schema_revision} expects "
+            f"{'a combined' if combined_workflow else 'no combined'} selected response"
+        )
     try:
         calculated_digest = integral_plan_digest(plan)
     except (KeyError, OverflowError, TypeError, ValueError) as error:
@@ -894,7 +984,7 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
             f"offline=0x{calculated_digest:016x}"
         )
     planned_velocity_mrev_s = int(plan["planned_velocity_mrev_s"])
-    if int(plan["schema_revision"]) >= 10:
+    if schema_revision >= 10:
         expected_target = planned_velocity_mrev_s * 60 // 1_000
     else:
         expected_target = (planned_velocity_mrev_s * 60 + 500) // 1_000
@@ -906,7 +996,7 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
             int(plan["moving_stroke_us"]),
             64_000,
             32_767,
-            schema_revision=int(plan["schema_revision"]),
+            schema_revision=schema_revision,
             build_revision=plan.get("build_revision"),
         )
     except ValueError as error:
@@ -923,7 +1013,6 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
         + int(plan["zero_settle_us"])
         + int(plan["analysis_budget_us"])
     )
-    schema_revision = int(plan["schema_revision"])
     if schema_revision >= 6:
         flags = int(plan.get("flags", -1))
         known_flags = _PLAN_RECOVERY_QUANTIZATION_EXPOSED
@@ -955,7 +1044,7 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
                     mismatches.append(
                         "plan recovery quantization exposure differs from exact reconstruction"
                     )
-    if schema_revision == 7:
+    if schema_revision == _STANDALONE_STAGE_C_SCHEMA_REVISION:
         try:
             selection = select_transition_capable_test_point(
                 stage_b_joint_membership=int(plan["stage_b_joint_membership"]),
@@ -991,13 +1080,14 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
                 )
                 if int(validity) != expected:
                     mismatches.append(f"plan direction {direction} validity differs at selected P")
-    if schema_revision >= 8 and bool(plan.get("combined_selected_response", False)):
-        # Presence is optional from schema 8 onward, not schema-gated: a
-        # breakaway Stage-C plan carries no combined Stage-B response
-        # (`combined_selected_response: None`, `integral_plan.rs:1434`) at any
-        # schema revision, exactly as `protocol.py`'s plan-core decode and
-        # `_compact_plan_marker` already treat it. Validate the intervals only
-        # when the plan actually claims a combined response.
+    if combined_workflow:
+        # Presence is required across the whole combined range, and forbidden
+        # outside it -- the identity check above already reported a plan that
+        # disagrees. `plan_combined_velocity_integral_response` is the only
+        # builder for schemas 8 through 13 and it always supplies
+        # `Some(selected)` (`integral_plan.rs:1214`), so the intervals are
+        # always there to validate; a standalone or breakaway plan carries none
+        # (`integral_plan.rs:1163` and `:1435`) and skips this block entirely.
         intervals = plan.get("selected_response_intervals_q")
         if (
             not isinstance(intervals, list)
@@ -1010,9 +1100,14 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
             )
         ):
             mismatches.append("combined plan selected response intervals are invalid")
-    if schema_revision >= 9:
+    if schema_revision >= 9 and combined_workflow:
+        # The schedule fragment carries this field only for a combined plan
+        # (`integral_reporting.rs:316-321`), so a breakaway schema-14 plan
+        # legitimately has no key here and must not be asked for one.
         if int(plan.get("slot_transition_allowance_us", -1)) != _SLOT_TRANSITION_ALLOWANCE_US:
             mismatches.append("combined plan slot-transition allowance differs from schema 9")
+    elif "slot_transition_allowance_us" in plan:
+        mismatches.append("noncombined plan carries a combined slot-transition allowance")
     if schema_revision >= 4:
         validity = plan.get("directional_validity")
         if (
@@ -1036,7 +1131,12 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
             mismatches.append(f"plan recovery reconstruction failed: {error}")
             return
         expected_nominal_slot_us = int(recovery["nominal_slot_us"])
-        if schema_revision >= 11:
+        if schema_revision >= 11 and combined_workflow:
+            # Firmware adds the stabilization reserve only for the combined
+            # workflow (`integral_plan.rs:1544-1553`), which is also the only
+            # workflow whose recoveries run the `Stabilized` rest schedule
+            # (`integral_sweep.rs:779-785`). A breakaway schema-14 plan keeps
+            # the bare `plan_rung_origin_recovery` slot.
             expected_nominal_slot_us += _RECOVERY_STABILIZATION_US
         for name, expected in (
             ("recovery_origin_band_counts", recovery["origin_band_counts"]),
@@ -1056,7 +1156,10 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
             cleanup_duration_us = int(plan["zero_settle_us"]) + int(plan["analysis_budget_us"])
             nominal_duration_us += cleanup_duration_us
             maximum_duration_us += cleanup_duration_us
-        if schema_revision >= 9:
+        if schema_revision >= 9 and combined_workflow:
+            # Same gate as the hashed allowance above: only a combined plan
+            # reserves per-slot SPI transition time
+            # (`integral_plan.rs:1534-1542`).
             transition_duration_us = expected_observations * _SLOT_TRANSITION_ALLOWANCE_US
             nominal_duration_us += transition_duration_us
             maximum_duration_us += transition_duration_us
@@ -1309,11 +1412,17 @@ def audit_velocity_integral(
             "velocity_primitive_current",
         )
     ]
-    # Acceptance-matrix runs cannot reach this caller: `_velocity_integral_audits`
-    # (analyze.py) collects `matrix_runs` first and filters every candidate with
-    # `int(item.payload["run_sequence"]) not in matrix_runs`, so the schedule
-    # here is derived from the Stage-C plan alone, not from is_acceptance_matrix.
-    stabilized_recovery_rest = bool(plan["combined_selected_response"])
+    # `integral_recovery_rest_schedule` (`integral_sweep.rs:779-785`) returns
+    # `Stabilized` for `plan.combined_workflow || is_acceptance_matrix(plan)`
+    # and `ImmediateScored` otherwise. Acceptance-matrix runs cannot reach this
+    # caller: `_velocity_integral_audits` (analyze.py) collects `matrix_runs`
+    # first and filters every candidate with
+    # `int(item.payload["run_sequence"]) not in matrix_runs`. So the schedule
+    # is the combined-workflow identity alone -- taken from the schema
+    # revision, which `_validate_plan` has already confirmed agrees with the
+    # plan's own field, rather than from that field directly. A capture that
+    # simply omitted the field would otherwise choose its own schedule.
+    stabilized_recovery_rest = stage_c_combined_workflow(schema_revision)
     mismatches.extend(
         audit_scored_rest_grammar(
             [value for _raw, value in nonterminal],
@@ -1838,16 +1947,17 @@ def audit_velocity_integral(
         bookend,
         eligible_masks,
     )
-    if schema_revision >= 8:
+    if schema_revision >= _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION:
         # `plan.combined_workflow` (integral_plan.rs:508) is exactly
-        # `combined_selected_response.is_some()`: a breakaway/standalone plan
-        # never carries a combined selected response, and a combined plan
-        # always does (`plan_combined_velocity_integral_response` always
-        # supplies `Some`). So the plan's own `combined_selected_response`
-        # is a faithful proxy for whether this run is a combined workflow at
-        # all -- schema >= 8 alone says nothing about that; plenty of
-        # schema >= 8 runs are standalone Stage-C (breakaway) runs and must
-        # not be held to combined-terminal semantics.
+        # `combined_selected_response.is_some()`, and which workflow built the
+        # plan is fixed by the schema revision: 8 through 13 are combined, 14
+        # is breakaway. Schema >= 8 alone therefore does *not* mean combined --
+        # a schema-14 breakaway run is a standalone Stage C and must not be
+        # held to combined-terminal semantics -- but neither does the presence
+        # of the field decide it. Taking the workflow from the schema, after
+        # `_validate_plan` has confirmed the plan's own field agrees, is what
+        # stops a schema-8-to-13 capture that omits the selected response from
+        # electing standalone semantics for itself.
         # Every one of these is derived from `plan.combined_workflow` in the
         # firmware and must be checked against the plan independently: the
         # recovery_flags workflow bit and its target-status bits (both
@@ -1872,7 +1982,7 @@ def audit_velocity_integral(
         # Recorded firmware output (a real standalone capture, outcome=3,
         # cause=4/`INTEGRAL_CAUSE_INTEGRITY`, sufficient replay) hit exactly
         # this gap before the guard was added.
-        plan_combined_workflow = bool(plan.get("combined_selected_response", False))
+        plan_combined_workflow = stage_c_combined_workflow(schema_revision)
         recovery_flags = int(terminal.get("recovery_flags", 0))
         terminal_combined_workflow = bool(recovery_flags & _TERMINAL_COMBINED_WORKFLOW)
         if terminal_combined_workflow != plan_combined_workflow:
