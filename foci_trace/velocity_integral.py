@@ -1860,7 +1860,18 @@ def audit_velocity_integral(
         # `Complete` (1) only when `plan.combined_workflow`, and
         # `CompleteCandidate` (0) otherwise. A terminal can lie about any
         # one of these independently of the others, so each gets its own
-        # check and its own message.
+        # check and its own message. The outcome rule is `not faulted`-gated
+        # (like every other sibling check in this function that reads
+        # firmware-reported evidence): `Fault` is reached via
+        # `integral_fault_terminal` and the `Err(_)` arm of `evidence_terminal`
+        # in `integral_sweep.rs`, neither of which ever consults
+        # `combined_workflow` -- so a faulted run's outcome carries no
+        # schedule information, and `sufficient` here is the *replayed*
+        # pre-fault evidence, which can be sufficient even though the
+        # firmware's own fault path resets its reported evidence to empty.
+        # Recorded firmware output (a real standalone capture, outcome=3,
+        # cause=4/`INTEGRAL_CAUSE_INTEGRITY`, sufficient replay) hit exactly
+        # this gap before the guard was added.
         plan_combined_workflow = bool(plan.get("combined_selected_response", False))
         recovery_flags = int(terminal.get("recovery_flags", 0))
         terminal_combined_workflow = bool(recovery_flags & _TERMINAL_COMBINED_WORKFLOW)
@@ -1869,7 +1880,7 @@ def audit_velocity_integral(
         terminal_combined_tail = bool(terminal.get("combined_workflow", False))
         if terminal_combined_tail != plan_combined_workflow:
             mismatches.append("terminal combined tail differs from the plan")
-        if sufficient and not plan_combined_workflow and outcome != 0:
+        if not faulted and sufficient and not plan_combined_workflow and outcome != 0:
             mismatches.append("standalone sufficient run falsely reports the combined outcome")
         if plan_combined_workflow:
             target_terminus = terminal.get("target_terminus")
@@ -1893,7 +1904,7 @@ def audit_velocity_integral(
             )
             if encoded_status != expected_encoded_status:
                 mismatches.append("combined terminal target flags differ from canonical status")
-            if sufficient and outcome != 1:
+            if not faulted and sufficient and outcome != 1:
                 mismatches.append("combined sufficient run did not complete without retention")
     if cause in (9, 10) and rest_boundary is None:
         mismatches.append("rest-boundary terminal cause lacks its canonical boundary record")

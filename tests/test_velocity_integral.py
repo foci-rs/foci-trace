@@ -2639,3 +2639,69 @@ def test_combined_sufficient_terminal_claiming_the_standalone_outcome_is_rejecte
     audit = audit_velocity_integral(raw, records)
 
     assert audit["mismatches"] == ["combined sufficient run did not complete without retention"]
+
+
+def _fault_the_terminal(
+    records: list[tuple[bytes, dict[str, object]]],
+) -> list[tuple[bytes, dict[str, object]]]:
+    """Turn an honest, complete terminal into an honest, sufficient-but-faulted one.
+
+    Mirrors what `integral_fault_terminal`/`evidence_terminal`'s `Err(_)` arm
+    (`integral_sweep.rs`) actually report: `outcome=3`, `cause=4`
+    (`INTEGRAL_CAUSE_INTEGRITY`), and every evidence-derived terminal field
+    reset to empty, because both paths build the terminal from
+    `IntegralRunEvidence::new(...)` rather than the run's real evidence.
+    `sufficient` in `audit_velocity_integral` is computed by *replaying* the
+    still-emitted pre-fault records, not from these reset terminal fields, so
+    it stays True even though the terminal itself now reports empty --
+    exactly the shape of the real `foc213-transport-validated` capture that
+    exposed this bug (outcome=3, cause=4, sufficient replay, standalone plan).
+    """
+    terminal_raw, terminal = records[-1]
+    terminal = {
+        **terminal,
+        "outcome": 3,
+        "cause": 4,
+        "eligible_masks": [0, 0],
+        "opening_available_mask": 0,
+        "bookend_available_mask": 0,
+    }
+    return [*records[:-1], (terminal_raw, terminal)]
+
+
+def test_standalone_sufficient_but_faulted_terminal_is_accepted() -> None:
+    """A faulted run's outcome carries no schedule information: `Fault` is
+    reached without ever consulting `plan.combined_workflow`
+    (`integral_fault_terminal`, and the `Err(_)` arm of `evidence_terminal`,
+    both in `integral_sweep.rs`). Before the `not faulted` guard was added,
+    this exact shape -- a sufficient replay whose terminal reports outcome 3
+    on a standalone plan -- falsely tripped the standalone-direction outcome
+    check, which is precisely what happened when Task 7 replayed the real
+    `foc213-transport-validated` capture. Assert an empty mismatch list: the
+    fault is real firmware output, not a defect to report.
+    """
+    raw, records = _synthetic_complete_capture(schema_revision=12, stabilized=False)
+    records = _fault_the_terminal(records)
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["mismatches"] == []
+
+
+def test_combined_sufficient_but_faulted_terminal_is_accepted() -> None:
+    """Mirror of the standalone case above: a faulted run's outcome carries
+    no schedule information under `Stabilized` either, so a sufficient
+    replay whose terminal reports outcome 3 on a combined plan must not trip
+    the combined-direction outcome check. `sufficient` is unaffected by
+    `plan.combined_workflow` (it depends only on the replayed causal
+    ladder), so a faulted combined run can be sufficient by exactly the same
+    mechanism as the standalone case -- this is the "determine from firmware
+    whether a faulted combined run can be sufficient" the fix round asked
+    for, applied as a real fixture rather than an assertion on paper.
+    """
+    raw, records = _synthetic_complete_capture(schema_revision=12, stabilized=True)
+    records = _fault_the_terminal(records)
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["mismatches"] == []
