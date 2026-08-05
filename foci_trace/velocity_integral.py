@@ -991,9 +991,13 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
                 )
                 if int(validity) != expected:
                     mismatches.append(f"plan direction {direction} validity differs at selected P")
-    if schema_revision >= 8:
-        if not bool(plan.get("combined_selected_response", False)):
-            mismatches.append("combined plan lacks one selected Stage-B response")
+    if schema_revision >= 8 and bool(plan.get("combined_selected_response", False)):
+        # Presence is optional from schema 8 onward, not schema-gated: a
+        # breakaway Stage-C plan carries no combined Stage-B response
+        # (`combined_selected_response: None`, `integral_plan.rs:1434`) at any
+        # schema revision, exactly as `protocol.py`'s plan-core decode and
+        # `_compact_plan_marker` already treat it. Validate the intervals only
+        # when the plan actually claims a combined response.
         intervals = plan.get("selected_response_intervals_q")
         if (
             not isinstance(intervals, list)
@@ -1642,7 +1646,7 @@ def audit_velocity_integral(
                 f"recovery rung {record['rung_index']}: {item}"
                 for item in recovery_audit["mismatches"]
             )
-        if schema_revision >= 11:
+        if schema_revision >= 11 and stabilized_recovery_rest:
             diagnostic_rung_set = set(recovery_rest_rungs)
             for recovery in recovery_records:
                 if (
@@ -1690,9 +1694,9 @@ def audit_velocity_integral(
         for rung_index in sorted(all_rung_indexes):
             for slot in range(8):
                 if (rung_index, slot) in observation_keys:
+                    expected_order.append(("integral_observation", rung_index))
                     if (rung_index, slot) in ordinary_rest_keys:
                         expected_order.append(("rest_selection", rung_index))
-                    expected_order.append(("integral_observation", rung_index))
                     if (
                         schema_revision >= 3
                         and (rung_index, slot) != terminal_observation_without_current
@@ -1702,9 +1706,9 @@ def audit_velocity_integral(
                     expected_order.append(("velocity_primitive_current", rung_index))
             if rung_index in rung_indexes:
                 expected_order.append(("integral_rung", rung_index))
+            if rung_index in recovery_selection_indexes:
+                expected_order.append(("rest_selection", rung_index))
             if rung_index in recovery_rest_indexes:
-                if rung_index in recovery_selection_indexes:
-                    expected_order.append(("rest_selection", rung_index))
                 expected_order.append(("recovery_rest", rung_index))
             if rung_index in recovery_indexes:
                 expected_order.append(("rung_origin_recovery", rung_index))

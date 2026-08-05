@@ -474,17 +474,24 @@ def _plan_marker(plan: dict[str, object], sequence: int) -> tuple[bytes, dict[st
             )
         )
         if int(plan["schema_revision"]) >= 8:
-            raw.extend(
-                struct.pack(
-                    "<Biiii",
-                    1,
-                    *(
-                        endpoint
-                        for interval in plan["selected_response_intervals_q"]
-                        for endpoint in interval
-                    ),
+            # Mirrors `_compact_plan_marker`: the presence byte follows the
+            # plan's actual combined-selected-response flag rather than being
+            # hardcoded, so an immediate-scored (breakaway) plan's marker
+            # carries a bare 0 and no interval bytes, matching what the
+            # digest reconstruction in `velocity_integral.py` expects.
+            present = bool(plan.get("combined_selected_response"))
+            raw.extend(struct.pack("<B", int(present)))
+            if present:
+                raw.extend(
+                    struct.pack(
+                        "<iiii",
+                        *(
+                            endpoint
+                            for interval in plan["selected_response_intervals_q"]
+                            for endpoint in interval
+                        ),
+                    )
                 )
-            )
         return bytes(raw), {
             **plan,
             "record_kind": "integral_plan_marker",
@@ -638,6 +645,122 @@ def _recovery_record(
         *values.values(),
     )
     return raw, {"record_kind": "rung_origin_recovery", **values}
+
+
+def _moving_recovery_record(
+    rung_index: int, sequence: int, plan: dict[str, object]
+) -> tuple[bytes, dict[str, object]]:
+    """Build a completed moving (outcome 1) Stage-C recovery.
+
+    `_recovery_record` hardcodes `outcome: 0`, which cannot exercise the
+    rest-presence rule (it only applies to outcomes 1 and 5). This carries
+    geometry that satisfies `audit_rung_origin_recovery`'s outcome/binding
+    reconstruction: a start offset outside the origin band (so the return
+    distance is nonzero), a nonzero settled rate, and a runtime within the
+    plan's maximum recovery slot.
+    """
+    values = {
+        "run_sequence": 7,
+        "evidence_sequence": sequence,
+        "stage": 1,
+        "rung_index": rung_index,
+        "velocity_p": int(plan["final_p"]),
+        "planned_velocity_mrev_s": (4_383 if int(plan["schema_revision"]) >= 10 else 4_394),
+        "start_offset_counts": 1_500,
+        "closest_offset_counts": 900,
+        "final_offset_counts": 900,
+        "origin_band_counts": 1_000,
+        "lower_rate_q": 300_000,
+        "moving_duration_us": 1_000_000,
+        "settle_duration_us": 500_000,
+        "total_duration_us": 1_500_000,
+        "peak_torque_target_abs": 500,
+        "binding_source": 1,
+        "outcome": 1,
+    }
+    raw = struct.pack(
+        "<BIHBBHIiiiIQIIIHBB",
+        9,
+        *values.values(),
+    )
+    return raw, {"record_kind": "rung_origin_recovery", **values}
+
+
+def _stage_c_rest_selection_record(
+    rung_index: int,
+    slot: int,
+    owner: int,
+    sequence: int,
+    plan_digest: int,
+    *,
+    disposition: int = 0,
+) -> tuple[bytes, dict[str, object]]:
+    """Build one Event 151 scored-rest selection for a Stage-C fixture.
+
+    Ordinary owners (3 anchor, 4 positive) carry the observation's real slot;
+    the recovery owner (5) has no slot, matching the wire encoding's `0xFF`
+    sentinel for recovery-position selections.
+    """
+    recovery_owner = owner == 5
+    values = {
+        "run_sequence": 7,
+        "evidence_sequence": sequence,
+        "stage": 1,
+        "owner": owner,
+        "rung_index": rung_index,
+        "direction": 0xFF if recovery_owner else 0,
+        "slot": 0xFF if recovery_owner else slot,
+        "plan_digest": plan_digest,
+        "disposition": disposition,
+    }
+    raw = struct.pack("<BIHBBBBBQB", 11, *values.values())
+    return raw, {"record_kind": "rest_selection", **values}
+
+
+def _stage_c_recovery_rest_record(
+    rung_index: int,
+    sequence: int,
+    plan_digest: int,
+    *,
+    start_offset_counts: int,
+    first_in_band_offset_counts: int,
+    final_offset_counts: int,
+    planned_return_distance_counts: int,
+    disposition: int = 0,
+) -> tuple[bytes, dict[str, object]]:
+    """Build one Event 150 recovery-rest diagnostic for a Stage-C fixture.
+
+    Carries every field `audit_recovery_rest_geometry` consumes (an in-band
+    entry and exit, a lead-in span containing its net displacement, and a
+    scored range containing its net displacement), plus
+    `entry_to_band_duration_us`, which `summarize_recovery_rest_diagnostics`
+    also requires unconditionally.
+    """
+    values = {
+        "run_sequence": 7,
+        "evidence_sequence": sequence,
+        "stage": 1,
+        "rung_index": rung_index,
+        "plan_digest": plan_digest,
+        "start_offset_counts": start_offset_counts,
+        "first_in_band_offset_counts": first_in_band_offset_counts,
+        "final_offset_counts": final_offset_counts,
+        "planned_return_distance_counts": planned_return_distance_counts,
+        "displacement_to_band_counts": first_in_band_offset_counts - start_offset_counts,
+        "entry_to_band_duration_us": 400_000,
+        "lead_in_net_displacement_counts": 0,
+        "lead_in_displacement_span_counts": 100,
+        "scored_net_displacement_counts": 0,
+        "scored_min_displacement_counts": -50,
+        "scored_max_displacement_counts": 50,
+        "disposition": disposition,
+    }
+    raw = struct.pack(
+        "<BIHBBQiiiIiIiiiiiB",
+        10,
+        *values.values(),
+    )
+    return raw, {"record_kind": "recovery_rest", **values}
 
 
 def _current_record(rung_index: int, slot: int, sequence: int) -> tuple[bytes, dict[str, object]]:
@@ -804,10 +927,18 @@ def _rung_record(
 def _synthetic_complete_capture(
     schema_revision: int = 1,
     slot_order: int = SLOT_ORDER_FORWARD_FIRST,
+    *,
+    stabilized: bool = True,
 ) -> tuple[list[VelocityObservation], list[tuple[bytes, dict[str, object]]]]:
     plan = _plan(schema_revision)
     if slot_order != SLOT_ORDER_FORWARD_FIRST:
         plan["flags"] = int(plan.get("flags", 0)) | (slot_order << _PLAN_SLOT_ORDER_SHIFT)
+    # Below schema 12 the grammar never runs (its floor is 12) and no
+    # rest_selection/recovery_rest records are emitted, so `stabilized` is
+    # ignored and every existing schema-1-through-11 fixture is unaffected.
+    stage_c_scored = schema_revision >= 12
+    if stage_c_scored:
+        plan["combined_selected_response"] = stabilized
     plan["plan_digest"] = integral_plan_digest(plan)
     records = _plan_records(plan)
     sequence = 1
@@ -815,8 +946,13 @@ def _synthetic_complete_capture(
     sequence += 1
     raw_observations: list[VelocityObservation] = []
     gains = [0, *plan["positive_i"], 0]
+    # The rung whose recovery is a completed moving return (outcome 1), used
+    # to exercise the rest-presence rule. Rung 0 and the last rung are the
+    # opening-anchor/closing-bookend pair; rung 1 is an ordinary positive rung.
+    moving_recovery_rung = 1
     for rung_index, gain in enumerate(gains):
         direction_results: list[list[dict[str, object]]] = [[], []]
+        ordinary_owner = 3 if rung_index in (0, len(gains) - 1) else 4
         for slot in range(8):
             direction = _DECLARED_DIRECTIONS[slot_order][slot]
             raw = [
@@ -843,6 +979,13 @@ def _synthetic_complete_capture(
             direction_results[direction].append(result)
             records.append(_observation_record(result, sequence, int(plan["plan_digest"])))
             sequence += 1
+            if stage_c_scored:
+                records.append(
+                    _stage_c_rest_selection_record(
+                        rung_index, slot, ordinary_owner, sequence, int(plan["plan_digest"])
+                    )
+                )
+                sequence += 1
             if schema_revision >= 3:
                 records.append(_current_record(rung_index, slot, sequence))
                 sequence += 1
@@ -873,14 +1016,36 @@ def _synthetic_complete_capture(
         )
         sequence += 1
         if schema_revision >= 2:
-            records.append(
-                _recovery_record(
-                    rung_index,
-                    sequence,
-                    velocity_p=int(plan["final_p"]),
-                    planned_velocity_mrev_s=(4_383 if schema_revision >= 10 else 4_394),
+            if stage_c_scored and rung_index == moving_recovery_rung:
+                records.append(
+                    _stage_c_rest_selection_record(
+                        rung_index, 0, 5, sequence, int(plan["plan_digest"])
+                    )
                 )
-            )
+                sequence += 1
+                if stabilized:
+                    records.append(
+                        _stage_c_recovery_rest_record(
+                            rung_index,
+                            sequence,
+                            int(plan["plan_digest"]),
+                            start_offset_counts=1_500,
+                            first_in_band_offset_counts=950,
+                            final_offset_counts=900,
+                            planned_return_distance_counts=500,
+                        )
+                    )
+                    sequence += 1
+                records.append(_moving_recovery_record(rung_index, sequence, plan))
+            else:
+                records.append(
+                    _recovery_record(
+                        rung_index,
+                        sequence,
+                        velocity_p=int(plan["final_p"]),
+                        planned_velocity_mrev_s=(4_383 if schema_revision >= 10 else 4_394),
+                    )
+                )
             sequence += 1
     if schema_revision >= 2:
         compact_marker = bytearray(_plan_marker(plan, 1)[0])
@@ -2025,3 +2190,112 @@ def test_every_slot_order_is_decoded_and_separates_the_digest() -> None:
     bare = _plan()
     bare["flags"] = 0
     assert digests[0] == integral_plan_digest(bare)
+
+
+_STAGE_C_NONTERMINAL_KINDS = frozenset(
+    (
+        "integral_plan_marker",
+        "integral_observation",
+        "integral_rung",
+        "recovery_rest",
+        "rest_selection",
+        "rung_origin_recovery",
+        "velocity_primitive_current",
+    )
+)
+
+
+def _renumber_stage_c_nonterminal_sequence(
+    records: list[tuple[bytes, dict[str, object]]],
+) -> int:
+    """Recompute the contiguous 1..N evidence sequence in place.
+
+    Plan fragments carry a fixed `evidence_sequence: 0` and are not part of
+    the numbered stream (`audit_velocity_integral`'s own `nonterminal` filter
+    excludes them). Returns the next sequence value, for the terminal.
+    """
+    sequence = 1
+    for _raw, value in records:
+        if value["record_kind"] in _STAGE_C_NONTERMINAL_KINDS:
+            value["evidence_sequence"] = sequence
+            sequence += 1
+    return sequence
+
+
+def _rebuild_stage_c_digest(
+    plan: dict[str, object], records: list[tuple[bytes, dict[str, object]]]
+) -> int:
+    """Recompute the terminal digest the same way `_synthetic_complete_capture` does."""
+    digest = 0xCBF29CE484222325
+    for byte in _plan_marker(plan, 1)[0]:
+        digest = ((digest ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    for raw, value in records:
+        if value["record_kind"] in ("integral_plan_core", "integral_plan_schedule"):
+            continue
+        for byte in raw:
+            digest = ((digest ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return digest
+
+
+def test_immediate_scored_stage_c_recovery_passes_with_no_event_150() -> None:
+    """Under `ImmediateScored` the firmware emits the owner-5 selection and no
+    `recovery_rest` at all. Before this task both the rest-presence rule and
+    the causal-order builder demanded one, rejecting every such run. Assert an
+    empty mismatch list, not the absence of the two specific messages: that is
+    what proves the whole capture -- plan, marker, and terminal -- is
+    schedule-consistent, not just that the two targeted checks were silenced.
+    """
+    raw, records = _synthetic_complete_capture(schema_revision=12, stabilized=False)
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["mismatches"] == []
+    assert audit["matches_firmware"] is True
+
+
+def test_stabilized_stage_c_recovery_passes_with_event_150() -> None:
+    """Under `Stabilized` the firmware emits the owner-5 selection, then Event
+    150, then the recovery. Mirrors the immediate-scored test above under the
+    other schedule; both must reach an empty mismatch list for the rule to be
+    schedule-derived rather than hardcoded either way.
+    """
+    raw, records = _synthetic_complete_capture(schema_revision=12, stabilized=True)
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["mismatches"] == []
+    assert audit["matches_firmware"] is True
+
+
+def test_stabilized_stage_c_recovery_without_event_150_reports_both_validators() -> None:
+    """Removing Event 150 from an otherwise-valid stabilized capture must still
+    be rejected, proving the presence rule has teeth under `Stabilized` and
+    was not simply disabled. Two validators fire on the same real stream:
+    Task 6's presence check, and Task 5's grammar (the owner-5 selection's
+    successor is no longer `recovery_rest`). Assert exactly that pair and
+    nothing else.
+    """
+    plan = _plan(12)
+    plan["combined_selected_response"] = True
+    plan["plan_digest"] = integral_plan_digest(plan)
+    raw, records = _synthetic_complete_capture(schema_revision=12, stabilized=True)
+    terminal_raw, terminal = records.pop()
+    removed_index = next(
+        index
+        for index, (_raw, value) in enumerate(records)
+        if value["record_kind"] == "recovery_rest"
+    )
+    del records[removed_index]
+    next_sequence = _renumber_stage_c_nonterminal_sequence(records)
+    terminal["evidence_sequence"] = next_sequence
+    terminal["digest"] = _rebuild_stage_c_digest(plan, records)
+    records.append((terminal_raw, terminal))
+
+    audit = audit_velocity_integral(raw, records)
+
+    # The grammar (Task 5) runs before the presence check (Task 6) inside
+    # `audit_velocity_integral`, so its message appears first.
+    assert audit["mismatches"] == [
+        "Stage C recovery selection does not precede Event 150",
+        "moving Stage C recovery lacks recovery rest evidence",
+    ]
