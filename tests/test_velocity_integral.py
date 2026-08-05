@@ -11,6 +11,7 @@ from foci_trace.analyze import analyze_capture
 from foci_trace.capture_file import RECORD_TYPE_FIRMWARE_FRAME, CaptureReader
 from foci_trace.protocol import FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, decode_frame
 from foci_trace.velocity_integral import (
+    _compact_plan_marker,
     _validate_plan,
     _retained_stage_c_evidence,
     audit_integral_reproduction_pair,
@@ -477,6 +478,37 @@ def test_schema_seven_plan_digest_hashes_both_memberships_and_both_flags() -> No
     assert baseline != integral_plan_digest({**plan, "flags": 0b11})
 
 
+def test_compact_plan_marker_suffix_belongs_to_the_combined_workflow() -> None:
+    """`encode_velocity_integral_plan_marker` (`integral_reporting.rs:454-471`)
+    appends the presence byte and the four interval endpoints only inside
+    `if plan.combined_workflow || acquisition_kind is Acceptance*`. A breakaway
+    plan's marker therefore ends after `usable_torque_limit`, with no trailing
+    byte at all -- emitting a zero byte there hashed one byte firmware never
+    hashed and made every breakaway capture's terminal digest disagree.
+
+    Both markers share an identical fixed prefix (the field list is the same
+    from schema 2 up), so the combined marker's tail past the breakaway
+    marker's length is exactly the suffix under test.
+    """
+    combined = _plan(schema_revision=13)
+    combined["plan_digest"] = integral_plan_digest(combined)
+    breakaway = _plan(schema_revision=14)
+    breakaway["plan_digest"] = integral_plan_digest(breakaway)
+
+    combined_marker = _compact_plan_marker(combined, 7)
+    breakaway_marker = _compact_plan_marker(breakaway, 7)
+
+    assert combined_marker[len(breakaway_marker) :] == struct.pack(
+        "<Biiii",
+        1,
+        *(
+            endpoint
+            for interval in combined["selected_response_intervals_q"]
+            for endpoint in interval
+        ),
+    )
+
+
 def test_schema_seven_selects_transition_capable_prefix_independently() -> None:
     selection = select_transition_capable_test_point(
         stage_b_joint_membership=0x001C_0000,
@@ -587,25 +619,25 @@ def _plan_marker(plan: dict[str, object], sequence: int) -> tuple[bytes, dict[st
                 int(plan["usable_torque_limit"]),
             )
         )
-        if int(plan["schema_revision"]) >= 8:
-            # Mirrors `_compact_plan_marker`: the presence byte follows the
-            # plan's actual combined-selected-response flag rather than being
-            # hardcoded, so an immediate-scored (breakaway) plan's marker
-            # carries a bare 0 and no interval bytes, matching what the
-            # digest reconstruction in `velocity_integral.py` expects.
-            present = bool(plan.get("combined_selected_response"))
-            raw.extend(struct.pack("<B", int(present)))
-            if present:
-                raw.extend(
-                    struct.pack(
-                        "<iiii",
-                        *(
-                            endpoint
-                            for interval in plan["selected_response_intervals_q"]
-                            for endpoint in interval
-                        ),
-                    )
+        # Mirrors `_compact_plan_marker`, which mirrors
+        # `encode_velocity_integral_plan_marker`
+        # (`integral_reporting.rs:454-471`): the presence byte and the four
+        # interval endpoints exist only for a combined workflow. A breakaway
+        # plan's marker ends after `usable_torque_limit` with no trailing byte
+        # at all -- not a byte carrying zero.
+        if stage_c_combined_workflow(int(plan["schema_revision"])):
+            raw.extend(struct.pack("<B", 1))
+            # Same fallback as `_compact_plan_marker`, so the forged capture
+            # built by `forge_standalone` (which strips the block a combined
+            # plan must have) still hashes the same bytes on both sides and is
+            # rejected on its own merits rather than on a digest mismatch.
+            intervals = plan.get("selected_response_intervals_q") or ((0, 0), (0, 0))
+            raw.extend(
+                struct.pack(
+                    "<iiii",
+                    *(endpoint for interval in intervals for endpoint in interval),
                 )
+            )
         return bytes(raw), {
             **plan,
             "record_kind": "integral_plan_marker",
@@ -3209,6 +3241,12 @@ _TARGETED_GRAMMAR_MESSAGES = frozenset(
 #   computes the horizon only `if data.plan.combined_workflow` and `encode_rung`
 #   omits all three fields when `moving_horizon_us == 0`, so a breakaway rung
 #   carries none of them by design. Not a decode-completeness gap.
+# - `terminal digest: firmware=0x... offline=0x...`. The offline evidence
+#   digest seeded itself with a compact plan marker carrying a zero presence
+#   byte, but `encode_velocity_integral_plan_marker`
+#   (`integral_reporting.rs:454-471`) appends that byte only for a combined
+#   workflow, so the offline seed hashed one byte firmware never hashed. Not a
+#   property of the fault terminal it was filed under.
 _RESIDUAL_EXACT_MESSAGES = frozenset(
     {
         # This run's terminal is a genuine fault (outcome 3); firmware does
@@ -3223,10 +3261,6 @@ _RESIDUAL_EXACT_MESSAGES = frozenset(
 _RESIDUAL_MESSAGE_PATTERNS = tuple(
     re.compile(pattern)
     for pattern in (
-        # Same fault-terminal build: the terminal's own digest field does not
-        # match a digest recomputed from canonical evidence bytes. Unrelated
-        # to grammar ordering or combined-workflow derivation.
-        r"^terminal digest: firmware=0x[0-9a-f]{16} offline=0x[0-9a-f]{16}$",
         # `_attach_rest_selection_audit`'s independent raw-sample check
         # (unchanged by Tasks 5 or 6): one Event 151's `intervals_q` disagrees
         # with the interval recomputed from the causal 256 raw samples.

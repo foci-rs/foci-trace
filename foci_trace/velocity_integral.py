@@ -895,17 +895,29 @@ def _compact_plan_marker(plan: dict[str, object], run_sequence: int) -> bytes:
         _append_integer(record, int(plan["recovery_slot_count"]), 1)
     _append_integer(record, int(plan["hard_torque_limit"]), 2)
     _append_integer(record, int(plan["usable_torque_limit"]), 2)
-    if int(plan["schema_revision"]) >= 8:
-        # Firmware hashes the presence flag, then the intervals only when the
-        # plan actually carries a combined selected response. A breakaway
-        # Stage-C plan carries none, so hardcoding presence here both mis-hashes
-        # it and reads an absent key.
-        present = bool(plan.get("combined_selected_response"))
-        _append_integer(record, int(present), 1)
-        if present:
-            for interval in plan["selected_response_intervals_q"]:  # type: ignore[union-attr]
-                _append_integer(record, int(interval[0]), 4, signed=True)
-                _append_integer(record, int(interval[1]), 4, signed=True)
+    # The presence byte and the four interval endpoints after it are a
+    # combined-workflow suffix, not a schema-8 suffix.
+    # `encode_velocity_integral_plan_marker` (`integral_reporting.rs:454-471`)
+    # appends the byte only inside
+    # `if plan.combined_workflow || acquisition_kind is Acceptance*`, so a
+    # non-combined plan's marker simply ends after `usable_torque_limit`.
+    # Emitting a zero byte for a schema-14 breakaway plan hashed one byte
+    # firmware never hashed and made every such capture's terminal digest
+    # disagree. Acceptance-matrix plans -- the other arm of that condition,
+    # which also hashes `recovery_lower_rate_q` -- never reach this function:
+    # `_velocity_integral_audits` (analyze.py) filters their run sequences out
+    # before the audit sees them.
+    if stage_c_combined_workflow(int(plan["schema_revision"])):
+        _append_integer(record, 1, 1)
+        # A combined plan always carries the intervals -- the field is not
+        # optional on `VelocityIntegralPlan` -- so the fallback is reached only
+        # by a capture whose combined block is missing, which `_validate_plan`
+        # has already reported. It exists so such a capture still yields a
+        # defined digest instead of raising out of the audit.
+        intervals = plan.get("selected_response_intervals_q") or ((0, 0), (0, 0))
+        for interval in intervals:  # type: ignore[union-attr]
+            _append_integer(record, int(interval[0]), 4, signed=True)
+            _append_integer(record, int(interval[1]), 4, signed=True)
     return bytes(record)
 
 
