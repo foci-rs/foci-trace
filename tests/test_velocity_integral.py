@@ -1213,13 +1213,18 @@ def _synthetic_complete_capture(
     # is unconditionally True there and every schema-8-plus terminal field
     # below is unaffected. At schema 12+, `stage_c_scored` already bound
     # `plan["combined_selected_response"] = stabilized` above, so this
-    # follows `stabilized` exactly. `outcome` itself is not combined-specific
-    # -- it stays 1 (complete) for both schedules, matching every rung and
-    # both anchors being genuinely present in this fixture -- but the
-    # combined-only terminal encoding (`combined_workflow`/`final_p`/
-    # `target_status`/`target_terminus`, and the corresponding recovery_flags
-    # bits) must not claim a combined workflow the plan does not have, or the
-    # fixture falsifies its own terminal to reach an empty mismatch list.
+    # follows `stabilized` exactly. Every schema-8-plus field the firmware
+    # derives from `combined_workflow` must follow it too, not just the
+    # combined-only tail: `outcome` itself is one of them --
+    # `integral_sweep.rs:1174-1177` reports `Complete` (1) for a sufficient
+    # combined run and `CompleteCandidate` (0) for a sufficient standalone
+    # one, so hardcoding 1 for every schema >= 8 run (as this fixture used
+    # to) claims a combined completion an immediate-scored run never
+    # reaches. The combined-only terminal encoding (`combined_workflow`/
+    # `final_p`/`target_status`/`target_terminus`, and the corresponding
+    # recovery_flags bits) must likewise not claim a combined workflow the
+    # plan does not have, or the fixture falsifies its own terminal to reach
+    # an empty mismatch list.
     plan_combined_workflow = bool(plan.get("combined_selected_response", False))
     records.append(
         (
@@ -1230,7 +1235,7 @@ def _synthetic_complete_capture(
                 "evidence_sequence": sequence,
                 "plan_digest": plan["plan_digest"],
                 "digest": digest,
-                "outcome": 1 if schema_revision >= 8 else 0,
+                "outcome": ((1 if plan_combined_workflow else 0) if schema_revision >= 8 else 0),
                 "cause": 0,
                 "expected_observations": 8 * len(gains),
                 "emitted_observations": 8 * len(gains),
@@ -2500,28 +2505,25 @@ def test_stabilized_stage_c_recovery_without_event_150_reports_both_validators()
     ]
 
 
-def test_immediate_scored_terminal_claiming_a_combined_workflow_is_rejected() -> None:
-    """A genuine immediate-scored (non-combined) run's terminal must not carry
-    the combined-workflow flag. Before this task's production fix, the
-    combined-terminal validation ran unconditionally for every schema >= 8
-    run and demanded that flag regardless of the plan, so an honest
-    immediate-scored terminal (flag absent) was rejected -- and a
-    dishonest one that impersonated a combined workflow (flag present, as
-    the fixture used to hardcode) was accepted either way. Sabotaging an
-    otherwise-valid immediate-scored capture to falsely claim the combined
-    encoding proves the check now compares the terminal against the plan
-    in both directions, not just schema revision.
+# The four sabotage tests below isolate the recovery_flags workflow bit and
+# the decoded combined tail as two *independent* signals: a false terminal
+# can carry either one without the other (the reviewer reproduced exactly
+# that gap in round 1, where a sabotage test that always mutated both at
+# once never exercised the tail check on its own). Each test below flips
+# exactly one signal, in each direction, and leaves every other honest field
+# alone.
+
+
+def test_immediate_scored_terminal_claiming_the_combined_workflow_flag_is_rejected() -> None:
+    """Flag-only: a genuine immediate-scored terminal's `recovery_flags` byte
+    must not carry the combined-workflow bit, even with no combined tail
+    present. Before this task's production fix, the combined-terminal
+    validation ran unconditionally for every schema >= 8 run and demanded
+    that flag regardless of the plan.
     """
     raw, records = _synthetic_complete_capture(schema_revision=12, stabilized=False)
     terminal_raw, terminal = records[-1]
-    terminal = {
-        **terminal,
-        "recovery_flags": 0xC0,
-        "combined_workflow": True,
-        "final_p": 1_024,
-        "target_status": 3,
-        "target_terminus": None,
-    }
+    terminal = {**terminal, "recovery_flags": 0x80}
     records[-1] = (terminal_raw, terminal)
 
     audit = audit_velocity_integral(raw, records)
@@ -2530,15 +2532,13 @@ def test_immediate_scored_terminal_claiming_a_combined_workflow_is_rejected() ->
 
 
 def test_stabilized_terminal_dropping_the_combined_workflow_flag_is_rejected() -> None:
-    """Symmetric to the immediate-scored case above: a genuine combined
-    (`Stabilized`) run's terminal must carry the combined-workflow flag.
-    Clearing it from an otherwise-valid stabilized capture proves the
-    plan/terminal agreement check fires in both directions. The combined
-    target-status mask lives in the same `recovery_flags` byte as the
-    workflow bit, so clearing it also invalidates the encoded target status
-    -- both checks are still active for a plan that claims a combined
-    workflow, which is exactly why the agreement check must run before, not
-    instead of, the rest of the combined-terminal validation.
+    """Flag-only, opposite direction: a genuine combined (`Stabilized`)
+    terminal's `recovery_flags` byte must carry the combined-workflow bit.
+    The combined target-status mask lives in the same byte, so clearing the
+    whole byte also invalidates the encoded target status -- both checks
+    stay active for a plan that claims a combined workflow, which is why the
+    agreement check must run before, not instead of, the rest of the
+    combined-terminal validation.
     """
     raw, records = _synthetic_complete_capture(schema_revision=12, stabilized=True)
     terminal_raw, terminal = records[-1]
@@ -2551,3 +2551,91 @@ def test_stabilized_terminal_dropping_the_combined_workflow_flag_is_rejected() -
         "terminal combined-workflow flag differs from the plan",
         "combined terminal target flags differ from canonical status",
     ]
+
+
+def test_immediate_scored_terminal_carrying_the_combined_tail_is_rejected() -> None:
+    """Tail-only: a genuine immediate-scored terminal must not carry the
+    decoded combined tail (`combined_workflow`/`final_p`/`target_status`/
+    `target_terminus`, only ever set by `protocol.py` when the wire payload
+    is the 66-byte combined variant), even with an honest `recovery_flags`
+    byte. Before this round, the agreement check only looked at the
+    recovery_flags bit, so a terminal that carried the tail while leaving
+    the flag clear produced no mismatch at all -- exactly the gap the
+    reviewer reproduced.
+    """
+    raw, records = _synthetic_complete_capture(schema_revision=12, stabilized=False)
+    terminal_raw, terminal = records[-1]
+    terminal = {
+        **terminal,
+        "combined_workflow": True,
+        "final_p": 1_024,
+        "target_status": 3,
+        "target_terminus": None,
+    }
+    records[-1] = (terminal_raw, terminal)
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["mismatches"] == ["terminal combined tail differs from the plan"]
+
+
+def test_stabilized_terminal_missing_the_combined_tail_is_rejected() -> None:
+    """Tail-only, opposite direction: a genuine combined terminal must carry
+    the decoded combined tail, even with an honest `recovery_flags` byte.
+    Dropping the tail alone also leaves `target_status` absent, so the
+    causal-ladder target-status check fires too -- both checks stay active
+    for a plan that claims a combined workflow.
+    """
+    raw, records = _synthetic_complete_capture(schema_revision=12, stabilized=True)
+    terminal_raw, terminal = records[-1]
+    terminal = {
+        key: value
+        for key, value in terminal.items()
+        if key not in ("combined_workflow", "final_p", "target_status", "target_terminus")
+    }
+    records[-1] = (terminal_raw, terminal)
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["mismatches"] == [
+        "terminal combined tail differs from the plan",
+        "combined target status differs from causal ladder evidence",
+    ]
+
+
+def test_standalone_sufficient_terminal_claiming_the_combined_outcome_is_rejected() -> None:
+    """A sufficient, genuinely standalone (immediate-scored) run must report
+    outcome 0 (`CompleteCandidate`), never outcome 1 (`Complete`):
+    `integral_sweep.rs:1174-1177` reports `Complete` only when
+    `plan.combined_workflow`. Before this round the fixture hardcoded
+    outcome 1 for every schema >= 8 run regardless of schedule, and
+    production accepted either outcome for a sufficient standalone run, so
+    this exact falsification reached an empty mismatch list. Every other
+    terminal field stays honest (no combined flag, no combined tail), so
+    only the outcome check fires.
+    """
+    raw, records = _synthetic_complete_capture(schema_revision=12, stabilized=False)
+    terminal_raw, terminal = records[-1]
+    terminal = {**terminal, "outcome": 1}
+    records[-1] = (terminal_raw, terminal)
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["mismatches"] == ["standalone sufficient run falsely reports the combined outcome"]
+
+
+def test_combined_sufficient_terminal_claiming_the_standalone_outcome_is_rejected() -> None:
+    """Opposite direction: a sufficient, genuinely combined (`Stabilized`)
+    run must report outcome 1 (`Complete`), never outcome 0
+    (`CompleteCandidate`). This check predates this fix round -- it is not
+    new production behavior -- but had no direct test coverage; added here
+    to close that gap alongside the new standalone-direction test above.
+    """
+    raw, records = _synthetic_complete_capture(schema_revision=12, stabilized=True)
+    terminal_raw, terminal = records[-1]
+    terminal = {**terminal, "outcome": 0}
+    records[-1] = (terminal_raw, terminal)
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["mismatches"] == ["combined sufficient run did not complete without retention"]

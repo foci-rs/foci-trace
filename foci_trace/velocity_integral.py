@@ -1848,11 +1848,29 @@ def audit_velocity_integral(
         # all -- schema >= 8 alone says nothing about that; plenty of
         # schema >= 8 runs are standalone Stage-C (breakaway) runs and must
         # not be held to combined-terminal semantics.
+        # Every one of these is derived from `plan.combined_workflow` in the
+        # firmware and must be checked against the plan independently: the
+        # recovery_flags workflow bit and its target-status bits (both
+        # inside the same byte), the decoded combined tail's mere presence
+        # (`protocol.py` only sets `terminal["combined_workflow"]` when the
+        # wire payload carries the extra final_p/target_status/
+        # target_terminus block -- a 66-byte terminal -- independently of
+        # what the recovery_flags byte says), and, for a sufficient run,
+        # the outcome itself: `integral_sweep.rs:1174-1177` reports
+        # `Complete` (1) only when `plan.combined_workflow`, and
+        # `CompleteCandidate` (0) otherwise. A terminal can lie about any
+        # one of these independently of the others, so each gets its own
+        # check and its own message.
         plan_combined_workflow = bool(plan.get("combined_selected_response", False))
         recovery_flags = int(terminal.get("recovery_flags", 0))
         terminal_combined_workflow = bool(recovery_flags & _TERMINAL_COMBINED_WORKFLOW)
         if terminal_combined_workflow != plan_combined_workflow:
             mismatches.append("terminal combined-workflow flag differs from the plan")
+        terminal_combined_tail = bool(terminal.get("combined_workflow", False))
+        if terminal_combined_tail != plan_combined_workflow:
+            mismatches.append("terminal combined tail differs from the plan")
+        if sufficient and not plan_combined_workflow and outcome != 0:
+            mismatches.append("standalone sufficient run falsely reports the combined outcome")
         if plan_combined_workflow:
             target_terminus = terminal.get("target_terminus")
             expected_status = combined_target_status(
