@@ -1995,12 +1995,22 @@ def audit_velocity_integral(
         if plan_combined_workflow:
             # `terminal_target_status` (`integral_reporting.rs:51-76`) reads
             # the terminal's *own* `report.evidence.eligible_masks` and
-            # `report.evidence.current_terminus`, and every fault terminal is
-            # built from `IntegralRunEvidence::new(...)`
-            # (`integral_sweep.rs:1001` and `:1143`,
-            # `integral_evidence.rs:167-175`),
-            # which resets both to empty. `target_terminus` is *not* part of
-            # that struct: `terminal_from_data` sets
+            # `report.evidence.current_terminus`. Two fault paths --
+            # `integral_fault_terminal` (`integral_sweep.rs:1001`) and
+            # `evidence_terminal`'s materialization-error arm (`:1143`) --
+            # build their terminal from `IntegralRunEvidence::new(...)`
+            # (`integral_evidence.rs:167-175`), which resets both to empty.
+            # Not every fault does: the assessment-error arm
+            # (`integral_sweep.rs:1211`) passes the materialized `evidence`
+            # through unchanged, and `commission_dispatch/stage_c.rs`
+            # (`:273`, `:283`, `:338`, `:358`) can promote an already-built,
+            # evidence-bearing terminal to `Fault` after the fact. So an
+            # evidence-bearing fault terminal is reachable, and these checks
+            # must read the terminal's own reported evidence rather than
+            # assuming it is empty. That is what they do below, which is
+            # correct for both shapes.
+            # `target_terminus` is *not* part of
+            # `IntegralRunEvidence`: `terminal_from_data` sets
             # `rest_boundary_rung_plus_one` from `data.target_terminus`
             # (`integral_sweep.rs:973`), so it survives the fault. A combined
             # run that faults after reaching a target therefore reports
