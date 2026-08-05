@@ -11,9 +11,14 @@ from foci_trace.analyze import analyze_capture
 from foci_trace.capture_file import RECORD_TYPE_FIRMWARE_FRAME, CaptureReader
 from foci_trace.protocol import FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, decode_frame
 from foci_trace.velocity_integral import (
+    _PLAN_SLOT_ORDER_SHIFT,
+    SLOT_ORDER_FORWARD_FIRST,
+    SLOT_ORDER_PAIRED_OUT_AND_BACK,
+    SLOT_ORDER_REVERSE_FIRST,
+    UnsupportedIntegralRepresentationError,
     _compact_plan_marker,
-    _validate_plan,
     _retained_stage_c_evidence,
+    _validate_plan,
     audit_integral_reproduction_pair,
     audit_velocity_integral,
     classify_observation,
@@ -24,19 +29,14 @@ from foci_trace.velocity_integral import (
     derive_integral_ladder,
     integral_deficit_reaches_target,
     integral_numerator_for_build,
-    _PLAN_SLOT_ORDER_SHIFT,
     integral_plan_digest,
+    reconstruct_observation,
+    recovery_quantization_exposed,
+    select_transition_capable_test_point,
     slot_direction_index,
     slot_for_observation,
-    SLOT_ORDER_FORWARD_FIRST,
-    SLOT_ORDER_PAIRED_OUT_AND_BACK,
-    SLOT_ORDER_REVERSE_FIRST,
-    recovery_quantization_exposed,
-    reconstruct_observation,
-    select_transition_capable_test_point,
     stage_c_combined_workflow,
     stage_c_slot_transition,
-    UnsupportedIntegralRepresentationError,
     velocity_i_tau_us,
 )
 from foci_trace.velocity_measurement import (
@@ -44,7 +44,6 @@ from foci_trace.velocity_measurement import (
     audit_rung_origin_recovery,
     audit_scored_rest_grammar,
 )
-
 
 LEGACY_Q8_8_BUILD = 0x75536758
 CURRENT_Q4_12_BUILD = 0x05E21F75

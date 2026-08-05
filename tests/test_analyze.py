@@ -1,7 +1,7 @@
 import io
 import json
-from pathlib import Path
 import struct
+from pathlib import Path
 
 import pytest
 
@@ -35,7 +35,6 @@ from foci_trace.protocol import (
     PROTOCOL_VERSION,
     SUBSYSTEM_COMMISSIONING,
 )
-
 
 _BREAKAWAY_PROBE_CONTEXT = {
     "workflow_digest": 0xA1B2_C3D4_E5F6_0718,
@@ -2645,7 +2644,7 @@ def test_breakaway_campaign_audit_is_serialized_in_both_json_views() -> None:
 
 
 def test_recovery_records_route_to_their_owning_stage(monkeypatch) -> None:
-    import foci_trace.analyze as analyze
+    from foci_trace import analyze
 
     state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
     payloads = (
@@ -2701,7 +2700,7 @@ def test_recovery_records_route_to_their_owning_stage(monkeypatch) -> None:
 
 
 def test_matrix_records_bypass_stage_b_and_stage_c_replay(monkeypatch) -> None:
-    import foci_trace.analyze as analyze
+    from foci_trace import analyze
 
     state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
     payloads = (
@@ -2762,7 +2761,7 @@ def test_matrix_records_bypass_stage_b_and_stage_c_replay(monkeypatch) -> None:
 
 
 def test_stage_b_schema_ten_is_bound_by_its_companion_stage_c_plan(monkeypatch) -> None:
-    import foci_trace.analyze as analyze
+    from foci_trace import analyze
 
     state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
     payloads = (
@@ -2793,7 +2792,7 @@ def test_stage_b_schema_ten_is_bound_by_its_companion_stage_c_plan(monkeypatch) 
 
 
 def test_selected_recovery_rest_binds_stage_b_schema_eleven(monkeypatch) -> None:
-    import foci_trace.analyze as analyze
+    from foci_trace import analyze
 
     state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
     payloads = (
@@ -2833,7 +2832,7 @@ def test_selected_recovery_rest_binds_stage_b_schema_eleven(monkeypatch) -> None
 
 
 def test_recovery_wide_stage_c_plan_binds_stage_b_schema_twelve(monkeypatch) -> None:
-    import foci_trace.analyze as analyze
+    from foci_trace import analyze
 
     state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
     payloads = (
@@ -2864,7 +2863,7 @@ def test_recovery_wide_stage_c_plan_binds_stage_b_schema_twelve(monkeypatch) -> 
 
 
 def test_event_151_is_verified_against_its_causal_raw_suffixes() -> None:
-    import foci_trace.analyze as analyze
+    from foci_trace import analyze
     from foci_trace.velocity_measurement import (
         VelocityObservation,
         analyze_scored_rest_selection,

@@ -6,10 +6,10 @@ import pytest
 
 from foci_trace.protocol import decode_breakaway_record
 from foci_trace.velocity_measurement import (
-    AccuracyDecision,
-    VelocityObservation,
     _BW_NOMINATION_SCREEN_C_SIGMA,
     _BW_STAGE_B_SCHEMA_REVISION,
+    AccuracyDecision,
+    VelocityObservation,
     _bw_classify_is_eligible,
     _bw_directional_included_mask,
     _bw_observation_interval_percent,
@@ -17,8 +17,8 @@ from foci_trace.velocity_measurement import (
     _bw_percent_to_milli,
     _bw_relative_se_to_permille,
     _confidence_multiplier,
-    analyze_velocity_observations,
     analyze_stationary_tail,
+    analyze_velocity_observations,
     audit_breakaway_campaign,
     audit_rung_origin_recovery,
     audit_scored_rest_grammar,
@@ -43,7 +43,6 @@ from foci_trace.velocity_measurement import (
     summarize_recovery_rest_diagnostics,
     velocity_report_to_json,
 )
-
 
 FIXTURE = Path(__file__).parent / "fixtures" / "velocity_measurement_golden.json"
 
@@ -472,14 +471,14 @@ def test_rest_mode_keeps_the_significance_gate() -> None:
     """At rest the zero-slope null is correct, and a drift bound relative to
     the mean would collapse with it: keep the significance test unchanged."""
     from foci_trace.velocity_measurement import (
+        RATE_Q_SCALE,
         _classify_stationarity,
+        _Level,
+        _observe,
         _q,
         _select_level,
         _stationarity_fit,
-        _Level,
-        _observe,
         _trunc_div,
-        RATE_Q_SCALE,
     )
 
     # A steady linear ramp: the fitted slope is large and unambiguous, so the
@@ -4585,7 +4584,7 @@ def test_audit_breakaway_derives_only_observed_post_breakaway_transients() -> No
     ]
 
 
-def test_audit_breakaway_campaign_accepts_a_non_nominatable_rung_leaving_a_collected_index_gap() -> (
+def test_audit_breakaway_campaign_accepts_a_non_nominatable_rung_leaving_a_collected_index_gap() -> (  # noqa: E501
     None
 ):
     """A genuinely in-band rung that isn't nominatable emits no wire record at
@@ -5005,7 +5004,7 @@ def test_audit_breakaway_campaign_accepts_a_confirmation_whose_disturbance_conse
     assert result["matches_firmware"] is True, result["mismatches"]
 
 
-def test_audit_breakaway_campaign_rejects_an_accepted_confirmation_with_a_raw_interval_outside_the_band() -> (
+def test_audit_breakaway_campaign_rejects_an_accepted_confirmation_with_a_raw_interval_outside_the_band() -> (  # noqa: E501
     None
 ):
     """Acceptance test for the confirmation raw-evidence recompute.
@@ -5164,7 +5163,7 @@ def test_audit_breakaway_campaign_flags_a_wrong_reported_digest_as_a_mismatch_no
     assert any("probe plan_digest" in mismatch for mismatch in result["mismatches"])
 
 
-def test_audit_breakaway_campaign_reports_additive_ladder_resolution_budget_exceeded_as_zero_plan() -> (
+def test_audit_breakaway_campaign_reports_additive_ladder_resolution_budget_exceeded_as_zero_plan() -> (  # noqa: E501
     None
 ):
     """`AdditiveLadderResolutionBudgetExceeded` is a planning refusal before motion.

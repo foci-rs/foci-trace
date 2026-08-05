@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import sys
 import time
-from typing import Callable
+from collections.abc import Callable
+from pathlib import Path
 
 import usb.util
 

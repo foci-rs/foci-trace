@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, field
 import io
 import json
 import math
-from statistics import median
 import struct
 import sys
+from dataclasses import dataclass, field
+from statistics import median
 from typing import BinaryIO
 
+from .acceptance_matrix import audit_acceptance_matrix, compare_matrix_runs
 from .capture_file import (
     RECORD_TYPE_DEVICE_TABLE,
     RECORD_TYPE_FIRMWARE_FRAME,
@@ -23,7 +24,6 @@ from .commissioning import (
     commissioning_report_to_json,
     format_commissioning_report,
 )
-from .acceptance_matrix import audit_acceptance_matrix, compare_matrix_runs
 from .contour import (
     ContourSegmentReport,
     MotorSample,
@@ -50,6 +50,10 @@ from .protocol import (
     assemble_breakaway_ticks,
     decode_frame,
 )
+from .velocity_integral import (
+    audit_integral_reproduction_pair,
+    audit_velocity_integral,
+)
 from .velocity_measurement import (
     VelocityMeasurementReport,
     VelocityObservation,
@@ -57,12 +61,8 @@ from .velocity_measurement import (
     audit_breakaway_campaign,
     audit_stage_b_reproduction_pair,
     audit_velocity_sweep,
-    verify_scored_rest_selection,
     velocity_report_to_json,
-)
-from .velocity_integral import (
-    audit_integral_reproduction_pair,
-    audit_velocity_integral,
+    verify_scored_rest_selection,
 )
 
 DEFAULT_CLOCK_HZ = 84_000_000
@@ -1202,7 +1202,7 @@ def _rounded_percentile(values: list[float], fraction: float) -> float | None:
 def _median_int(values: list[int]) -> int | None:
     if not values:
         return None
-    return int(round(median(values)))
+    return round(median(values))
 
 
 def _current_authority_report(
@@ -1318,22 +1318,28 @@ def _near_limit_longest_run_s(
                 current_start = sample.timestamp_ticks
             current_end = sample.timestamp_ticks
             continue
-        if current_start is not None and current_end is not None:
-            if (
+        if (
+            current_start is not None
+            and current_end is not None
+            and (
                 longest_start is None
                 or current_end - current_start > (longest_end or 0) - longest_start
-            ):
-                longest_start = current_start
-                longest_end = current_end
-        current_start = None
-        current_end = None
-    if current_start is not None and current_end is not None:
-        if (
-            longest_start is None
-            or current_end - current_start > (longest_end or 0) - longest_start
+            )
         ):
             longest_start = current_start
             longest_end = current_end
+        current_start = None
+        current_end = None
+    if (
+        current_start is not None
+        and current_end is not None
+        and (
+            longest_start is None
+            or current_end - current_start > (longest_end or 0) - longest_start
+        )
+    ):
+        longest_start = current_start
+        longest_end = current_end
     if longest_start is None or longest_end is None:
         return 0.0
     return (longest_end - longest_start) / clock_hz
@@ -2778,15 +2784,13 @@ def format_summary(
             )
         )
         lines.append(
-            "  frames={frames} missing={missing} gaps={gaps} decode_errors={errors}".format(
-                frames=report.frame_counts,
-                missing=report.missing_frames,
-                gaps=report.sequence_gaps,
-                errors=report.decode_errors,
-            )
+            f"  frames={report.frame_counts} missing={report.missing_frames} gaps="
+            f"{report.sequence_gaps} decode_errors={report.decode_errors}"
         )
         lines.append(
-            "  status_delta dropped={dropped} endpoint={endpoint} spi={spi} watchdog={watchdog}".format(
+            (
+                "  status_delta dropped={dropped} endpoint={endpoint} spi={spi} watchdog={watchdog}"
+            ).format(
                 dropped=report.status_deltas.get("dropped_motion_sample_count", 0),
                 endpoint=report.status_deltas.get("endpoint_not_ready_count", 0),
                 spi=report.status_deltas.get("spi_error_count", 0),
@@ -2884,33 +2888,27 @@ def format_summary(
             )
             if segment.trace_gap_suspect:
                 lines.append(
-                    "    trace_gap critical={critical} detail={detail} current={current}".format(
-                        critical=_optional_milliseconds_text(segment.critical_max_gap_s),
-                        detail=_optional_milliseconds_text(segment.control_detail_max_gap_s),
-                        current=_optional_milliseconds_text(segment.current_path_max_gap_s),
-                    )
+                    f"    trace_gap critical="
+                    f"{_optional_milliseconds_text(segment.critical_max_gap_s)} detail="
+                    f"{_optional_milliseconds_text(segment.control_detail_max_gap_s)} current="
+                    f"{_optional_milliseconds_text(segment.current_path_max_gap_s)}"
                 )
             authority = segment.current_authority
             if authority is not None:
                 lines.append(
-                    "    authority near_limit={near} sign={sign}/{near} "
-                    "coverage={coverage:.1f}% longest={longest} "
-                    "actual/target={actual_target} uq_lim={uq_lim} "
-                    "uq_delta={uq_delta} uq/limit={uq_limit} rail={rail}/{near} "
-                    "iq/actual={iq_actual} adc0_delta={adc0} adc1_delta={adc1}".format(
-                        near=authority.near_limit_samples,
-                        sign=authority.sign_agreement_samples,
-                        coverage=authority.near_limit_sample_coverage * 100.0,
-                        longest=_optional_milliseconds_text(authority.near_limit_longest_run_s),
-                        actual_target=_optional_ratio_text(authority.actual_to_target_abs_median),
-                        uq_lim=_optional_range_text(authority.uq_limited_range),
-                        uq_delta=_optional_range_text(authority.uq_delta_range),
-                        uq_limit=_optional_ratio_text(authority.uq_to_limit_abs_median),
-                        rail=authority.voltage_rail_samples,
-                        iq_actual=_optional_ratio_text(authority.iq_to_actual_abs_median),
-                        adc0=_optional_range_text(authority.adc_i0_delta_range),
-                        adc1=_optional_range_text(authority.adc_i1_delta_range),
-                    )
+                    f"    authority near_limit={authority.near_limit_samples} sign="
+                    f"{authority.sign_agreement_samples}/{authority.near_limit_samples} "
+                    f"coverage={authority.near_limit_sample_coverage * 100.0:.1f}% longest="
+                    f"{_optional_milliseconds_text(authority.near_limit_longest_run_s)} "
+                    f"actual/target="
+                    f"{_optional_ratio_text(authority.actual_to_target_abs_median)} uq_lim="
+                    f"{_optional_range_text(authority.uq_limited_range)} uq_delta="
+                    f"{_optional_range_text(authority.uq_delta_range)} uq/limit="
+                    f"{_optional_ratio_text(authority.uq_to_limit_abs_median)} rail="
+                    f"{authority.voltage_rail_samples}/{authority.near_limit_samples} "
+                    f"iq/actual={_optional_ratio_text(authority.iq_to_actual_abs_median)} "
+                    f"adc0_delta={_optional_range_text(authority.adc_i0_delta_range)} "
+                    f"adc1_delta={_optional_range_text(authority.adc_i1_delta_range)}"
                 )
             if include_phase_split:
                 for phase in segment.phase_reports:
@@ -2997,48 +2995,34 @@ def format_summary(
                         if phase.phase_advance is not None:
                             phase_advance = phase.phase_advance
                             lines.append(
-                                "      phase_advance={counts} "
-                                "nonzero={nonzero}/{samples} "
-                                "clamped={clamped}/{samples} gated={gated}/{samples} "
-                                "write_failed={write_failed}/{samples} "
-                                "gain={gain} max={max_counts} deadband={deadband}".format(
-                                    counts=_optional_range_text(phase_advance.counts_range),
-                                    nonzero=phase_advance.nonzero_samples,
-                                    samples=phase_advance.samples,
-                                    clamped=phase_advance.clamped_samples,
-                                    gated=phase_advance.gated_samples,
-                                    write_failed=phase_advance.write_failed_samples,
-                                    gain=_compact_range_text(phase_advance.gain_ppm_range),
-                                    max_counts=_compact_range_text(phase_advance.max_counts_range),
-                                    deadband=_compact_range_text(phase_advance.deadband_range),
-                                )
+                                f"      phase_advance="
+                                f"{_optional_range_text(phase_advance.counts_range)} nonzero="
+                                f"{phase_advance.nonzero_samples}/{phase_advance.samples} "
+                                f"clamped={phase_advance.clamped_samples}/"
+                                f"{phase_advance.samples} gated={phase_advance.gated_samples}/"
+                                f"{phase_advance.samples} write_failed="
+                                f"{phase_advance.write_failed_samples}/{phase_advance.samples} "
+                                f"gain={_compact_range_text(phase_advance.gain_ppm_range)} max="
+                                f"{_compact_range_text(phase_advance.max_counts_range)} "
+                                f"deadband={_compact_range_text(phase_advance.deadband_range)}"
                             )
                     if include_decoupling_audit and phase.decoupling is not None:
                         decoupling = phase.decoupling
                         lines.append(
-                            "      decoupling pole_pairs={pairs} l_int={l_int} "
-                            "f_pwm={f_pwm:g} position_units_per_rev={units} "
-                            "omega_e={omega_lo:.1f}..{omega_hi:.1f}rad/s "
-                            "cross/uq_req={req} p95={req_p95} "
-                            "cross/uq_lim={lim} p95={lim_p95} "
-                            "vd={vd_lo:.1f}..{vd_hi:.1f} "
-                            "vq={vq_lo:.1f}..{vq_hi:.1f} samples={samples}".format(
-                                pairs=decoupling.pole_pairs,
-                                l_int=decoupling.l_int,
-                                f_pwm=decoupling.f_pwm_hz,
-                                units=decoupling.position_units_per_rev,
-                                omega_lo=decoupling.omega_e_range_rad_s[0],
-                                omega_hi=decoupling.omega_e_range_rad_s[1],
-                                req=_optional_ratio_text(decoupling.cross_to_requested_median),
-                                req_p95=_optional_ratio_text(decoupling.cross_to_requested_p95),
-                                lim=_optional_ratio_text(decoupling.cross_to_limited_median),
-                                lim_p95=_optional_ratio_text(decoupling.cross_to_limited_p95),
-                                vd_lo=decoupling.vd_cross_range[0],
-                                vd_hi=decoupling.vd_cross_range[1],
-                                vq_lo=decoupling.vq_cross_range[0],
-                                vq_hi=decoupling.vq_cross_range[1],
-                                samples=decoupling.samples,
-                            )
+                            f"      decoupling pole_pairs={decoupling.pole_pairs} l_int="
+                            f"{decoupling.l_int} f_pwm={decoupling.f_pwm_hz:g} "
+                            f"position_units_per_rev={decoupling.position_units_per_rev} "
+                            f"omega_e={decoupling.omega_e_range_rad_s[0]:.1f}.."
+                            f"{decoupling.omega_e_range_rad_s[1]:.1f}rad/s cross/uq_req="
+                            f"{_optional_ratio_text(decoupling.cross_to_requested_median)} p95="
+                            f"{_optional_ratio_text(decoupling.cross_to_requested_p95)} "
+                            f"cross/uq_lim="
+                            f"{_optional_ratio_text(decoupling.cross_to_limited_median)} p95="
+                            f"{_optional_ratio_text(decoupling.cross_to_limited_p95)} vd="
+                            f"{decoupling.vd_cross_range[0]:.1f}.."
+                            f"{decoupling.vd_cross_range[1]:.1f} vq="
+                            f"{decoupling.vq_cross_range[0]:.1f}.."
+                            f"{decoupling.vq_cross_range[1]:.1f} samples={decoupling.samples}"
                         )
     return "\n".join(lines)
 

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import io
 import struct
-from typing import Iterator
+from collections.abc import Iterator
+from dataclasses import dataclass
 
 FILE_MAGIC = 0x46525446
 RECORD_MAGIC = 0x52525446

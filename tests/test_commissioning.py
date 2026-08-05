@@ -1,28 +1,27 @@
 import struct
 
+from foci_trace.commissioning import (
+    CommissioningCaptureBuilder,
+    commissioning_report_to_json,
+    format_commissioning_report,
+)
 from foci_trace.protocol import (
     EVENT_COMMISSION_ENGINE_START,
     EVENT_COMMISSION_ENGINE_TERMINAL,
     EVENT_COMMISSION_PHASE_END,
     EVENT_COMMISSION_PHASE_START,
+    EVENT_COMMISSION_VELOCITY_SWEEP_PLAN,
+    EVENT_COMMISSION_VELOCITY_SWEEP_TERMINAL,
     EVENT_COMMISSION_VELOCITY_VALIDATE_GAIN,
     EVENT_COMMISSION_VELOCITY_VALIDATE_LIMITS,
     EVENT_COMMISSION_VELOCITY_VALIDATE_METRICS,
     EVENT_COMMISSION_VELOCITY_VALIDATE_RESULT,
-    EVENT_COMMISSION_VELOCITY_SWEEP_PLAN,
-    EVENT_COMMISSION_VELOCITY_SWEEP_TERMINAL,
     FRAME_TYPE_CONTROL_DETAIL,
     FRAME_TYPE_CRITICAL,
     FRAME_TYPE_EVENT,
     PROTOCOL_VERSION,
     SUBSYSTEM_COMMISSIONING,
     decode_frame,
-)
-
-from foci_trace.commissioning import (
-    CommissioningCaptureBuilder,
-    commissioning_report_to_json,
-    format_commissioning_report,
 )
 
 CLOCK_HZ = 1_000_000

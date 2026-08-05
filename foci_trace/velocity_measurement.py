@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from enum import Enum
-from fractions import Fraction
+import contextlib
+import itertools
 import math
-from statistics import median
 import struct
-
+from dataclasses import dataclass, field
+from enum import StrEnum
+from fractions import Fraction
+from statistics import median
 
 RATE_Q_SCALE = 1_000
 RECOVERY_MOVING_ALLOWANCE_US = 512_000
@@ -354,12 +355,10 @@ def project_recovery_authority(
     )
     deadline_us = None
     if return_distance and selected["lower_rate_q"]:
-        try:
+        with contextlib.suppress(ValueError):
             deadline_us = recovery_runtime_us(
                 return_distance, selected["lower_rate_q"], primitive_cap_us
             )
-        except ValueError:
-            pass
     return {
         "interpretation": "what_if_projection",
         "target_schema_revision": 5,
@@ -436,12 +435,7 @@ def audit_rung_origin_recovery(
         mismatches.append("successful recovery final offset is outside origin band")
     if outcome in (0, 2, 3) and (moving_us != 0 or settle_us != 0 or total_us != 0):
         mismatches.append("nonmoving recovery reports nonzero timing")
-    if outcome in (4, 5) and schema_six_contact:
-        if total_us != moving_us + settle_us:
-            mismatches.append("recovery total duration differs from moving plus settle duration")
-        if runtime_us is not None and total_us > runtime_us:
-            mismatches.append("recovery total duration exceeds reconstructed deadline")
-    elif outcome == 1:
+    if outcome in (4, 5) and schema_six_contact or outcome == 1:
         if total_us != moving_us + settle_us:
             mismatches.append("recovery total duration differs from moving plus settle duration")
         if runtime_us is not None and total_us > runtime_us:
@@ -660,7 +654,7 @@ def _stage_b_inconclusive_cause(model_direction_mask: int, *, recovery_failure: 
     return STAGE_B_CAUSE_NO_JOINT_OPERABLE_REGION
 
 
-class AccuracyDecision(str, Enum):
+class AccuracyDecision(StrEnum):
     """Confidence-gated physical-accuracy result."""
 
     PASS = "pass"
@@ -1014,7 +1008,7 @@ def _confidence_half_width(variance_of_mean_q2: int, family_size: int) -> int:
 
 def _has_two_doubling_plateau(levels: list[_Level]) -> bool:
     consecutive = 0
-    for lower, upper in zip(levels, levels[1:]):
+    for lower, upper in itertools.pairwise(levels):
         if _plateau_like(lower.moments, upper.moments):
             consecutive += 1
             if consecutive >= 2:
@@ -1770,7 +1764,7 @@ def _diagnostic_block_means(
         difference_low = None
         difference_high = None
     else:
-        variance = sum((float(value - difference_mean) ** 2 for value in differences)) / (
+        variance = sum(float(value - difference_mean) ** 2 for value in differences) / (
             len(differences) - 1
         )
         degrees_freedom = len(differences) - 1
@@ -1888,7 +1882,8 @@ def _compare_fields(
     for field_name in fields:
         if int(firmware[field_name]) != int(offline[field_name]):
             mismatches.append(
-                f"{label} {field_name}: firmware={firmware[field_name]} offline={offline[field_name]}"
+                f"{label} {field_name}: firmware={firmware[field_name]} offline="
+                f"{offline[field_name]}"
             )
 
 
@@ -4664,7 +4659,8 @@ def _audit_stage_b_velocity_sweep(
             decoded = int(record[f"{prefix}_mantissa"]) << int(record[f"{prefix}_shift"])
             if decoded != int(region[source]):
                 mismatches.append(
-                    f"directional region {key} {prefix}: firmware={decoded} offline={region[source]}"
+                    f"directional region {key} {prefix}: firmware={decoded} offline="
+                    f"{region[source]}"
                 )
     if expected_regions:
         mismatches.append(f"missing directional regions {sorted(expected_regions)}")
@@ -5150,8 +5146,8 @@ def audit_velocity_sweep(
     expected_target_rpm = _mrev_s_to_rpm_nearest(int(plan["planned_velocity_mrev_s"]))
     if int(plan["target_velocity_rpm"]) != expected_target_rpm:
         mismatches.append(
-            "plan target RPM: firmware=%d offline=%d"
-            % (int(plan["target_velocity_rpm"]), expected_target_rpm)
+            f"plan target RPM: firmware={int(plan['target_velocity_rpm'])} offline="
+            f"{int(expected_target_rpm)}"
         )
     sequences = [int(value["evidence_sequence"]) for _raw, value in records]
     if sequences != list(range(len(sequences))):
@@ -5309,8 +5305,8 @@ def audit_velocity_sweep(
     direction_mask = finished_bands[0]["sufficient"] | (finished_bands[1]["sufficient"] << 1)
     if direction_mask != int(terminal["sufficient_direction_mask"]):
         mismatches.append(
-            "terminal sufficiency mask: firmware=%d offline=%d"
-            % (int(terminal["sufficient_direction_mask"]), direction_mask)
+            f"terminal sufficiency mask: firmware={int(terminal['sufficient_direction_mask'])} "
+            f"offline={int(direction_mask)}"
         )
     expected_observations = int(plan["rung_count"]) * int(plan["observations_per_direction"]) * 2
     for name, offline_value in (
@@ -5561,9 +5557,8 @@ def _bw_classify_is_eligible(observation: dict[str, object]) -> bool:
     deficit_resolved = deficit_low > 0 if forward else deficit_high < 0
     if not deficit_resolved:
         return False  # DeficitUnresolved
-    if int(observation["disturbance_present"]) == 0:
-        return False  # InvalidEvidenceFault (no representable disturbance)
-    return True  # Eligible
+    # False: InvalidEvidenceFault (no representable disturbance). True: Eligible.
+    return int(observation["disturbance_present"]) != 0
 
 
 def _bw_directional_included_mask(direction_observations: list[dict[str, object]]) -> int:
@@ -5892,7 +5887,8 @@ def _bw_validate_streamed_marker_identity(ticks: list[dict[str, object]]) -> Non
         records = tick["records"]  # type: ignore[assignment]
         if len(records) != 1:  # type: ignore[arg-type]
             raise ValueError(
-                f"streamed marker {event_id} tick must carry exactly one record, got {len(records)}"  # type: ignore[arg-type]
+                f"streamed marker {event_id} tick must carry exactly one record, got {len(records)}"
+                # type: ignore[arg-type]
             )
         record = records[0][1]  # type: ignore[index]
         if int(record["run_sequence"]) != campaign_run:
@@ -6011,7 +6007,7 @@ class _UpwardBreakawayProbeReplay:
     repeat_forward_moved: bool = False
 
     @classmethod
-    def start(cls, rung_count: int) -> "_UpwardBreakawayProbeReplay":
+    def start(cls, rung_count: int) -> _UpwardBreakawayProbeReplay:
         if rung_count <= 0:
             raise ValueError("probe cursor requires a non-empty search grid")
         return cls(rung_count)
@@ -6469,8 +6465,8 @@ def audit_breakaway_campaign(
     )
     if len(search_grid) != int(probe_planned["search_count"]):
         mismatches.append(
-            "probe search_count: firmware=%d offline=%d"
-            % (probe_planned["search_count"], len(search_grid))
+            f"probe search_count: firmware={int(probe_planned['search_count'])} offline="
+            f"{len(search_grid)}"
         )
     probe_digest_verified = probe_planned["workflow_digest"] is not None
     expected_probe_digest = (
@@ -6493,8 +6489,8 @@ def audit_breakaway_campaign(
         probe_planned["plan_digest"]
     ):
         mismatches.append(
-            "probe plan_digest: firmware=0x%016x offline=0x%016x"
-            % (probe_planned["plan_digest"], expected_probe_digest)
+            f"probe plan_digest: firmware=0x{probe_planned['plan_digest']:016x} offline=0x"
+            f"{expected_probe_digest:016x}"
         )
 
     probe_result_ticks = [tick for tick in ticks if tick["event_id"] == 153]
@@ -6520,8 +6516,8 @@ def audit_breakaway_campaign(
             probe_terminal["terminal_cause"]
         ) not in (6, 22):
             mismatches.append(
-                "probe terminal reports a fault checkpoint for non-safety cause %d"
-                % probe_terminal["terminal_cause"]
+                f"probe terminal reports a fault checkpoint for non-safety cause "
+                f"{int(probe_terminal['terminal_cause'])}"
             )
 
     if probe_result is not None and probe_terminal is not None:
@@ -6582,8 +6578,9 @@ def audit_breakaway_campaign(
                     expected_terminal["terminal_cause"]
                 ):
                     mismatches.append(
-                        "probe terminal_cause: firmware=%d offline=%d"
-                        % (probe_terminal["terminal_cause"], expected_terminal["terminal_cause"])
+                        f"probe terminal_cause: firmware="
+                        f"{int(probe_terminal['terminal_cause'])} offline="
+                        f"{int(expected_terminal['terminal_cause'])}"
                     )
         elif probe_replay["uncommitted_raw"] and (
             probe_terminal is None or int(probe_terminal["terminal_cause"]) != 6
@@ -6609,17 +6606,18 @@ def audit_breakaway_campaign(
             raise ValueError("breakaway discovery plan does not chain to the probe plan digest")
         if int(discovery_planned["schema_revision"]) != _BW_STAGE_B_SCHEMA_REVISION:
             mismatches.append(
-                "discovery schema_revision: firmware=%d want=%d (offline replay regenerates the "
-                "ladder under a different rules revision than the firmware applied)"
-                % (discovery_planned["schema_revision"], _BW_STAGE_B_SCHEMA_REVISION)
+                f"discovery schema_revision: firmware="
+                f"{int(discovery_planned['schema_revision'])} want="
+                f"{int(_BW_STAGE_B_SCHEMA_REVISION)} (offline replay regenerates the ladder "
+                f"under a different rules revision than the firmware applied)"
             )
         floor_raw = int(discovery_planned["floor_p_raw"])
         breakaway_raw = int(discovery_planned["breakaway_p_raw"])
         ceiling_raw = int(discovery_planned["ceiling_p_raw"])
         if resolved_breakaway_raw is not None and breakaway_raw != resolved_breakaway_raw:
             mismatches.append(
-                "discovery breakaway_p_raw: reported=%d offline upward replay=%d"
-                % (breakaway_raw, resolved_breakaway_raw)
+                f"discovery breakaway_p_raw: reported={int(breakaway_raw)} offline upward "
+                f"replay={int(resolved_breakaway_raw)}"
             )
         # The per-rung ladder no longer rides the wire: the
         # only per-campaign evidence for the ladder's shape is this plan's own
@@ -6645,21 +6643,22 @@ def audit_breakaway_campaign(
             ladder_gains = best["gains"]
             if len(ladder_gains) != int(discovery_planned["rung_count"]):
                 mismatches.append(
-                    "discovery ladder rung count: firmware=%d offline=%d"
-                    % (discovery_planned["rung_count"], len(ladder_gains))
+                    f"discovery ladder rung count: firmware="
+                    f"{int(discovery_planned['rung_count'])} offline={len(ladder_gains)}"
                 )
             if int(discovery_planned["family_size"]) != best["confidence_family_size"]:
                 mismatches.append(
-                    "discovery family_size: firmware=%d offline=%d"
-                    % (discovery_planned["family_size"], best["confidence_family_size"])
+                    f"discovery family_size: firmware={int(discovery_planned['family_size'])} "
+                    f"offline={int(best['confidence_family_size'])}"
                 )
             expected_first_step = (
                 best["gains"][best["gains"].index(breakaway_raw) + 1] - breakaway_raw
             )
             if int(discovery_planned["first_additive_step_raw"]) != expected_first_step:
                 mismatches.append(
-                    "discovery first_additive_step_raw: firmware=%d offline=%d"
-                    % (discovery_planned["first_additive_step_raw"], expected_first_step)
+                    f"discovery first_additive_step_raw: firmware="
+                    f"{int(discovery_planned['first_additive_step_raw'])} offline="
+                    f"{int(expected_first_step)}"
                 )
             expected_discovery_digest = breakaway_discovery_plan_digest(
                 ladder_gains,
@@ -6669,8 +6668,8 @@ def audit_breakaway_campaign(
             )
             if expected_discovery_digest != int(discovery_planned["plan_digest"]):
                 mismatches.append(
-                    "discovery plan_digest: firmware=0x%016x offline=0x%016x"
-                    % (discovery_planned["plan_digest"], expected_discovery_digest)
+                    f"discovery plan_digest: firmware=0x{discovery_planned['plan_digest']:016x}"
+                    f" offline=0x{expected_discovery_digest:016x}"
                 )
 
     discovery_terminal: dict[str, object] | None = None
@@ -6703,8 +6702,9 @@ def audit_breakaway_campaign(
         # nominatable" -- only `<=` is checkable, not exact equality.
         if len(margin_records) > int(discovery_terminal["collected_count"]):
             mismatches.append(
-                "discovery collected_count: firmware=%d offline has more margin records (%d)"
-                % (discovery_terminal["collected_count"], len(margin_records))
+                f"discovery collected_count: firmware="
+                f"{int(discovery_terminal['collected_count'])} offline has more margin records "
+                f"({len(margin_records)})"
             )
 
         # Independent nomination recompute: every
@@ -6748,23 +6748,22 @@ def audit_breakaway_campaign(
             )
             if expected_margin != int(record["margin_percent_milli"]):
                 mismatches.append(
-                    "discovery rung margin M_i (collected_index=%d): firmware=%d offline=%d"
-                    % (record["collected_index"], record["margin_percent_milli"], expected_margin)
+                    f"discovery rung margin M_i (collected_index="
+                    f"{int(record['collected_index'])}): firmware="
+                    f"{int(record['margin_percent_milli'])} offline={int(expected_margin)}"
                 )
             if expected_half_width != int(record["half_width_percent_milli"]):
                 mismatches.append(
-                    "discovery rung half-width (collected_index=%d): firmware=%d offline=%d"
-                    % (
-                        record["collected_index"],
-                        record["half_width_percent_milli"],
-                        expected_half_width,
-                    )
+                    f"discovery rung half-width (collected_index="
+                    f"{int(record['collected_index'])}): firmware="
+                    f"{int(record['half_width_percent_milli'])} offline="
+                    f"{int(expected_half_width)}"
                 )
             p_raw = int(record["p_raw"])
             if p_raw not in ladder_gains:
                 mismatches.append(
-                    "discovery rung margin (collected_index=%d) p_raw=%d is not on the "
-                    "independently regenerated ladder" % (record["collected_index"], p_raw)
+                    f"discovery rung margin (collected_index={int(record['collected_index'])}) "
+                    f"p_raw={int(p_raw)} is not on the independently regenerated ladder"
                 )
             else:
                 rung_index = ladder_gains.index(p_raw)
@@ -6776,9 +6775,10 @@ def audit_breakaway_campaign(
                     or len(reverse) != _BW_CONSENSUS_OBSERVATIONS_PER_DIRECTION
                 ):
                     mismatches.append(
-                        "discovery rung margin (collected_index=%d, p_raw=%d) has no complete "
-                        "raw-observation octet (forward=%d reverse=%d) to independently verify"
-                        % (record["collected_index"], p_raw, len(forward), len(reverse))
+                        f"discovery rung margin (collected_index="
+                        f"{int(record['collected_index'])}, p_raw={int(p_raw)}) has no "
+                        f"complete raw-observation octet (forward={len(forward)} reverse="
+                        f"{len(reverse)}) to independently verify"
                     )
                 else:
                     recomputed = _bw_rung_response_bounds_from_consensus(
@@ -6790,33 +6790,26 @@ def audit_breakaway_campaign(
                     )
                     if recomputed is None:
                         mismatches.append(
-                            "discovery rung margin (collected_index=%d, p_raw=%d) raw evidence is "
-                            "not independently nominatable" % (record["collected_index"], p_raw)
+                            f"discovery rung margin (collected_index="
+                            f"{int(record['collected_index'])}, p_raw={int(p_raw)}) raw "
+                            f"evidence is not independently nominatable"
                         )
                     else:
                         offline_lower_milli = _bw_percent_to_milli(recomputed[0])
                         offline_upper_milli = _bw_percent_to_milli(recomputed[1])
                         if offline_lower_milli != int(record["lower_percent_milli"]):
                             mismatches.append(
-                                "discovery rung lower_percent_milli (collected_index=%d, "
-                                "p_raw=%d): firmware=%d offline=%d"
-                                % (
-                                    record["collected_index"],
-                                    p_raw,
-                                    record["lower_percent_milli"],
-                                    offline_lower_milli,
-                                )
+                                f"discovery rung lower_percent_milli (collected_index="
+                                f"{int(record['collected_index'])}, p_raw={int(p_raw)}): "
+                                f"firmware={int(record['lower_percent_milli'])} offline="
+                                f"{int(offline_lower_milli)}"
                             )
                         if offline_upper_milli != int(record["upper_percent_milli"]):
                             mismatches.append(
-                                "discovery rung upper_percent_milli (collected_index=%d, "
-                                "p_raw=%d): firmware=%d offline=%d"
-                                % (
-                                    record["collected_index"],
-                                    p_raw,
-                                    record["upper_percent_milli"],
-                                    offline_upper_milli,
-                                )
+                                f"discovery rung upper_percent_milli (collected_index="
+                                f"{int(record['collected_index'])}, p_raw={int(p_raw)}): "
+                                f"firmware={int(record['upper_percent_milli'])} offline="
+                                f"{int(offline_upper_milli)}"
                             )
             mid = (int(record["lower_percent_milli"]) + int(record["upper_percent_milli"])) // 2
             collected_index = int(record["collected_index"])
@@ -6835,13 +6828,9 @@ def audit_breakaway_campaign(
             )
             if expected_step != int(record["adjacent_rate_step_permille"]):
                 mismatches.append(
-                    "discovery adjacent_rate_step_permille (collected_index=%d): "
-                    "firmware=%d offline=%d"
-                    % (
-                        record["collected_index"],
-                        record["adjacent_rate_step_permille"],
-                        expected_step,
-                    )
+                    f"discovery adjacent_rate_step_permille (collected_index="
+                    f"{int(record['collected_index'])}): firmware="
+                    f"{int(record['adjacent_rate_step_permille'])} offline={int(expected_step)}"
                 )
             previous_mid = mid
             previous_collected_index = collected_index
@@ -6865,8 +6854,8 @@ def audit_breakaway_campaign(
         )
         if int(confirmation_planned["family_size"]) != _BW_CONFIRMATION_FAMILY_SIZE:
             raise ValueError(
-                "breakaway confirmation family_size=%d, want the fixed family of 8"
-                % confirmation_planned["family_size"]
+                f"breakaway confirmation family_size={int(confirmation_planned['family_size'])}"
+                f", want the fixed family of 8"
             )
         if int(confirmation_planned["prior_plan_digest"]) != int(discovery_planned["plan_digest"]):  # type: ignore[index]
             raise ValueError(
@@ -6884,8 +6873,9 @@ def audit_breakaway_campaign(
         )
         if expected_confirmation_digest != int(confirmation_planned["plan_digest"]):
             mismatches.append(
-                "confirmation plan_digest: firmware=0x%016x offline=0x%016x"
-                % (confirmation_planned["plan_digest"], expected_confirmation_digest)
+                f"confirmation plan_digest: firmware=0x"
+                f"{confirmation_planned['plan_digest']:016x} offline=0x"
+                f"{expected_confirmation_digest:016x}"
             )
 
     # The fixed eight-stroke schedule must hold before any slot-keyed collapse
@@ -6934,19 +6924,15 @@ def audit_breakaway_campaign(
                 reconstructed_reverse_collected |= 1 << (slot - 4)
         if reconstructed_forward_collected != int(confirmation_terminal["forward_collected_mask"]):
             mismatches.append(
-                "confirmation forward_collected_mask: firmware=%s received slots=%s"
-                % (
-                    format(int(confirmation_terminal["forward_collected_mask"]), "#06b"),
-                    format(reconstructed_forward_collected, "#06b"),
-                )
+                f"confirmation forward_collected_mask: firmware="
+                f"{format(int(confirmation_terminal['forward_collected_mask']), '#06b')} "
+                f"received slots={format(reconstructed_forward_collected, '#06b')}"
             )
         if reconstructed_reverse_collected != int(confirmation_terminal["reverse_collected_mask"]):
             mismatches.append(
-                "confirmation reverse_collected_mask: firmware=%s received slots=%s"
-                % (
-                    format(int(confirmation_terminal["reverse_collected_mask"]), "#06b"),
-                    format(reconstructed_reverse_collected, "#06b"),
-                )
+                f"confirmation reverse_collected_mask: firmware="
+                f"{format(int(confirmation_terminal['reverse_collected_mask']), '#06b')} "
+                f"received slots={format(reconstructed_reverse_collected, '#06b')}"
             )
         if confirmation_accepted:
             # `included_mask` is deliberately absent: it is the depth-three
@@ -6963,13 +6949,13 @@ def audit_breakaway_campaign(
             ):
                 if int(confirmation_terminal[mask_name]) != 0b1111:
                     raise ValueError(
-                        "breakaway confirmation accepted with an incomplete %s: %s"
-                        % (mask_name, format(int(confirmation_terminal[mask_name]), "#06b"))
+                        f"breakaway confirmation accepted with an incomplete {mask_name}: "
+                        f"{format(int(confirmation_terminal[mask_name]), '#06b')}"
                     )
             if len(observations) != _BW_CONFIRMATION_FAMILY_SIZE:
                 raise ValueError(
-                    "breakaway confirmation accepted with %d observations, want the full family of 8"
-                    % len(observations)
+                    f"breakaway confirmation accepted with {len(observations)} observations, "
+                    f"want the full family of 8"
                 )
 
         # Independent confirmation recompute. The checks above only verify
@@ -7007,23 +6993,23 @@ def audit_breakaway_campaign(
             if raw is None:
                 if confirmation_accepted:
                     mismatches.append(
-                        "confirmation accepted but slot %d has no raw evidence to independently "
-                        "verify" % slot_index
+                        f"confirmation accepted but slot {int(slot_index)} has no raw evidence "
+                        f"to independently verify"
                     )
                     all_recomputed_contained = False
                 continue
             if int(raw["direction"]) != expected_direction:
                 mismatches.append(
-                    "confirmation slot %d raw direction=%d does not match the fixed "
-                    "CONFIRMATION_SLOT_ORDER (want direction=%d)"
-                    % (slot_index, raw["direction"], expected_direction)
+                    f"confirmation slot {int(slot_index)} raw direction={int(raw['direction'])}"
+                    f" does not match the fixed CONFIRMATION_SLOT_ORDER (want direction="
+                    f"{int(expected_direction)})"
                 )
                 all_recomputed_contained = False
             if reported is not None and int(reported["direction"]) != expected_direction:
                 mismatches.append(
-                    "confirmation slot %d reported direction=%d does not match the fixed "
-                    "CONFIRMATION_SLOT_ORDER (want direction=%d)"
-                    % (slot_index, reported["direction"], expected_direction)
+                    f"confirmation slot {int(slot_index)} reported direction="
+                    f"{int(reported['direction'])} does not match the fixed "
+                    f"CONFIRMATION_SLOT_ORDER (want direction={int(expected_direction)})"
                 )
                 all_recomputed_contained = False
             interval = _bw_observation_interval_percent(
@@ -7038,8 +7024,8 @@ def audit_breakaway_campaign(
             if interval is None:
                 if confirmation_accepted:
                     mismatches.append(
-                        "confirmation accepted but slot %d raw evidence is not independently "
-                        "representable" % slot_index
+                        f"confirmation accepted but slot {int(slot_index)} raw evidence is not "
+                        f"independently representable"
                     )
                     all_recomputed_contained = False
                 continue
@@ -7050,21 +7036,15 @@ def audit_breakaway_campaign(
             if reported is not None:
                 if offline_lower_milli != int(reported["response_lower_percent_milli"]):
                     mismatches.append(
-                        "confirmation slot %d response_lower_percent_milli: firmware=%d offline=%d"
-                        % (
-                            slot_index,
-                            reported["response_lower_percent_milli"],
-                            offline_lower_milli,
-                        )
+                        f"confirmation slot {int(slot_index)} response_lower_percent_milli: "
+                        f"firmware={int(reported['response_lower_percent_milli'])} offline="
+                        f"{int(offline_lower_milli)}"
                     )
                 if offline_upper_milli != int(reported["response_upper_percent_milli"]):
                     mismatches.append(
-                        "confirmation slot %d response_upper_percent_milli: firmware=%d offline=%d"
-                        % (
-                            slot_index,
-                            reported["response_upper_percent_milli"],
-                            offline_upper_milli,
-                        )
+                        f"confirmation slot {int(slot_index)} response_upper_percent_milli: "
+                        f"firmware={int(reported['response_upper_percent_milli'])} offline="
+                        f"{int(offline_upper_milli)}"
                     )
                 statistic = _bw_observation_statistic(
                     int(raw["mean_rate_q"]),
@@ -7076,18 +7056,15 @@ def audit_breakaway_campaign(
                     offline_se_permille = _bw_relative_se_to_permille(statistic[1])
                     if offline_se_permille != int(reported["relative_standard_error_permille"]):
                         mismatches.append(
-                            "confirmation slot %d relative_standard_error_permille: "
-                            "firmware=%d offline=%d"
-                            % (
-                                slot_index,
-                                reported["relative_standard_error_permille"],
-                                offline_se_permille,
-                            )
+                            f"confirmation slot {int(slot_index)} "
+                            f"relative_standard_error_permille: firmware="
+                            f"{int(reported['relative_standard_error_permille'])} offline="
+                            f"{int(offline_se_permille)}"
                         )
             elif confirmation_accepted:
                 mismatches.append(
-                    "confirmation accepted but slot %d has no reported observation record"
-                    % slot_index
+                    f"confirmation accepted but slot {int(slot_index)} has no reported "
+                    f"observation record"
                 )
         if confirmation_accepted and not all_recomputed_contained:
             mismatches.append(
@@ -7100,8 +7077,8 @@ def audit_breakaway_campaign(
             confirmed_p_raw = int(confirmation_terminal["confirmed_p_raw"])
             if candidate_p_raw != confirmed_p_raw:
                 mismatches.append(
-                    "confirmation accepted candidate_p_raw=%d != confirmed_p_raw=%d"
-                    % (candidate_p_raw, confirmed_p_raw)
+                    f"confirmation accepted candidate_p_raw={int(candidate_p_raw)} != "
+                    f"confirmed_p_raw={int(confirmed_p_raw)}"
                 )
 
         if observations:
@@ -7110,29 +7087,32 @@ def audit_breakaway_campaign(
             )
             if expected_max_se != int(confirmation_terminal["max_relative_se_permille"]):
                 mismatches.append(
-                    "confirmation max_relative_se_permille: firmware=%d offline=%d"
-                    % (confirmation_terminal["max_relative_se_permille"], expected_max_se)
+                    f"confirmation max_relative_se_permille: firmware="
+                    f"{int(confirmation_terminal['max_relative_se_permille'])} offline="
+                    f"{int(expected_max_se)}"
                 )
         expected_required_se = breakaway_required_relative_se_permille()
         if expected_required_se != int(confirmation_terminal["required_relative_se_permille"]):
             mismatches.append(
-                "confirmation required_relative_se_permille: firmware=%d offline=%d"
-                % (confirmation_terminal["required_relative_se_permille"], expected_required_se)
+                f"confirmation required_relative_se_permille: firmware="
+                f"{int(confirmation_terminal['required_relative_se_permille'])} offline="
+                f"{int(expected_required_se)}"
             )
 
     campaign_terminal = _bw_single_record(ticks[-1], "breakaway_campaign_terminal")
     campaign_accepted = int(campaign_terminal["accepted"]) == 1
     if campaign_accepted != confirmation_accepted:
         raise ValueError(
-            "breakaway campaign terminal accepted=%d does not trace back to an accepted "
-            "confirmation (confirmation accepted=%d)"
-            % (campaign_terminal["accepted"], int(confirmation_accepted))
+            f"breakaway campaign terminal accepted={int(campaign_terminal['accepted'])} does "
+            f"not trace back to an accepted confirmation (confirmation accepted="
+            f"{int(confirmation_accepted)})"
         )
     if campaign_accepted:
         if int(campaign_terminal["terminal_cause"]) != _BW_TERMINAL_CAUSE_ACCEPTED:
             mismatches.append(
-                "campaign terminal_cause on accept: firmware=%d want=%d"
-                % (campaign_terminal["terminal_cause"], _BW_TERMINAL_CAUSE_ACCEPTED)
+                f"campaign terminal_cause on accept: firmware="
+                f"{int(campaign_terminal['terminal_cause'])} want="
+                f"{int(_BW_TERMINAL_CAUSE_ACCEPTED)}"
             )
         if int(campaign_terminal["stage_c_plan_digest"]) == 0:
             mismatches.append("campaign terminal reports accepted with a zero stage_c_plan_digest")
@@ -7176,8 +7156,8 @@ def audit_breakaway_campaign(
         workflow_duration_ms = workflow_duration_ticks * 1_000 / clock_hz
         if maximum_workflow_ms is not None and workflow_duration_ms > maximum_workflow_ms:
             mismatches.append(
-                "workflow duration %.1f ms exceeds the reserved maximum_workflow_ms=%d"
-                % (workflow_duration_ms, maximum_workflow_ms)
+                f"workflow duration {workflow_duration_ms:.1f} ms exceeds the reserved "
+                f"maximum_workflow_ms={int(maximum_workflow_ms)}"
             )
 
     return {

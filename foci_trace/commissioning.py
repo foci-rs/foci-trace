@@ -23,16 +23,16 @@ from .protocol import (
     EVENT_COMMISSION_RESTORE_DISPOSITION,
     EVENT_COMMISSION_RESTORE_ERROR_DRIFT,
     EVENT_COMMISSION_RESTORE_RESULT,
-    EVENT_COMMISSION_VELOCITY_VALIDATE_GAIN,
-    EVENT_COMMISSION_VELOCITY_VALIDATE_LIMITS,
-    EVENT_COMMISSION_VELOCITY_VALIDATE_METRICS,
-    EVENT_COMMISSION_VELOCITY_VALIDATE_RESULT,
     EVENT_COMMISSION_VELOCITY_SWEEP_COMPLETE,
     EVENT_COMMISSION_VELOCITY_SWEEP_DERIVED,
     EVENT_COMMISSION_VELOCITY_SWEEP_OBSERVATION,
     EVENT_COMMISSION_VELOCITY_SWEEP_PLAN,
     EVENT_COMMISSION_VELOCITY_SWEEP_RUNG,
     EVENT_COMMISSION_VELOCITY_SWEEP_TERMINAL,
+    EVENT_COMMISSION_VELOCITY_VALIDATE_GAIN,
+    EVENT_COMMISSION_VELOCITY_VALIDATE_LIMITS,
+    EVENT_COMMISSION_VELOCITY_VALIDATE_METRICS,
+    EVENT_COMMISSION_VELOCITY_VALIDATE_RESULT,
     FRAME_TYPE_EVENT,
     PHASE_NAMES,
     SUBSYSTEM_COMMISSIONING,
@@ -494,14 +494,8 @@ def format_commissioning_report(report: CommissioningCaptureReport) -> str:
         result = run.result or "unknown"
         seq = "n/a" if run.engine_seq is None else str(run.engine_seq)
         lines.append(
-            "commissioning dev{device} source={source} engine={engine} seq={seq} "
-            "result={result}".format(
-                device=run.device_index,
-                source=run.source_index,
-                engine=run.engine_kind_name,
-                seq=seq,
-                result=result,
-            )
+            f"commissioning dev{run.device_index} source={run.source_index} engine="
+            f"{run.engine_kind_name} seq={seq} result={result}"
         )
         if run.start_ticks is not None:
             lines.append(f"  engine_start t={run.start_ticks}")
@@ -509,15 +503,9 @@ def format_commissioning_report(report: CommissioningCaptureReport) -> str:
             status = phase.status_name or "unknown"
             end = "open" if phase.end_ticks is None else str(phase.end_ticks)
             lines.append(
-                "  phase {name} phase_start={start} phase_end={end} status={status} "
-                "samples={critical} control_detail={detail}".format(
-                    name=phase.phase_name,
-                    start=phase.start_ticks,
-                    end=end,
-                    status=status,
-                    critical=phase.critical_samples,
-                    detail=phase.control_detail_samples,
-                )
+                f"  phase {phase.phase_name} phase_start={phase.start_ticks} phase_end={end} "
+                f"status={status} samples={phase.critical_samples} control_detail="
+                f"{phase.control_detail_samples}"
             )
             if phase.end_ticks is not None:
                 lines.append(f"    phase_end t={phase.end_ticks}")
@@ -534,10 +522,7 @@ def format_commissioning_report(report: CommissioningCaptureReport) -> str:
             )
         for warning in run.warnings:
             lines.append(
-                "  diagnostic_warning code={code} detail={detail}".format(
-                    code=warning.warning_code,
-                    detail=warning.detail,
-                )
+                f"  diagnostic_warning code={warning.warning_code} detail={warning.detail}"
             )
         for marker in run.velocity_sweep_markers:
             lines.append(

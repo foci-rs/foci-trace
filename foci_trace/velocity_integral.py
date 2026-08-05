@@ -20,7 +20,6 @@ from .velocity_measurement import (
     summarize_recovery_rest_diagnostics,
 )
 
-
 _MICROS_PER_SECOND = 1_000_000
 _LEGACY_Q8_8_BUILD_REVISION = 0x75536758
 _CURRENT_Q4_12_BUILD_REVISION = 0x05E21F75
@@ -1722,14 +1721,13 @@ def audit_velocity_integral(
     if schema_revision >= 2:
         recovery_rungs = [int(record["rung_index"]) for record in recovery_records]
         emitted_recovery_rungs = sorted({int(record["rung_index"]) for record in rung_records})
-        if schema_revision >= 5 and rest_boundary is not None:
-            if int(terminal["cause"]) == 10:
-                emitted_recovery_rungs = sorted(
-                    {
-                        *emitted_recovery_rungs,
-                        int(rest_boundary[1]["positive_rung_index"]) + 1,
-                    }
-                )
+        if schema_revision >= 5 and rest_boundary is not None and int(terminal["cause"]) == 10:
+            emitted_recovery_rungs = sorted(
+                {
+                    *emitted_recovery_rungs,
+                    int(rest_boundary[1]["positive_rung_index"]) + 1,
+                }
+            )
         missing_final_recovery = (
             bool(emitted_recovery_rungs) and recovery_rungs == emitted_recovery_rungs[:-1]
         )
@@ -1980,7 +1978,8 @@ def audit_velocity_integral(
     )
     if not fault_evidence_reset and eligible_masks != terminal_eligible_masks:
         mismatches.append(
-            f"terminal eligible masks: firmware={terminal['eligible_masks']} offline={eligible_masks}"
+            f"terminal eligible masks: firmware={terminal['eligible_masks']} offline="
+            f"{eligible_masks}"
         )
     if int(terminal["emitted_observations"]) != len(observation_records):
         mismatches.append("terminal emitted-observation count differs from capture")
