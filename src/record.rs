@@ -1,6 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -80,7 +81,34 @@ pub fn run_list(args: ListArgs) -> Result<(), RecordError> {
     Ok(())
 }
 
+/// Set from `handle_stop_signal` when SIGINT or SIGTERM arrives. Reader
+/// threads poll it every ~10ms (the USB read timeout already in place) and
+/// stop at the next frame boundary, so the writer drains what's already
+/// queued and flushes normally instead of the process dying mid-write.
+static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn handle_stop_signal(_signum: libc::c_int) {
+    STOP_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+fn install_signal_handlers() {
+    // SAFETY: the handler only performs an atomic store, which is
+    // async-signal-safe; no allocation, locking, or I/O happens in it.
+    unsafe {
+        libc::signal(
+            libc::SIGINT,
+            handle_stop_signal as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGTERM,
+            handle_stop_signal as *const () as libc::sighandler_t,
+        );
+    }
+}
+
 pub fn run_record(args: RecordArgs) -> Result<(), RecordError> {
+    install_signal_handlers();
+
     let mut devices = find_trace_devices(&args.serial)?;
     if devices.is_empty() {
         return Err(RecordError::NoTraceDevices);
@@ -250,7 +278,9 @@ fn read_device_loop(
         }
     };
 
-    while deadline.is_none_or(|value| Instant::now() < value) {
+    while !STOP_REQUESTED.load(Ordering::SeqCst)
+        && deadline.is_none_or(|value| Instant::now() < value)
+    {
         let read = match reader.read(&mut scratch) {
             Ok(read) => read,
             Err(err) if err.kind() == io::ErrorKind::TimedOut => continue,
@@ -303,4 +333,18 @@ pub fn drain_writer<W: Write>(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sigint_sets_stop_requested() {
+        install_signal_handlers();
+        unsafe {
+            libc::raise(libc::SIGINT);
+        }
+        assert!(STOP_REQUESTED.load(Ordering::SeqCst));
+    }
 }

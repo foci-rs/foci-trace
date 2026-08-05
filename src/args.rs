@@ -27,6 +27,9 @@ pub struct RecordArgs {
     #[arg(long)]
     pub output: PathBuf,
 
+    /// Recording duration in seconds. 0 means run until stopped with
+    /// SIGINT/SIGTERM (Ctrl-C or `kill`), which stops the capture cleanly
+    /// at the next frame boundary and flushes it.
     #[arg(long, default_value_t = 0.0)]
     pub duration_s: f64,
 
