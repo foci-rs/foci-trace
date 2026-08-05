@@ -1836,7 +1836,22 @@ def audit_velocity_integral(
         if not 0 <= rung_index < len(expected_gains):
             mismatches.append(f"integral rung is out of range: {rung_index}")
             continue
-        if schema_revision >= 9:
+        # The response horizon is a combined-workflow field, not a schema-9
+        # field. `integral_sweep.rs:2358` computes `(tau_us, horizon_class)`
+        # only `if data.plan.combined_workflow`, leaving both zero otherwise,
+        # and sets `moving_horizon_us` to the plan's stroke only under the same
+        # condition; `encode_rung` (`integral_reporting.rs:581`) then omits all
+        # three fields from the wire entirely when `moving_horizon_us == 0`.
+        # A schema-14 breakaway rung is non-combined, so it legitimately
+        # carries none of them and the decoder reports `None` for each.
+        #
+        # The gate is not a silent skip: a non-combined rung is required to
+        # carry none of the three, so a build that starts emitting them
+        # outside a combined workflow is reported rather than ignored. The
+        # decoder makes that observable -- it reads the fields only from the
+        # 83-byte rung payload, never the 70-byte one (`protocol.py:1203`).
+        rung_combined_workflow = stage_c_combined_workflow(schema_revision)
+        if schema_revision >= 9 and rung_combined_workflow:
             i_raw = int(expected_gains[rung_index])
             expected_tau_us = (
                 0
@@ -1860,6 +1875,12 @@ def audit_velocity_integral(
                 ("tau_us", "moving_horizon_us", "horizon_class"),
                 mismatches,
                 f"rung {rung_index} response horizon",
+            )
+        elif not rung_combined_workflow and any(
+            field in record for field in ("tau_us", "moving_horizon_us", "horizon_class")
+        ):
+            mismatches.append(
+                f"rung {rung_index} reports a response horizon outside a combined workflow"
             )
         expected_directions: list[dict[str, object]] = []
         for direction in range(2):

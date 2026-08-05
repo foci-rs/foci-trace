@@ -1121,7 +1121,15 @@ def _rung_record(
     raw = bytearray((3,))
     raw += struct.pack("<IHQBH", 7, sequence, plan_digest, rung_index, i_raw)
     horizon: dict[str, int] = {}
-    if plan is not None and int(plan["schema_revision"]) >= 9:
+    # Mirrors `encode_rung` (`integral_reporting.rs:581`): the three horizon
+    # fields are appended only when `moving_horizon_us != 0`, and
+    # `integral_sweep.rs:2358` leaves that zero unless the plan is a combined
+    # workflow. A schema-14 breakaway rung therefore carries none of them.
+    if (
+        plan is not None
+        and int(plan["schema_revision"]) >= 9
+        and stage_c_combined_workflow(int(plan["schema_revision"]))
+    ):
         tau_us = (
             0
             if i_raw == 0
@@ -2662,6 +2670,61 @@ def test_breakaway_schema_plan_claiming_a_combined_response_is_rejected() -> Non
     ) in mismatches
 
 
+def test_breakaway_rung_carrying_a_response_horizon_is_rejected() -> None:
+    """The response horizon belongs to the combined workflow, not to schema 9.
+    `integral_sweep.rs:2358` computes `(tau_us, horizon_class)` only
+    `if data.plan.combined_workflow` and leaves `moving_horizon_us` zero
+    otherwise, and `encode_rung` (`integral_reporting.rs:581`) then drops all
+    three fields from the wire when `moving_horizon_us == 0`. A schema-14
+    breakaway rung therefore carries none of them, which is why the audit no
+    longer demands them at schema >= 9 alone.
+
+    Gating the expectation must not degrade into ignoring the fields: splice a
+    horizon into one breakaway rung's wire record, in the exact position and
+    widths `encode_rung` would have used, and require it to be rejected. The
+    combined direction stays covered by
+    `test_current_combined_schemas_replay_response_horizons_and_transition_allowance`.
+    """
+    plan = _plan(14)
+    plan["plan_digest"] = integral_plan_digest(plan)
+    raw, records = _synthetic_complete_capture(schema_revision=14)
+    target = next(
+        index
+        for index, (_bytes, value) in enumerate(records)
+        if value["record_kind"] == "integral_rung" and int(value["rung_index"]) == 3
+    )
+    record_bytes, decoded = records[target]
+    assert "tau_us" not in decoded
+    # kind(1) + run_sequence(4) + evidence_sequence(2) + plan_digest(8)
+    # + rung_index(1) + i_raw(2); the horizon follows immediately.
+    header_len = 18
+    horizon = {
+        "tau_us": velocity_i_tau_us(
+            int(decoded["i_raw"]), int(plan["pwm_hz"]), plan.get("build_revision")
+        ),
+        "moving_horizon_us": int(plan["moving_stroke_us"]),
+        "horizon_class": 1,
+    }
+    records[target] = (
+        record_bytes[:header_len]
+        + struct.pack(
+            "<QIB",
+            horizon["tau_us"],
+            horizon["moving_horizon_us"],
+            horizon["horizon_class"],
+        )
+        + record_bytes[header_len:],
+        {**decoded, **horizon},
+    )
+    terminal = records[-1][1]
+    assert terminal["record_kind"] == "integral_terminal"
+    terminal["digest"] = _rebuild_stage_c_digest(plan, records[:-1])
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["mismatches"] == ["rung 3 reports a response horizon outside a combined workflow"]
+
+
 def test_stabilized_stage_c_recovery_passes_with_event_150() -> None:
     """Under `Stabilized` the firmware emits the owner-5 selection, then Event
     150, then the recovery. Mirrors the immediate-scored test above under the
@@ -3133,12 +3196,19 @@ _TARGETED_GRAMMAR_MESSAGES = frozenset(
 # is matched by an anchored regular expression that pins the whole message
 # and constrains the variable part to digits or a signed number, per spec R6.
 #
-# One former entry, `plan reconstruction failed: 'slot_transition_allowance_us'`,
-# is gone: it was diagnosed as a decode-side gap in the archived build, but the
-# archived capture is a schema-14 breakaway plan and firmware correctly emits
-# no slot-transition allowance for one. The offline digest was asking for a
-# field that should never exist, and the schema/workflow fix removed the
-# demand. That capture's plan now reconstructs with no mismatch at all.
+# Two former entries are gone, both misdiagnosed the same way -- recorded as
+# gaps in the archived build when they were really the audit demanding
+# combined-workflow output from a non-combined breakaway run:
+#
+# - `plan reconstruction failed: 'slot_transition_allowance_us'`. Firmware
+#   emits no slot-transition allowance for a non-combined plan; the offline
+#   digest was asking for a field that should never exist. Removed by the
+#   schema/workflow fix, and that capture's plan now reconstructs cleanly.
+# - `rung N response horizon tau_us/moving_horizon_us/horizon_class:
+#   firmware=None ...`, three patterns matching 42 messages. `integral_sweep.rs`
+#   computes the horizon only `if data.plan.combined_workflow` and `encode_rung`
+#   omits all three fields when `moving_horizon_us == 0`, so a breakaway rung
+#   carries none of them by design. Not a decode-completeness gap.
 _RESIDUAL_EXACT_MESSAGES = frozenset(
     {
         # This run's terminal is a genuine fault (outcome 3); firmware does
@@ -3157,14 +3227,6 @@ _RESIDUAL_MESSAGE_PATTERNS = tuple(
         # match a digest recomputed from canonical evidence bytes. Unrelated
         # to grammar ordering or combined-workflow derivation.
         r"^terminal digest: firmware=0x[0-9a-f]{16} offline=0x[0-9a-f]{16}$",
-        # This build never populates the per-rung response-horizon fields
-        # (`tau_us`, `moving_horizon_us`, `horizon_class`) added at schema 9,
-        # so every rung's firmware side decodes as `None` against an offline
-        # value the plan's ladder can always compute. A decode-completeness
-        # gap, not a grammar or terminal-derivation defect.
-        r"^rung \d+ response horizon tau_us: firmware=None offline=-?\d+$",
-        r"^rung \d+ response horizon moving_horizon_us: firmware=None offline=\d+$",
-        r"^rung \d+ response horizon horizon_class: firmware=None offline=\d+$",
         # `_attach_rest_selection_audit`'s independent raw-sample check
         # (unchanged by Tasks 5 or 6): one Event 151's `intervals_q` disagrees
         # with the interval recomputed from the causal 256 raw samples.
