@@ -3333,41 +3333,24 @@ _TARGETED_GRAMMAR_MESSAGES = frozenset(
 #   `evidence_terminal`'s assessment-error arm overwrite outcome and cause on
 #   an already-built terminal and leave its evidence intact. This capture's
 #   preserved evidence reproduces the offline replay exactly.
+# - `scored-rest intervals_q mismatch: firmware=[[-61476, 61476], ...]
+#   offline=[[0, 0], ...]`. Filed as needing hardware to close, on the reading
+#   that firmware had scored a window this recording did not contain. The real
+#   cause was on the host: `_attach_rest_selection_audit` raw-verified every
+#   selection, including the recovery ones, whose scored samples firmware never
+#   traces (`recovery/controller.rs` pushes them straight into the observation
+#   ring; `record_velocity_trace_observation` is called only from the ordinary
+#   observation paths). Each of the capture's 13 recovery selections was
+#   therefore being compared against the *preceding ordinary stroke's* 256
+#   samples. Twelve agreed only because both windows were all-zero; rung 5's
+#   did not. The comparison was never valid for any of them, so it no longer
+#   runs -- see `_RAW_UNVERIFIABLE_REST_SELECTION_OWNERS` in `analyze.py`.
 #
-# Empty, and kept rather than deleted: the exactly-one-match rule below still
-# consults it, and a future stable-text residual belongs here rather than in a
-# pattern.
+# Empty in both halves, and kept rather than deleted: the exactly-one-match
+# rule below still consults both, and a future residual belongs in one of them
+# rather than in a loosened assertion.
 _RESIDUAL_EXACT_MESSAGES: frozenset[str] = frozenset()
-_RESIDUAL_MESSAGE_PATTERNS = tuple(
-    re.compile(pattern)
-    for pattern in (
-        # The one surviving residual, and the evidence that it is genuine
-        # rather than another instance of the class above.
-        #
-        # `_attach_rest_selection_audit` recomputes each Event 151 from the
-        # last 256 causal raw samples. Nothing on either side is
-        # workflow-gated: `combined_workflow` appears nowhere in the firmware
-        # scored-rest path, and 124 of this capture's 125 selections verify
-        # byte-exact through the identical code, including 12 recovery
-        # selections structurally identical to the one that fails.
-        #
-        # The failure is rung 5's recovery selection. Every structural field
-        # agrees -- codes, all four masks, the selected suffix, the
-        # disposition. Only the 64-sample suffix's half-width differs:
-        # firmware 61476, offline 0. Every delta in the window, and in the
-        # 300 samples either side of it, is zero, so no window the host stream
-        # can offer has nonzero rate variance; shifting the window by even one
-        # sample changes all three suffixes at once, unlike firmware's report.
-        # The capture records no dropped motion samples and no frame gaps, so
-        # this cannot be closed from this recording: it needs firmware
-        # instrumentation of that one scoring window, or a fresh capture.
-        (
-            r"^scored-rest intervals_q mismatch: "
-            r"firmware=\[\[-?\d+, -?\d+\], \[-?\d+, -?\d+\], \[-?\d+, -?\d+\]\] "
-            r"offline=\[\[-?\d+, -?\d+\], \[-?\d+, -?\d+\], \[-?\d+, -?\d+\]\]$"
-        ),
-    )
-)
+_RESIDUAL_MESSAGE_PATTERNS: tuple[re.Pattern[str], ...] = ()
 
 
 def _residual_match_count(message: str) -> int:
@@ -3386,7 +3369,7 @@ def test_transport_validated_capture_carries_no_targeted_grammar_regression() ->
     """`foc213-transport-validated` is the capture whose reply-transport fix
     this whole investigation chased, and it analyzes completely -- every
     scored-rest grammar check and the schema >= 8 combined-terminal
-    derivation both run against it, unlike `foc213-p18b` below. Three
+    derivation both run against it, unlike `foc213-p18b` below. Four
     properties, per spec R6:
 
     1. None of the strings the Task 5 grammar fix or the Task 6 validator
@@ -3395,6 +3378,17 @@ def test_transport_validated_capture_carries_no_targeted_grammar_regression() ->
     3. Every other mismatch matches exactly one entry in the known-residual
        allowlist above -- not "at least one": an unmatched mismatch is a new
        regression, and a multiply-matched one means the predicates overlap.
+       The allowlist is now empty, so this is the same as demanding an empty
+       mismatch list; both are asserted, because an emptied allowlist must
+       not be able to hide a mismatch that a future entry quietly re-covers.
+    4. The scored-rest counts are pinned. An empty mismatch list proves
+       nothing on its own -- the audit reaching it by checking nothing would
+       look identical -- so the exact split is asserted: 112 selections
+       raw-verified against their own traced samples, and 13 recovery
+       selections reported as raw-unverifiable because firmware traces no
+       samples for them at all. 112 + 13 is the capture's full complement of
+       125 Event 151 records, so neither number can grow at the other's
+       expense without failing here.
     """
     if not _TRANSPORT_VALIDATED_CAPTURE.exists():
         pytest.skip(f"archived capture not present: {_TRANSPORT_VALIDATED_CAPTURE}")
@@ -3417,6 +3411,10 @@ def test_transport_validated_capture_carries_no_targeted_grammar_regression() ->
     multiply_matched = [message for message, count in match_counts.items() if count > 1]
     assert unmatched == []
     assert multiply_matched == []
+
+    assert mismatches == []
+    assert responses[0]["rest_selection_verified_count"] == 112
+    assert responses[0]["rest_selection_raw_unverifiable_count"] == 13
 
 
 def test_p18b_decoded_prefix_satisfies_the_scored_rest_grammar() -> None:

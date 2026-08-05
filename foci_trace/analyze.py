@@ -1940,17 +1940,63 @@ def _velocity_capture_groups(
     return groups
 
 
+# Scored-rest owners whose scored samples never reach the trace stream, so
+# no raw window in a capture belongs to them.
+#
+# Every recovery selection is decided by `step_rung_origin_recovery`
+# (`commissioning/outer/velocity/recovery/controller.rs`), which pushes each
+# scored sample into the `VelocityObservationRing` it later analyzes
+# (`resources.observations.push(delta, elapsed_us)`, `controller.rs:351`) and
+# never calls `record_velocity_trace_observation`. That call appears only on
+# the ordinary observation paths -- `sweep.rs:962`, `sweep.rs:1213`,
+# `integral_sweep.rs:1603`, `integral_sweep.rs:1891`, and `validate.rs:208`
+# -- none of which is reachable from the recovery controller.
+#
+# The 256 samples preceding a recovery selection in the capture are therefore
+# the *preceding ordinary stroke's* samples, not the recovery window the
+# firmware scored. Raw-verifying against them compares unrelated data: it
+# agreed for two months only because both windows happened to be all-zero,
+# and diverged the moment one of them was not. These selections are reported
+# as raw-unverifiable instead; every structural check still applies to them
+# through `audit_scored_rest_grammar` (identity, ordering, disposition, and
+# mask coherence), which reads the record itself rather than raw samples.
+#
+# The set is the one the wire format already recognizes: the decoder requires
+# the 0xFF direction/slot sentinel for exactly these owners
+# (`protocol._decode_velocity_sweep_evidence`, kind 11), and they are
+# `RestSelectionOwner`'s four recovery variants -- StageBRecovery(1),
+# StageBSelectedRecovery(2), StageCRecovery(5), MatrixRecovery(8)
+# (`commissioning/types.rs:547-566`). All four are produced from the single
+# recovery controller above, so all four share the gap.
+#
+# Whether firmware should trace the recovery window at all is a separate
+# question; this only stops the host claiming a verification it cannot perform.
+_RAW_UNVERIFIABLE_REST_SELECTION_OWNERS = frozenset({1, 2, 5, 8})
+
+
 def _attach_rest_selection_audit(
     report: dict[str, object],
     state: _DeviceState,
     evidence: list[_VelocitySweepEvidenceFrame],
     source_index: int,
 ) -> None:
-    """Compare each Event 151 with the last 256 raw samples before emission."""
+    """Compare each raw-verifiable Event 151 with the 256 samples before it.
+
+    `rest_selection_verified_count` counts only selections checked against
+    their own traced samples. Recovery selections
+    (`_RAW_UNVERIFIABLE_REST_SELECTION_OWNERS`) have no traced samples at
+    all, so they are counted separately in
+    `rest_selection_raw_unverifiable_count` and never compared against the
+    unrelated window that happens to precede them.
+    """
     mismatches: list[str] = []
     verified = 0
+    raw_unverifiable = 0
     for event in evidence:
         if event.payload.get("record_kind") != "rest_selection":
+            continue
+        if int(event.payload.get("owner", -1)) in _RAW_UNVERIFIABLE_REST_SELECTION_OWNERS:
+            raw_unverifiable += 1
             continue
         observations = [
             item.observation
@@ -1967,6 +2013,7 @@ def _attach_rest_selection_audit(
         else:
             verified += 1
     report["rest_selection_verified_count"] = verified
+    report["rest_selection_raw_unverifiable_count"] = raw_unverifiable
     if mismatches:
         report["matches_firmware"] = False
         reported_mismatches = report.setdefault("mismatches", [])

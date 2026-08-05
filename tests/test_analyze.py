@@ -2878,6 +2878,7 @@ def test_event_151_is_verified_against_its_causal_raw_suffixes() -> None:
     ]
     payload = {
         "record_kind": "rest_selection",
+        "owner": 4,
         **analyze_scored_rest_selection(observations),
     }
     evidence = [analyze._VelocitySweepEvidenceFrame(300, 0, b"", payload)]
@@ -2886,7 +2887,79 @@ def test_event_151_is_verified_against_its_causal_raw_suffixes() -> None:
     analyze._attach_rest_selection_audit(report, state, evidence, 0)
 
     assert report["rest_selection_verified_count"] == 1
+    assert report["rest_selection_raw_unverifiable_count"] == 0
     assert report["matches_firmware"] is True
+
+
+@pytest.mark.parametrize("recovery_owner", (1, 2, 5, 8))
+def test_recovery_event_151_cannot_consume_the_preceding_observations_window(
+    recovery_owner: int,
+) -> None:
+    """A recovery selection must never be raw-verified against the window
+    that precedes it, because that window is not its own.
+
+    `step_rung_origin_recovery` (`recovery/controller.rs:351`) pushes every
+    scored recovery sample into the observation ring it later analyzes and
+    never calls `record_velocity_trace_observation`, so a capture contains no
+    raw samples for any recovery selection. The 256 traced samples before one
+    belong to the ordinary stroke that ran before it.
+
+    This reproduces exactly that arrangement: one ordinary observation's
+    moving window is the only thing traced, and a recovery selection follows
+    it reporting what the untraced recovery window actually scored -- a
+    genuine rest. The audit must verify the first and decline the second.
+
+    It cannot pass vacuously. The archived capture's twelve false passes
+    happened because both windows were all-zero, so the first assertion below
+    proves these two are not: verifying the recovery record against the
+    traced window raises, on a field whose value differs. Reintroduce the
+    pairing and that raise becomes a reported mismatch, failing every
+    remaining assertion.
+    """
+    from foci_trace import analyze
+    from foci_trace.velocity_measurement import (
+        VelocityObservation,
+        analyze_scored_rest_selection,
+        verify_scored_rest_selection,
+    )
+
+    traced_window = [
+        VelocityObservation(40 + index % 3, 1_000, 1, 0, 40_000) for index in range(256)
+    ]
+    untraced_recovery_window = [VelocityObservation(0, 1_000, 1, 0, 0) for _ in range(256)]
+
+    state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
+    state.velocity_observations = [
+        analyze._VelocityFrameObservation(index, 0, observation, 0)
+        for index, observation in enumerate(traced_window, 1)
+    ]
+
+    ordinary_payload = {
+        "record_kind": "rest_selection",
+        "owner": 4,
+        **analyze_scored_rest_selection(traced_window),
+    }
+    recovery_payload = {
+        "record_kind": "rest_selection",
+        "owner": recovery_owner,
+        **analyze_scored_rest_selection(untraced_recovery_window),
+    }
+
+    with pytest.raises(ValueError):
+        verify_scored_rest_selection(traced_window, recovery_payload)
+
+    evidence = [
+        analyze._VelocitySweepEvidenceFrame(300, 0, b"", ordinary_payload),
+        analyze._VelocitySweepEvidenceFrame(301, 0, b"", recovery_payload),
+    ]
+    report: dict[str, object] = {"matches_firmware": True, "mismatches": []}
+
+    analyze._attach_rest_selection_audit(report, state, evidence, 0)
+
+    assert report["mismatches"] == []
+    assert report["matches_firmware"] is True
+    assert report["rest_selection_verified_count"] == 1
+    assert report["rest_selection_raw_unverifiable_count"] == 1
 
 
 def test_analyze_capture_reconstructs_a_breakaway_campaign_from_ftrc_frames() -> None:
