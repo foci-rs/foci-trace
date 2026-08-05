@@ -1,10 +1,15 @@
+import io
 import json
+import re
 import struct
 from fractions import Fraction
 from pathlib import Path
 
 import pytest
 
+from foci_trace.analyze import analyze_capture
+from foci_trace.capture_file import RECORD_TYPE_FIRMWARE_FRAME, CaptureReader
+from foci_trace.protocol import FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, decode_frame
 from foci_trace.velocity_integral import (
     _validate_plan,
     _retained_stage_c_evidence,
@@ -32,7 +37,11 @@ from foci_trace.velocity_integral import (
     UnsupportedIntegralRepresentationError,
     velocity_i_tau_us,
 )
-from foci_trace.velocity_measurement import VelocityObservation, audit_rung_origin_recovery
+from foci_trace.velocity_measurement import (
+    VelocityObservation,
+    audit_rung_origin_recovery,
+    audit_scored_rest_grammar,
+)
 
 
 LEGACY_Q8_8_BUILD = 0x75536758
@@ -2705,3 +2714,296 @@ def test_combined_sufficient_but_faulted_terminal_is_accepted() -> None:
     audit = audit_velocity_integral(raw, records)
 
     assert audit["mismatches"] == []
+
+
+# --------------------------------------------------------------------------
+# Archived-capture regression corpus (spec R6).
+#
+# Tasks 5 and 6 corrected the offline replay grammar and the Stage-C audit,
+# verified so far only against synthetic fixtures built above. The two
+# archived captures below are the recordings that originally exposed the
+# defect; this section points the corrected code at them directly. Both
+# captures are large binaries excluded by `.gitignore`
+# (`docs/artifacts/trace-captures/**/*.bin`), so every test here skips
+# cleanly, never fails, when its capture is not present on disk.
+# --------------------------------------------------------------------------
+
+_ARCHIVE_ROOT = Path(__file__).resolve().parents[4] / "docs/artifacts/trace-captures"
+
+_TRANSPORT_VALIDATED_CAPTURE = (
+    _ARCHIVE_ROOT
+    / "2026-08-03-foc-213-stage-c-transport"
+    / "foc213-transport-validated-20260803-192710.bin"
+)
+_P18B_CAPTURE = (
+    _ARCHIVE_ROOT
+    / "2026-08-04-foc-213-recovery-gate-diagnostics"
+    / "foc213-p18b-20260803-232554.bin"
+)
+
+
+def _complete_prefix_bytes(capture_path: Path) -> bytes:
+    """Return `capture_path`'s bytes truncated to its last complete record.
+
+    Every archived capture ends with one truncated record at the recorder's
+    cut point, and `CaptureReader` raises when it reaches that partial
+    header or payload. Read records through it until it raises, tracking the
+    stream offset after each complete record, and keep only the bytes read
+    up to that point. Verified against `foc213-p18b`: this trims it from
+    1,910,389 to 1,910,357 bytes, and the trimmed bytes analyze cleanly.
+    """
+    data = capture_path.read_bytes()
+    buffer = io.BytesIO(data)
+    reader = CaptureReader(buffer)
+    offset = buffer.tell()
+    try:
+        for _record in reader.records():
+            offset = buffer.tell()
+    except ValueError:
+        pass
+    return data[:offset]
+
+
+def _analyze_complete_prefix(capture_path: Path) -> object:
+    """Analyze `capture_path` through its last complete record.
+
+    `analyze_capture` refuses a capture that ends mid-record, and every
+    archived capture ends exactly that way at the recorder's cut point,
+    so every archived-capture test goes through this helper rather than
+    calling `analyze_capture` on the raw file.
+    """
+    return analyze_capture(io.BytesIO(_complete_prefix_bytes(capture_path)))
+
+
+# The six Stage-C evidence record kinds `_velocity_integral_audits`
+# (analyze.py) collects before handing them to `audit_velocity_integral`.
+# `integral_plan_marker` and `integral_terminal` are deliberately excluded:
+# Step 4 below needs the ordinary evidence stream only, a real terminal is
+# never reachable from `foc213-p18b`'s truncated recording, and a
+# synthesized sentinel stands in for it instead.
+_STAGE_C_EVIDENCE_KINDS = frozenset(
+    {
+        "integral_observation",
+        "rest_selection",
+        "velocity_primitive_current",
+        "integral_rung",
+        "rung_origin_recovery",
+        "recovery_rest",
+    }
+)
+
+
+def _stage_c_evidence_records(capture_path: Path) -> list[dict[str, object]]:
+    """Decode one capture's Stage-C evidence records in stream order.
+
+    `audit_velocity_integral` cannot run on `foc213-p18b`: its recorder
+    stopped two rungs in, so the plan fragments and terminal are incomplete
+    and it degrades to `partial integral-response capture` without ever
+    reaching the scored-rest grammar. This decodes the same evidence-record
+    stream `analyze.py`'s `_velocity_integral_audits` collects, directly
+    from the wire, so the grammar can be exercised without a complete plan
+    or a real terminal.
+    """
+    records: list[dict[str, object]] = []
+    prefix = _complete_prefix_bytes(capture_path)
+    for record in CaptureReader(io.BytesIO(prefix)).records():
+        if record.record_type != RECORD_TYPE_FIRMWARE_FRAME:
+            continue
+        frame = decode_frame(record.payload)
+        if frame.header.frame_type != FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE:
+            continue
+        if frame.payload.get("record_kind") in _STAGE_C_EVIDENCE_KINDS:
+            records.append(frame.payload)
+    return records
+
+
+# Messages the Task 5 (`6ff2342`) and Task 6 (`003e96c`, `b308462`, `76cbc34`)
+# validator changes can emit, both the wordings they removed and the wordings
+# they added. None of these may appear against a real capture -- their
+# presence would mean the grammar or validator fix is incomplete, which is
+# exactly what this corpus exists to catch (see
+# `test_transport_validated_capture_carries_no_targeted_grammar_regression`).
+_TARGETED_GRAMMAR_MESSAGES = frozenset(
+    {
+        # Task 5: `audit_scored_rest_grammar` ordering (velocity_measurement.py).
+        "Stage C scored-rest selection has the wrong successor",  # old wording, removed
+        "Stage C scored-rest selection has the wrong predecessor",  # new
+        "Stage C rejected scored-rest selection lacks its causal terminal tail",  # new
+        "Stage C observation lacks its causal scored-rest selection",
+        "Stage C recovery rest lacks its causal selection",
+        "Stage C scored-rest selection has the wrong identity",
+        "Stage C recovery selection does not precede Event 150",
+        "Stage C recovery selection does not precede its recovery",  # new
+        "Stage C rejected recovery selection lacks its causal terminal",  # new
+        "Stage C scored-rest selection has the wrong owner",
+        # Task 6: combined-plan/terminal derivation (velocity_integral.py).
+        "combined plan lacks one selected Stage-B response",  # old wording, removed
+        "combined terminal lacks its workflow flag",  # old wording, removed
+        "terminal combined-workflow flag differs from the plan",  # new
+        "terminal combined tail differs from the plan",  # new
+        "standalone sufficient run falsely reports the combined outcome",  # new
+    }
+)
+
+# Known residuals: mismatches confirmed unrelated to the grammar
+# and validator changes, present in the transport-validated capture
+# for reasons independent of this fix (each was individually confirmed
+# unrelated against firmware). Stable text is
+# matched by exact equality; text carrying a rung index or a measured value
+# is matched by an anchored regular expression that pins the whole message
+# and constrains the variable part to digits or a signed number, per spec R6.
+_RESIDUAL_EXACT_MESSAGES = frozenset(
+    {
+        # A schema-14 plan whose `integral_plan_schedule` fragment is missing
+        # `slot_transition_allowance_us` on the wire -- a decode-side gap in
+        # the archived firmware build, unrelated to scored-rest grammar or
+        # combined-terminal derivation. `_validate_plan` catches the
+        # resulting `KeyError` from `integral_plan_digest` and reports it
+        # rather than raising.
+        "plan reconstruction failed: 'slot_transition_allowance_us'",
+        # This run's terminal is a genuine fault (outcome 3); firmware does
+        # not zero `eligible_masks` or the opening/bookend availability masks
+        # on the fault path, so the replay-vs-terminal comparison the fault
+        # branch performs always disagrees on this build. Unrelated to the
+        # scored-rest grammar or the combined-workflow derivation.
+        "fault terminal retained nonempty eligible masks",
+        "fault terminal retained nonempty anchor availability",
+    }
+)
+_RESIDUAL_MESSAGE_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        # Same fault-terminal build: the terminal's own digest field does not
+        # match a digest recomputed from canonical evidence bytes. Unrelated
+        # to grammar ordering or combined-workflow derivation.
+        r"^terminal digest: firmware=0x[0-9a-f]{16} offline=0x[0-9a-f]{16}$",
+        # This build never populates the per-rung response-horizon fields
+        # (`tau_us`, `moving_horizon_us`, `horizon_class`) added at schema 9,
+        # so every rung's firmware side decodes as `None` against an offline
+        # value the plan's ladder can always compute. A decode-completeness
+        # gap, not a grammar or terminal-derivation defect.
+        r"^rung \d+ response horizon tau_us: firmware=None offline=-?\d+$",
+        r"^rung \d+ response horizon moving_horizon_us: firmware=None offline=\d+$",
+        r"^rung \d+ response horizon horizon_class: firmware=None offline=\d+$",
+        # `_attach_rest_selection_audit`'s independent raw-sample check
+        # (unchanged by Tasks 5 or 6): one Event 151's `intervals_q` disagrees
+        # with the interval recomputed from the causal 256 raw samples.
+        r"^scored-rest intervals_q mismatch: "
+        r"firmware=\[\[-?\d+, -?\d+\], \[-?\d+, -?\d+\], \[-?\d+, -?\d+\]\] "
+        r"offline=\[\[-?\d+, -?\d+\], \[-?\d+, -?\d+\], \[-?\d+, -?\d+\]\]$",
+    )
+)
+
+
+def _residual_match_count(message: str) -> int:
+    """Count how many allowlist entries `message` matches.
+
+    The corpus test requires exactly one: zero means an unaccounted-for
+    regression, more than one means the predicates overlap and must be
+    tightened.
+    """
+    count = 1 if message in _RESIDUAL_EXACT_MESSAGES else 0
+    count += sum(1 for pattern in _RESIDUAL_MESSAGE_PATTERNS if pattern.fullmatch(message))
+    return count
+
+
+def test_transport_validated_capture_carries_no_targeted_grammar_regression() -> None:
+    """`foc213-transport-validated` is the capture whose reply-transport fix
+    this whole investigation chased, and it analyzes completely -- every
+    scored-rest grammar check and the schema >= 8 combined-terminal
+    derivation both run against it, unlike `foc213-p18b` below. Three
+    properties, per spec R6:
+
+    1. None of the strings the Task 5 grammar fix or the Task 6 validator
+       fix can emit (old or new wording) appear.
+    2. No sequence- or identity-related mismatch appears.
+    3. Every other mismatch matches exactly one entry in the known-residual
+       allowlist above -- not "at least one": an unmatched mismatch is a new
+       regression, and a multiply-matched one means the predicates overlap.
+    """
+    if not _TRANSPORT_VALIDATED_CAPTURE.exists():
+        pytest.skip(f"archived capture not present: {_TRANSPORT_VALIDATED_CAPTURE}")
+
+    analysis = _analyze_complete_prefix(_TRANSPORT_VALIDATED_CAPTURE)
+    responses = analysis.velocity_integral_audits
+    assert len(responses) == 1
+    mismatches = responses[0]["mismatches"]
+
+    targeted = [message for message in mismatches if message in _TARGETED_GRAMMAR_MESSAGES]
+    assert targeted == []
+
+    sequence_or_identity = [
+        message for message in mismatches if "sequence" in message or "identity" in message
+    ]
+    assert sequence_or_identity == []
+
+    match_counts = {message: _residual_match_count(message) for message in mismatches}
+    unmatched = [message for message, count in match_counts.items() if count == 0]
+    multiply_matched = [message for message, count in match_counts.items() if count > 1]
+    assert unmatched == []
+    assert multiply_matched == []
+
+
+def test_p18b_decoded_prefix_satisfies_the_scored_rest_grammar() -> None:
+    """`foc213-p18b`'s recorder stopped two rungs in, so its plan fragments
+    and terminal are incomplete and `audit_velocity_integral` can only
+    report `partial integral-response capture` -- the grammar checks never
+    run. Asserting the absence of grammar mismatches through that full audit
+    would therefore be vacuous. This calls the changed validator,
+    `audit_scored_rest_grammar`, directly against the capture's decoded
+    record prefix instead, which is `foc213-p18b`'s substantive
+    `foci-trace` coverage.
+
+    The record list is trimmed to end at the last `rung_origin_recovery`:
+    the grammar checks each observation's and each selection's successor, so
+    a trailing partial group would fault against the synthesized terminal
+    below rather than against real firmware output, and a recovery record
+    has no successor requirement, so ending there is clean.
+
+    The terminal is a sentinel, `{"run_sequence": ..., "cause": 0}`, built
+    from the run sequence the trimmed records themselves carry. That is
+    sound because `audit_scored_rest_grammar` only ever reads two terminal
+    fields: `run_sequence` for the scored-rest selection identity check, and
+    `cause` to confirm a rejection's causal terminal -- and this trimmed
+    prefix contains no rejected selection (`disposition == 2`), so `cause`
+    is never actually consulted.
+    """
+    if not _P18B_CAPTURE.exists():
+        pytest.skip(f"archived capture not present: {_P18B_CAPTURE}")
+
+    records = _stage_c_evidence_records(_P18B_CAPTURE)
+    last_recovery_index = max(
+        index
+        for index, record in enumerate(records)
+        if record["record_kind"] == "rung_origin_recovery"
+    )
+    trimmed = records[: last_recovery_index + 1]
+
+    run_sequence = int(trimmed[0]["run_sequence"])
+    assert {int(record["run_sequence"]) for record in trimmed} == {run_sequence}
+    plan_digest = next(int(record["plan_digest"]) for record in trimmed if "plan_digest" in record)
+    terminal = {"run_sequence": run_sequence, "cause": 0}
+
+    mismatches = audit_scored_rest_grammar(
+        trimmed,
+        terminal,
+        schema_revision=14,
+        schema_floor=12,
+        expected_stage=1,
+        ordinary_owners=(3, 4, 6),
+        recovery_owners=(5,),
+        observation_kind="integral_observation",
+        plan_digest=plan_digest,
+        label="Stage C",
+        stabilized_recovery_rest=False,
+        ordinary_rejection_tail=("velocity_primitive_current",),
+    )
+
+    assert mismatches == []
+
+    # Supplementary check, independent of the grammar audit above: the
+    # trimmed prefix's evidence_sequence numbers are contiguous, the same
+    # property `audit_velocity_integral` checks separately from the grammar
+    # for a complete run.
+    sequences = [int(record["evidence_sequence"]) for record in trimmed]
+    assert sequences == list(range(sequences[0], sequences[0] + len(sequences)))
