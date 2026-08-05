@@ -1949,9 +1949,36 @@ def audit_velocity_integral(
         positive_count,
     )
     terminal_eligible_masks = list(terminal["eligible_masks"])
-    if faulted and terminal_eligible_masks != [0, 0]:
-        mismatches.append("fault terminal retained nonempty eligible masks")
-    elif not faulted and eligible_masks != terminal_eligible_masks:
+    terminal_opening_mask = int(terminal.get("opening_available_mask", -1))
+    terminal_bookend_mask = int(terminal.get("bookend_available_mask", -1))
+    # A fault terminal reports one of two evidence shapes, and which one it is
+    # cannot be read back off the terminal.
+    #
+    # Reset: `integral_fault_terminal` (`integral_sweep.rs:1001`) and
+    # `evidence_terminal`'s materialization-error arm (`:1143`) both build the
+    # terminal from `IntegralRunEvidence::new([ExactRateInterval::EMPTY; 2])`,
+    # which zeroes `eligible_masks`, `opening`, and `bookend`
+    # (`integral_evidence.rs:165-175`).
+    #
+    # Preserved: `evidence_terminal`'s assessment-error arm (`:1211`) passes
+    # the materialized evidence through unchanged, and every dispatch-level
+    # promotion overwrites only `outcome`/`cause` on an already-built terminal
+    # -- `apply_stage_c_terminal` (`commission_dispatch/stage_c.rs:273`, `:283`,
+    # `:338`, `:358`) and the disarm-failure paths in
+    # `commission_dispatch/mod.rs` (`:606`, `:1417`, `:1430`, `:1467`). A
+    # complete, fully sufficient run whose dispatcher found no Stage-C
+    # authority is faulted this way with all of its evidence intact.
+    #
+    # Both a reset path and a preserved path report cause 4, so demanding the
+    # reset shape rejected real captures. The rule is instead: reset evidence
+    # is accepted unexamined, and any other evidence must agree with the
+    # replay, exactly as it must for a run that did not fault.
+    fault_evidence_reset = (
+        faulted
+        and terminal_eligible_masks == [0, 0]
+        and (schema_revision < 4 or (terminal_opening_mask == 0 and terminal_bookend_mask == 0))
+    )
+    if not fault_evidence_reset and eligible_masks != terminal_eligible_masks:
         mismatches.append(
             f"terminal eligible masks: firmware={terminal['eligible_masks']} offline={eligible_masks}"
         )
@@ -1965,14 +1992,14 @@ def audit_velocity_integral(
     bookend_available_mask = sum(
         (1 << direction) for direction, interval in enumerate(bookend) if interval is not None
     )
-    if schema_revision >= 4:
-        terminal_opening_mask = int(terminal.get("opening_available_mask", -1))
-        terminal_bookend_mask = int(terminal.get("bookend_available_mask", -1))
-        if faulted and (terminal_opening_mask != 0 or terminal_bookend_mask != 0):
-            mismatches.append("fault terminal retained nonempty anchor availability")
-        elif not faulted and terminal_opening_mask != opening_available_mask:
+    if schema_revision >= 4 and not fault_evidence_reset:
+        # Same rule as the eligible masks above: the anchor availability masks
+        # are folded from the very evidence struct the two reset paths empty
+        # (`replies.rs:1420-1438`), so they are compared unless the terminal
+        # reported the reset shape.
+        if terminal_opening_mask != opening_available_mask:
             mismatches.append("terminal opening-anchor availability mask differs from replay")
-        if not faulted and terminal_bookend_mask != bookend_available_mask:
+        if terminal_bookend_mask != bookend_available_mask:
             mismatches.append("terminal bookend availability mask differs from replay")
     sufficient = _stage_c_run_sufficient(
         schema_revision,

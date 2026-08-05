@@ -3006,6 +3006,82 @@ def test_combined_sufficient_but_faulted_terminal_is_accepted() -> None:
     assert audit["mismatches"] == []
 
 
+def _fault_the_terminal_preserving_evidence(
+    records: list[tuple[bytes, dict[str, object]]],
+    **overrides: object,
+) -> list[tuple[bytes, dict[str, object]]]:
+    """Fault a terminal the way a dispatch-level promotion does.
+
+    `apply_stage_c_terminal` (`commission_dispatch/stage_c.rs:273`, `:283`,
+    `:338`, `:358`) and the disarm-failure paths in
+    `commission_dispatch/mod.rs` (`:606`, `:1417`, `:1430`, `:1467`) overwrite
+    only `outcome` and `cause` on an already-built terminal, and
+    `evidence_terminal`'s assessment-error arm (`integral_sweep.rs:1211`)
+    passes the materialized evidence through unchanged. All of them leave the
+    run's evidence intact, unlike `_fault_the_terminal` above. `overrides`
+    exists so the same shape can be falsified in one field at a time.
+    """
+    terminal_raw, terminal = records[-1]
+    return [*records[:-1], (terminal_raw, {**terminal, "outcome": 3, "cause": 4, **overrides})]
+
+
+def test_faulted_terminal_preserving_its_evidence_is_accepted() -> None:
+    """The archived `foc213-transport-validated` capture is exactly this: a
+    complete, fully sufficient schema-14 run whose terminal reports outcome 3
+    and cause 4 while still carrying `eligible_masks=[4095, 4095]` and both
+    anchor masks at 3, every value reproduced by the offline replay. Its
+    dispatcher faulted an already-built terminal, so nothing reset the
+    evidence.
+
+    Demanding the reset shape from every fault terminal therefore rejected
+    real firmware output. Two of the four fault paths reset and two preserve,
+    and all of `evidence_terminal`'s integrity arm, the materialization arm,
+    and `apply_stage_c_terminal` report cause 4, so the terminal cannot say
+    which path built it.
+    """
+    raw, records = _synthetic_complete_capture(schema_revision=14)
+    records = _fault_the_terminal_preserving_evidence(records)
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["mismatches"] == []
+
+
+def test_faulted_terminal_preserving_wrong_eligible_masks_is_rejected() -> None:
+    """Accepting the preserved shape must not become accepting anything a
+    fault terminal says. Preserved evidence is still evidence: it has to agree
+    with the replay, exactly as it does for a run that did not fault.
+    """
+    raw, records = _synthetic_complete_capture(schema_revision=14)
+    records = _fault_the_terminal_preserving_evidence(records, eligible_masks=[4094, 4095])
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["mismatches"] == [
+        "terminal eligible masks: firmware=[4094, 4095] offline=[4095, 4095]"
+    ]
+
+
+def test_faulted_terminal_preserving_wrong_anchor_masks_is_rejected() -> None:
+    """The anchor availability masks are folded from the same evidence struct
+    (`replies.rs:1420-1438`), so they follow the same rule: a fault terminal
+    that neither reset them nor matched the replay is reported.
+    """
+    raw, records = _synthetic_complete_capture(schema_revision=14)
+    records = _fault_the_terminal_preserving_evidence(
+        records,
+        opening_available_mask=1,
+        bookend_available_mask=2,
+    )
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["mismatches"] == [
+        "terminal opening-anchor availability mask differs from replay",
+        "terminal bookend availability mask differs from replay",
+    ]
+
+
 def _fault_the_terminal_after_reaching_target(
     records: list[tuple[bytes, dict[str, object]]],
     *,
@@ -3247,17 +3323,15 @@ _TARGETED_GRAMMAR_MESSAGES = frozenset(
 #   (`integral_reporting.rs:454-471`) appends that byte only for a combined
 #   workflow, so the offline seed hashed one byte firmware never hashed. Not a
 #   property of the fault terminal it was filed under.
-_RESIDUAL_EXACT_MESSAGES = frozenset(
-    {
-        # This run's terminal is a genuine fault (outcome 3); firmware does
-        # not zero `eligible_masks` or the opening/bookend availability masks
-        # on the fault path, so the replay-vs-terminal comparison the fault
-        # branch performs always disagrees on this build. Unrelated to the
-        # scored-rest grammar or the combined-workflow derivation.
-        "fault terminal retained nonempty eligible masks",
-        "fault terminal retained nonempty anchor availability",
-    }
-)
+# - `fault terminal retained nonempty eligible masks` and
+#   `fault terminal retained nonempty anchor availability`. The audit demanded
+#   that every fault terminal report the reset evidence shape. Only two of the
+#   four fault paths reset it; the dispatch-level promotions
+#   (`commission_dispatch/stage_c.rs`, `commission_dispatch/mod.rs`) and
+#   `evidence_terminal`'s assessment-error arm overwrite outcome and cause on
+#   an already-built terminal and leave its evidence intact. This capture's
+#   preserved evidence reproduces the offline replay exactly.
+_RESIDUAL_EXACT_MESSAGES: frozenset[str] = frozenset()
 _RESIDUAL_MESSAGE_PATTERNS = tuple(
     re.compile(pattern)
     for pattern in (
