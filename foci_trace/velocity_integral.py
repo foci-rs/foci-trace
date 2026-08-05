@@ -1839,32 +1839,44 @@ def audit_velocity_integral(
         eligible_masks,
     )
     if schema_revision >= 8:
-        target_terminus = terminal.get("target_terminus")
-        expected_status = combined_target_status(
-            target_terminus=int(target_terminus) if target_terminus is not None else None,
-            eligible_masks=eligible_masks,
-            current_terminus=(
-                int(terminal["current_terminus"])
-                if terminal["current_terminus"] is not None
-                else None
-            ),
-            emitted_rungs=int(terminal["emitted_rungs"]),
-            expected_rungs=int(terminal["expected_rungs"]),
-        )
-        expected_target_status = 0xFF if expected_status is None else expected_status
-        if int(terminal.get("target_status", -1)) != expected_target_status:
-            mismatches.append("combined target status differs from causal ladder evidence")
+        # `plan.combined_workflow` (integral_plan.rs:508) is exactly
+        # `combined_selected_response.is_some()`: a breakaway/standalone plan
+        # never carries a combined selected response, and a combined plan
+        # always does (`plan_combined_velocity_integral_response` always
+        # supplies `Some`). So the plan's own `combined_selected_response`
+        # is a faithful proxy for whether this run is a combined workflow at
+        # all -- schema >= 8 alone says nothing about that; plenty of
+        # schema >= 8 runs are standalone Stage-C (breakaway) runs and must
+        # not be held to combined-terminal semantics.
+        plan_combined_workflow = bool(plan.get("combined_selected_response", False))
         recovery_flags = int(terminal.get("recovery_flags", 0))
-        encoded_status = (recovery_flags & _TERMINAL_COMBINED_TARGET_MASK) >> 4
-        expected_encoded_status = (
-            0 if expected_target_status == 0xFF else expected_target_status + 1
-        )
-        if not recovery_flags & _TERMINAL_COMBINED_WORKFLOW:
-            mismatches.append("combined terminal lacks its workflow flag")
-        if encoded_status != expected_encoded_status:
-            mismatches.append("combined terminal target flags differ from canonical status")
-        if sufficient and outcome != 1:
-            mismatches.append("combined sufficient run did not complete without retention")
+        terminal_combined_workflow = bool(recovery_flags & _TERMINAL_COMBINED_WORKFLOW)
+        if terminal_combined_workflow != plan_combined_workflow:
+            mismatches.append("terminal combined-workflow flag differs from the plan")
+        if plan_combined_workflow:
+            target_terminus = terminal.get("target_terminus")
+            expected_status = combined_target_status(
+                target_terminus=int(target_terminus) if target_terminus is not None else None,
+                eligible_masks=eligible_masks,
+                current_terminus=(
+                    int(terminal["current_terminus"])
+                    if terminal["current_terminus"] is not None
+                    else None
+                ),
+                emitted_rungs=int(terminal["emitted_rungs"]),
+                expected_rungs=int(terminal["expected_rungs"]),
+            )
+            expected_target_status = 0xFF if expected_status is None else expected_status
+            if int(terminal.get("target_status", -1)) != expected_target_status:
+                mismatches.append("combined target status differs from causal ladder evidence")
+            encoded_status = (recovery_flags & _TERMINAL_COMBINED_TARGET_MASK) >> 4
+            expected_encoded_status = (
+                0 if expected_target_status == 0xFF else expected_target_status + 1
+            )
+            if encoded_status != expected_encoded_status:
+                mismatches.append("combined terminal target flags differ from canonical status")
+            if sufficient and outcome != 1:
+                mismatches.append("combined sufficient run did not complete without retention")
     if cause in (9, 10) and rest_boundary is None:
         mismatches.append("rest-boundary terminal cause lacks its canonical boundary record")
     if rest_boundary is not None and not faulted:

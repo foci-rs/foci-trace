@@ -686,6 +686,17 @@ def _moving_recovery_record(
     return raw, {"record_kind": "rung_origin_recovery", **values}
 
 
+# Field order and widths below mirror `_decode_velocity_sweep_evidence`'s
+# `kind == 11` (78-byte, Event 151) and `kind == 10` (89-byte, Event 150)
+# branches in `foci_trace/protocol.py` exactly -- the only two shapes those
+# branches accept. `test_stage_c_evidence_helpers_round_trip_through_the_decoder`
+# decodes every record either helper builds and asserts the result equals
+# what the helper claims, so a field-order or field-count mistake here fails
+# immediately instead of silently building a dict `audit_velocity_integral`
+# accepts while the raw bytes it also hashes would be rejected by the real
+# firmware decoder.
+
+
 def _stage_c_rest_selection_record(
     rung_index: int,
     slot: int,
@@ -693,28 +704,79 @@ def _stage_c_rest_selection_record(
     sequence: int,
     plan_digest: int,
     *,
+    direction: int = 0,
     disposition: int = 0,
 ) -> tuple[bytes, dict[str, object]]:
-    """Build one Event 151 scored-rest selection for a Stage-C fixture.
+    """Build one canonical Event 151 scored-rest selection.
 
-    Ordinary owners (3 anchor, 4 positive) carry the observation's real slot;
-    the recovery owner (5) has no slot, matching the wire encoding's `0xFF`
-    sentinel for recovery-position selections.
+    Ordinary owners (3 anchor, 4 positive) carry the observation's actual
+    direction and slot; the recovery owner (5) carries the decoder's `0xFF`
+    sentinel for both (`protocol.py`'s "scored-rest recovery position"
+    check). All three suffixes report a zero-width, zero-centered interval
+    with `structural_codes` all 0 -- the same all-agreeing-on-zero-rate
+    fixture `analyze_scored_rest_selection` produces for 256 identical
+    zero-delta observations (see
+    `test_scored_rest_selection_recomputes_all_suffixes_independently` in
+    test_velocity_measurement.py) -- so the winning suffix is the full
+    256-sample one and `disposition=0` (statistical selection) is
+    decoder-valid.
     """
     recovery_owner = owner == 5
+    stage = 0 if owner <= 2 else 1
     values = {
         "run_sequence": 7,
         "evidence_sequence": sequence,
-        "stage": 1,
+        "stage": stage,
         "owner": owner,
         "rung_index": rung_index,
-        "direction": 0xFF if recovery_owner else 0,
+        "direction": 0xFF if recovery_owner else direction,
         "slot": 0xFF if recovery_owner else slot,
         "plan_digest": plan_digest,
+        "structural_code_0": 0,
+        "structural_code_1": 0,
+        "structural_code_2": 0,
+        "interval_present_mask": 0b111,
+        "usable_mask": 0b111,
+        "zero_compatible_mask": 0b111,
+        "selected_mask": 0b100,
+        "selected_suffix_len": 256,
         "disposition": disposition,
+        "interval_0_low": 0,
+        "interval_0_high": 0,
+        "interval_1_low": 0,
+        "interval_1_high": 0,
+        "interval_2_low": 0,
+        "interval_2_high": 0,
     }
-    raw = struct.pack("<BIHBBBBBQB", 11, *values.values())
-    return raw, {"record_kind": "rest_selection", **values}
+    raw = struct.pack("<BIHBBBBBQBBBBBBBHBqqqqqq", 11, *values.values())
+    decoded = {
+        "run_sequence": values["run_sequence"],
+        "evidence_sequence": values["evidence_sequence"],
+        "stage": values["stage"],
+        "owner": values["owner"],
+        "rung_index": values["rung_index"],
+        "direction": values["direction"],
+        "slot": values["slot"],
+        "plan_digest": values["plan_digest"],
+        "structural_codes": [
+            values["structural_code_0"],
+            values["structural_code_1"],
+            values["structural_code_2"],
+        ],
+        "interval_present_mask": values["interval_present_mask"],
+        "usable_mask": values["usable_mask"],
+        "zero_compatible_mask": values["zero_compatible_mask"],
+        "selected_mask": values["selected_mask"],
+        "selected_suffix_len": values["selected_suffix_len"],
+        "disposition": values["disposition"],
+        "intervals_q": [
+            [values["interval_0_low"], values["interval_0_high"]],
+            [values["interval_1_low"], values["interval_1_high"]],
+            [values["interval_2_low"], values["interval_2_high"]],
+        ],
+        "conditioned_rest_evidence": disposition == 0,
+    }
+    return raw, {"record_kind": "rest_selection", **decoded}
 
 
 def _stage_c_recovery_rest_record(
@@ -722,30 +784,39 @@ def _stage_c_recovery_rest_record(
     sequence: int,
     plan_digest: int,
     *,
+    velocity_p: int,
     start_offset_counts: int,
+    closest_offset_counts: int,
     first_in_band_offset_counts: int,
     final_offset_counts: int,
     planned_return_distance_counts: int,
     disposition: int = 0,
 ) -> tuple[bytes, dict[str, object]]:
-    """Build one Event 150 recovery-rest diagnostic for a Stage-C fixture.
+    """Build one canonical Event 150 recovery-rest diagnostic.
 
     Carries every field `audit_recovery_rest_geometry` consumes (an in-band
     entry and exit, a lead-in span containing its net displacement, and a
-    scored range containing its net displacement), plus
-    `entry_to_band_duration_us`, which `summarize_recovery_rest_diagnostics`
-    also requires unconditionally.
+    scored range containing its net displacement), plus every remaining
+    decoder-only field the wire shape requires: `velocity_p`,
+    `closest_offset_counts`, `stationarity_code`/`interval_present` (the
+    decoder's own "in-band, present" pairing) with a zero-width interval at
+    zero, and `current_contact_code` ("no contact"). None of the
+    decoder-only fields are checked by `audit_recovery_rest_geometry`, but
+    all must be decoder-valid or the record does not survive a real
+    capture.
     """
     values = {
         "run_sequence": 7,
         "evidence_sequence": sequence,
         "stage": 1,
         "rung_index": rung_index,
+        "velocity_p": velocity_p,
         "plan_digest": plan_digest,
         "start_offset_counts": start_offset_counts,
-        "first_in_band_offset_counts": first_in_band_offset_counts,
+        "closest_offset_counts": closest_offset_counts,
         "final_offset_counts": final_offset_counts,
         "planned_return_distance_counts": planned_return_distance_counts,
+        "first_in_band_offset_counts": first_in_band_offset_counts,
         "displacement_to_band_counts": first_in_band_offset_counts - start_offset_counts,
         "entry_to_band_duration_us": 400_000,
         "lead_in_net_displacement_counts": 0,
@@ -753,14 +824,64 @@ def _stage_c_recovery_rest_record(
         "scored_net_displacement_counts": 0,
         "scored_min_displacement_counts": -50,
         "scored_max_displacement_counts": 50,
+        "stationarity_code": 0,
+        "interval_present": 1,
+        "exact_velocity_interval_low": 0,
+        "exact_velocity_interval_high": 0,
+        "peak_torque_target_abs": 0,
+        "current_contact_code": 0,
         "disposition": disposition,
     }
     raw = struct.pack(
-        "<BIHBBQiiiIiIiiiiiB",
+        "<BIHBBHQiiiIiiIiIiiiBBqqHBB",
         10,
         *values.values(),
     )
-    return raw, {"record_kind": "recovery_rest", **values}
+    decoded = {
+        key: value
+        for key, value in values.items()
+        if key not in ("exact_velocity_interval_low", "exact_velocity_interval_high")
+    }
+    decoded["exact_velocity_interval_q"] = [
+        values["exact_velocity_interval_low"],
+        values["exact_velocity_interval_high"],
+    ]
+    return raw, {"record_kind": "recovery_rest", **decoded}
+
+
+def test_stage_c_evidence_helpers_round_trip_through_the_decoder() -> None:
+    """Decode every shape either synthetic-evidence helper can produce and
+    assert the result equals what the helper claims. `audit_velocity_integral`
+    trusts the separately built dictionary in each `(raw, dict)` pair while
+    hashing the raw bytes into the terminal digest, so a fixture whose raw
+    encoding a real decoder would reject can still reach an empty mismatch
+    list -- proving nothing about a firmware-decodable capture. This is the
+    check that makes that class of error impossible to repeat.
+    """
+    from foci_trace.protocol import _decode_velocity_sweep_evidence
+
+    plan_digest = 0xABCDEF01
+
+    for owner, direction, slot in ((3, 0, 2), (3, 1, 5), (4, 0, 0), (4, 1, 7), (5, 0, 0)):
+        raw, expected = _stage_c_rest_selection_record(
+            1, slot, owner, 9, plan_digest, direction=direction
+        )
+        assert len(raw) == 78
+        assert _decode_velocity_sweep_evidence(raw) == expected
+
+    raw, expected = _stage_c_recovery_rest_record(
+        1,
+        9,
+        plan_digest,
+        velocity_p=1_448,
+        start_offset_counts=1_500,
+        closest_offset_counts=900,
+        first_in_band_offset_counts=950,
+        final_offset_counts=900,
+        planned_return_distance_counts=500,
+    )
+    assert len(raw) == 89
+    assert _decode_velocity_sweep_evidence(raw) == expected
 
 
 def _current_record(rung_index: int, slot: int, sequence: int) -> tuple[bytes, dict[str, object]]:
@@ -982,7 +1103,12 @@ def _synthetic_complete_capture(
             if stage_c_scored:
                 records.append(
                     _stage_c_rest_selection_record(
-                        rung_index, slot, ordinary_owner, sequence, int(plan["plan_digest"])
+                        rung_index,
+                        slot,
+                        ordinary_owner,
+                        sequence,
+                        int(plan["plan_digest"]),
+                        direction=direction,
                     )
                 )
                 sequence += 1
@@ -1029,7 +1155,9 @@ def _synthetic_complete_capture(
                             rung_index,
                             sequence,
                             int(plan["plan_digest"]),
+                            velocity_p=int(plan["final_p"]),
                             start_offset_counts=1_500,
+                            closest_offset_counts=900,
                             first_in_band_offset_counts=950,
                             final_offset_counts=900,
                             planned_return_distance_counts=500,
@@ -1077,6 +1205,22 @@ def _synthetic_complete_capture(
             continue
         for byte in raw:
             digest = ((digest ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    # `plan.combined_workflow` (integral_plan.rs:508) is exactly
+    # `combined_selected_response.is_some()`, so the plan's own flag is the
+    # single source of truth for whether this run is a combined workflow at
+    # all. Below schema 12 every existing fixture leaves `_plan()`'s default
+    # `combined_selected_response=True` untouched, so `plan_combined_workflow`
+    # is unconditionally True there and every schema-8-plus terminal field
+    # below is unaffected. At schema 12+, `stage_c_scored` already bound
+    # `plan["combined_selected_response"] = stabilized` above, so this
+    # follows `stabilized` exactly. `outcome` itself is not combined-specific
+    # -- it stays 1 (complete) for both schedules, matching every rung and
+    # both anchors being genuinely present in this fixture -- but the
+    # combined-only terminal encoding (`combined_workflow`/`final_p`/
+    # `target_status`/`target_terminus`, and the corresponding recovery_flags
+    # bits) must not claim a combined workflow the plan does not have, or the
+    # fixture falsifies its own terminal to reach an empty mismatch list.
+    plan_combined_workflow = bool(plan.get("combined_selected_response", False))
     records.append(
         (
             b"",
@@ -1100,7 +1244,11 @@ def _synthetic_complete_capture(
                 **(
                     {
                         "recovery_flags": (
-                            0xC0 if schema_revision >= 8 else 8 if schema_revision >= 7 else 4
+                            (0xC0 if plan_combined_workflow else 0)
+                            if schema_revision >= 8
+                            else 8
+                            if schema_revision >= 7
+                            else 4
                         )
                     }
                     if schema_revision >= 6
@@ -1123,7 +1271,7 @@ def _synthetic_complete_capture(
                         "target_status": 3,
                         "target_terminus": None,
                     }
-                    if schema_revision >= 8
+                    if schema_revision >= 8 and plan_combined_workflow
                     else {}
                 ),
             },
@@ -2208,17 +2356,33 @@ _STAGE_C_NONTERMINAL_KINDS = frozenset(
 def _renumber_stage_c_nonterminal_sequence(
     records: list[tuple[bytes, dict[str, object]]],
 ) -> int:
-    """Recompute the contiguous 1..N evidence sequence in place.
+    """Recompute the contiguous 1..N evidence sequence in place, in both the
+    decoded dict and the raw bytes.
 
     Plan fragments carry a fixed `evidence_sequence: 0` and are not part of
     the numbered stream (`audit_velocity_integral`'s own `nonterminal` filter
-    excludes them). Returns the next sequence value, for the terminal.
+    excludes them). `integral_plan_marker`'s compact wire shape has no
+    evidence_sequence field at all (see `_plan_marker`'s schema>=2 branch, an
+    `<BIQ...>` header with no `H` after the run_sequence `I`), so only its
+    dict is updated -- consistent with it always being emitted first and
+    never moving. Every other kind here shares one raw header shape: `<B>`
+    (kind marker) `<I>` (run_sequence) `<H>` (evidence_sequence) at a fixed
+    byte offset, so the raw patch is one `struct.pack_into` per record.
+    Rebuilding the digest from stale raw sequence bytes after a record is
+    removed would hash a stream that no longer matches what the returned
+    dicts claim -- exactly the fidelity gap this function exists to close.
+    Returns the next sequence value, for the terminal.
     """
     sequence = 1
-    for _raw, value in records:
-        if value["record_kind"] in _STAGE_C_NONTERMINAL_KINDS:
-            value["evidence_sequence"] = sequence
-            sequence += 1
+    for index, (raw, value) in enumerate(records):
+        if value["record_kind"] not in _STAGE_C_NONTERMINAL_KINDS:
+            continue
+        value["evidence_sequence"] = sequence
+        if value["record_kind"] != "integral_plan_marker":
+            patched = bytearray(raw)
+            struct.pack_into("<H", patched, 5, sequence)
+            records[index] = (bytes(patched), value)
+        sequence += 1
     return sequence
 
 
@@ -2235,6 +2399,41 @@ def _rebuild_stage_c_digest(
         for byte in raw:
             digest = ((digest ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
     return digest
+
+
+def test_renumber_stage_c_nonterminal_sequence_keeps_raw_and_decoded_in_sync() -> None:
+    """`_renumber_stage_c_nonterminal_sequence` must patch the raw evidence
+    sequence bytes alongside the decoded dict, or a real decoder run over the
+    renumbered stream would report different sequence numbers than the dicts
+    the tests assert against -- the digest would then be rebuilt from bytes
+    that disagree with the fixture's own claims about itself. Remove a
+    record, as `test_stabilized_stage_c_recovery_without_event_150_reports_both_validators`
+    does, and confirm every remaining raw record decodes to the exact
+    sequence its dict carries.
+    """
+    from foci_trace.protocol import _decode_velocity_sweep_evidence
+
+    _raw, records = _synthetic_complete_capture(schema_revision=12, stabilized=True)
+    records.pop()  # terminal: carries no raw payload, excluded from renumbering
+    removed_index = next(
+        index
+        for index, (_r, value) in enumerate(records)
+        if value["record_kind"] == "recovery_rest"
+    )
+    del records[removed_index]
+    _renumber_stage_c_nonterminal_sequence(records)
+
+    checked = 0
+    for raw, value in records:
+        if (
+            value["record_kind"] not in _STAGE_C_NONTERMINAL_KINDS
+            or value["record_kind"] == "integral_plan_marker"
+        ):
+            continue
+        decoded = _decode_velocity_sweep_evidence(raw)
+        assert decoded["evidence_sequence"] == value["evidence_sequence"]
+        checked += 1
+    assert checked > 0
 
 
 def test_immediate_scored_stage_c_recovery_passes_with_no_event_150() -> None:
@@ -2298,4 +2497,57 @@ def test_stabilized_stage_c_recovery_without_event_150_reports_both_validators()
     assert audit["mismatches"] == [
         "Stage C recovery selection does not precede Event 150",
         "moving Stage C recovery lacks recovery rest evidence",
+    ]
+
+
+def test_immediate_scored_terminal_claiming_a_combined_workflow_is_rejected() -> None:
+    """A genuine immediate-scored (non-combined) run's terminal must not carry
+    the combined-workflow flag. Before this task's production fix, the
+    combined-terminal validation ran unconditionally for every schema >= 8
+    run and demanded that flag regardless of the plan, so an honest
+    immediate-scored terminal (flag absent) was rejected -- and a
+    dishonest one that impersonated a combined workflow (flag present, as
+    the fixture used to hardcode) was accepted either way. Sabotaging an
+    otherwise-valid immediate-scored capture to falsely claim the combined
+    encoding proves the check now compares the terminal against the plan
+    in both directions, not just schema revision.
+    """
+    raw, records = _synthetic_complete_capture(schema_revision=12, stabilized=False)
+    terminal_raw, terminal = records[-1]
+    terminal = {
+        **terminal,
+        "recovery_flags": 0xC0,
+        "combined_workflow": True,
+        "final_p": 1_024,
+        "target_status": 3,
+        "target_terminus": None,
+    }
+    records[-1] = (terminal_raw, terminal)
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["mismatches"] == ["terminal combined-workflow flag differs from the plan"]
+
+
+def test_stabilized_terminal_dropping_the_combined_workflow_flag_is_rejected() -> None:
+    """Symmetric to the immediate-scored case above: a genuine combined
+    (`Stabilized`) run's terminal must carry the combined-workflow flag.
+    Clearing it from an otherwise-valid stabilized capture proves the
+    plan/terminal agreement check fires in both directions. The combined
+    target-status mask lives in the same `recovery_flags` byte as the
+    workflow bit, so clearing it also invalidates the encoded target status
+    -- both checks are still active for a plan that claims a combined
+    workflow, which is exactly why the agreement check must run before, not
+    instead of, the rest of the combined-terminal validation.
+    """
+    raw, records = _synthetic_complete_capture(schema_revision=12, stabilized=True)
+    terminal_raw, terminal = records[-1]
+    terminal = {**terminal, "recovery_flags": 0}
+    records[-1] = (terminal_raw, terminal)
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["mismatches"] == [
+        "terminal combined-workflow flag differs from the plan",
+        "combined terminal target flags differ from canonical status",
     ]
