@@ -2716,6 +2716,91 @@ def test_combined_sufficient_but_faulted_terminal_is_accepted() -> None:
     assert audit["mismatches"] == []
 
 
+def _fault_the_terminal_after_reaching_target(
+    records: list[tuple[bytes, dict[str, object]]],
+    *,
+    target_terminus: int,
+    target_status: int,
+    recovery_flags: int,
+) -> list[tuple[bytes, dict[str, object]]]:
+    """Fault a combined terminal that had already reached its 98-percent target.
+
+    `terminal_from_data` (`integral_sweep.rs:973`) sets
+    `rest_boundary_rung_plus_one` from `data.target_terminus`, which is *not*
+    part of `IntegralRunEvidence`, so the target terminus survives the fault
+    while `eligible_masks`/`current_terminus` are reset to empty by
+    `IntegralRunEvidence::new(...)`. `terminal_target_status`
+    (`integral_reporting.rs:51-76`) then reads those empty masks, so a
+    reached-target fault reports `TargetReachedSparse` (1), not
+    `TargetReached` (0), and `terminal_recovery_flags` encodes
+    `TERMINAL_COMBINED_WORKFLOW | ((1 + 1) << 4)` == 0xA0.
+    """
+    terminal_raw, terminal = records[-1]
+    terminal = {
+        **terminal,
+        "outcome": 3,
+        "cause": 4,
+        "eligible_masks": [0, 0],
+        "opening_available_mask": 0,
+        "bookend_available_mask": 0,
+        "current_terminus": None,
+        "target_terminus": target_terminus,
+        "target_status": target_status,
+        "recovery_flags": recovery_flags,
+    }
+    return [*records[:-1], (terminal_raw, terminal)]
+
+
+def test_combined_faulted_terminal_reaching_its_target_reports_sparse_status() -> None:
+    """A combined run that faults *after* reaching its target keeps
+    `target_terminus` but loses its `eligible_masks`, so firmware's own
+    `terminal_target_status` classifies it `TargetReachedSparse` (1) and
+    encodes recovery flags 0xA0. The audit previously fed the *replayed*
+    (still-sufficient, three-or-more eligible rungs per direction) masks into
+    `combined_target_status`, expected `TargetReached` (0), and reported both
+    the status and the encoded-flag mismatch against this honest terminal.
+
+    The existing `test_combined_sufficient_but_faulted_terminal_is_accepted`
+    cannot catch this: with `target_terminus=None` and a complete ladder the
+    formula falls through to `TargetNotReachedAtCap` (3) under empty *and*
+    replayed masks alike, so both readings agree by accident.
+    """
+    raw, records = _synthetic_complete_capture(schema_revision=12, stabilized=True)
+    records = _fault_the_terminal_after_reaching_target(
+        records,
+        target_terminus=2,
+        target_status=1,
+        recovery_flags=0xA0,
+    )
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["mismatches"] == []
+
+
+def test_combined_faulted_terminal_claiming_a_dense_target_is_rejected() -> None:
+    """The target-status checks must keep their teeth under a fault rather
+    than being switched off by it. Same reached-target fault as above, but
+    the terminal claims `TargetReached` (0) with recovery flags 0x90 -- the
+    reading the reset masks cannot support. Both the status field and its
+    encoded copy must be rejected.
+    """
+    raw, records = _synthetic_complete_capture(schema_revision=12, stabilized=True)
+    records = _fault_the_terminal_after_reaching_target(
+        records,
+        target_terminus=2,
+        target_status=0,
+        recovery_flags=0x90,
+    )
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["mismatches"] == [
+        "combined target status differs from causal ladder evidence",
+        "combined terminal target flags differ from canonical status",
+    ]
+
+
 # --------------------------------------------------------------------------
 # Archived-capture regression corpus (spec R6).
 #

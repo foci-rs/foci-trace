@@ -1883,10 +1883,31 @@ def audit_velocity_integral(
         if not faulted and sufficient and not plan_combined_workflow and outcome != 0:
             mismatches.append("standalone sufficient run falsely reports the combined outcome")
         if plan_combined_workflow:
+            # `terminal_target_status` (`integral_reporting.rs:51-76`) reads
+            # the terminal's *own* `report.evidence.eligible_masks` and
+            # `report.evidence.current_terminus`, and every fault terminal is
+            # built from `IntegralRunEvidence::new(...)`
+            # (`integral_sweep.rs:1001` and `:1143`,
+            # `integral_evidence.rs:167-175`),
+            # which resets both to empty. `target_terminus` is *not* part of
+            # that struct: `terminal_from_data` sets
+            # `rest_boundary_rung_plus_one` from `data.target_terminus`
+            # (`integral_sweep.rs:973`), so it survives the fault. A combined
+            # run that faults after reaching a target therefore reports
+            # `TargetReachedSparse` (1) -- terminus present, masks empty --
+            # where the *replayed* masks would say `TargetReached` (0).
+            # Feeding the replayed masks in here made both this check and the
+            # encoded-flag check below reject that honest terminal. Every
+            # input is now taken from the terminal's own reported evidence,
+            # which makes both checks pure terminal self-consistency checks:
+            # the terminal's evidence is separately compared against the
+            # replay above (`terminal eligible masks`, guarded by `faulted`),
+            # so a non-faulted divergence is still reported there and nothing
+            # is lost.
             target_terminus = terminal.get("target_terminus")
             expected_status = combined_target_status(
                 target_terminus=int(target_terminus) if target_terminus is not None else None,
-                eligible_masks=eligible_masks,
+                eligible_masks=terminal_eligible_masks,
                 current_terminus=(
                     int(terminal["current_terminus"])
                     if terminal["current_terminus"] is not None
