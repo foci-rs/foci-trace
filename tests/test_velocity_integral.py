@@ -2973,9 +2973,11 @@ _RESIDUAL_MESSAGE_PATTERNS = tuple(
         # `_attach_rest_selection_audit`'s independent raw-sample check
         # (unchanged by Tasks 5 or 6): one Event 151's `intervals_q` disagrees
         # with the interval recomputed from the causal 256 raw samples.
-        r"^scored-rest intervals_q mismatch: "
-        r"firmware=\[\[-?\d+, -?\d+\], \[-?\d+, -?\d+\], \[-?\d+, -?\d+\]\] "
-        r"offline=\[\[-?\d+, -?\d+\], \[-?\d+, -?\d+\], \[-?\d+, -?\d+\]\]$",
+        (
+            r"^scored-rest intervals_q mismatch: "
+            r"firmware=\[\[-?\d+, -?\d+\], \[-?\d+, -?\d+\], \[-?\d+, -?\d+\]\] "
+            r"offline=\[\[-?\d+, -?\d+\], \[-?\d+, -?\d+\], \[-?\d+, -?\d+\]\]$"
+        ),
     )
 )
 
