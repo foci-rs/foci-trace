@@ -3304,9 +3304,11 @@ _TARGETED_GRAMMAR_MESSAGES = frozenset(
 # is matched by an anchored regular expression that pins the whole message
 # and constrains the variable part to digits or a signed number, per spec R6.
 #
-# Two former entries are gone, both misdiagnosed the same way -- recorded as
-# gaps in the archived build when they were really the audit demanding
-# combined-workflow output from a non-combined breakaway run:
+# Every entry here was audited against firmware once the archived capture was
+# identified as a real schema-14 breakaway run. Four were misdiagnosed: they
+# were recorded as gaps in the archived build when they were really the audit
+# demanding output firmware never produces for that run. All four are fixed and
+# gone:
 #
 # - `plan reconstruction failed: 'slot_transition_allowance_us'`. Firmware
 #   emits no slot-transition allowance for a non-combined plan; the offline
@@ -3331,13 +3333,34 @@ _TARGETED_GRAMMAR_MESSAGES = frozenset(
 #   `evidence_terminal`'s assessment-error arm overwrite outcome and cause on
 #   an already-built terminal and leave its evidence intact. This capture's
 #   preserved evidence reproduces the offline replay exactly.
+#
+# Empty, and kept rather than deleted: the exactly-one-match rule below still
+# consults it, and a future stable-text residual belongs here rather than in a
+# pattern.
 _RESIDUAL_EXACT_MESSAGES: frozenset[str] = frozenset()
 _RESIDUAL_MESSAGE_PATTERNS = tuple(
     re.compile(pattern)
     for pattern in (
-        # `_attach_rest_selection_audit`'s independent raw-sample check
-        # (unchanged by Tasks 5 or 6): one Event 151's `intervals_q` disagrees
-        # with the interval recomputed from the causal 256 raw samples.
+        # The one surviving residual, and the evidence that it is genuine
+        # rather than another instance of the class above.
+        #
+        # `_attach_rest_selection_audit` recomputes each Event 151 from the
+        # last 256 causal raw samples. Nothing on either side is
+        # workflow-gated: `combined_workflow` appears nowhere in the firmware
+        # scored-rest path, and 124 of this capture's 125 selections verify
+        # byte-exact through the identical code, including 12 recovery
+        # selections structurally identical to the one that fails.
+        #
+        # The failure is rung 5's recovery selection. Every structural field
+        # agrees -- codes, all four masks, the selected suffix, the
+        # disposition. Only the 64-sample suffix's half-width differs:
+        # firmware 61476, offline 0. Every delta in the window, and in the
+        # 300 samples either side of it, is zero, so no window the host stream
+        # can offer has nonzero rate variance; shifting the window by even one
+        # sample changes all three suffixes at once, unlike firmware's report.
+        # The capture records no dropped motion samples and no frame gaps, so
+        # this cannot be closed from this recording: it needs firmware
+        # instrumentation of that one scoring window, or a fresh capture.
         (
             r"^scored-rest intervals_q mismatch: "
             r"firmware=\[\[-?\d+, -?\d+\], \[-?\d+, -?\d+\], \[-?\d+, -?\d+\]\] "
