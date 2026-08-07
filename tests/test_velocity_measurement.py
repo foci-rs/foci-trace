@@ -3107,6 +3107,43 @@ def test_stage_b_fault_rejects_missing_intermediate_recovery() -> None:
     assert any("recovery rungs" in item for item in report["mismatches"])
 
 
+def test_stage_b_fault_terminal_evidence_comparison_matches_a_complete_terminal() -> None:
+    """A fault terminal can
+    preserve real, nonempty evidence instead of resetting it: dispatch-level
+    fault promotion (`apply_stage_b_terminal`'s `EvidenceIntegrityFault` arm,
+    `commission_dispatch/stage_b.rs:248-252`) overwrites only `outcome`/`cause`
+    on an already-built terminal, leaving `model_direction_mask`,
+    `coverage_mask`, `nominated_p`, `selected_memberships`, and
+    `selected_intervals` untouched. Stage-C's audit assumed fault implied
+    reset and rejected the preserved case as a false mismatch until
+    fixed. `_audit_stage_b_velocity_sweep` was never written with that
+    assumption -- its `_compare_fields` call for these evidence fields
+    (`velocity_measurement.py:4838`) runs unconditionally, before any
+    outcome-specific checks. Pin that: the same construction reports the
+    identical evidence-comparison verdict whether its terminal says Complete
+    or Fault, so a future change cannot silently reintroduce the Stage-C
+    mistake here.
+    """
+
+    def evidence_mismatches(report: dict[str, object]) -> list[str]:
+        return sorted(
+            item
+            for item in report["mismatches"]
+            if "model_direction_mask" in item
+            or "coverage_mask" in item
+            or "nominated_p" in item
+            or "selected memberships" in item
+            or "selected intervals" in item
+        )
+
+    complete = _stage_b_recovery_prefix_report(outcome=0, rung_count=10, recovered_rungs=())
+    fault = _stage_b_recovery_prefix_report(outcome=3, rung_count=10, recovered_rungs=())
+
+    complete_mismatches = evidence_mismatches(complete)
+    assert complete_mismatches, "the construction must produce real, nonzero evidence to compare"
+    assert evidence_mismatches(fault) == complete_mismatches
+
+
 def test_structured_boundary_reports_longer_tail_without_changing_binding() -> None:
     from foci_trace.velocity_measurement import analyze_structured_boundary
 
