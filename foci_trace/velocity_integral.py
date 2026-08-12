@@ -109,6 +109,29 @@ def slot_direction_index(slot_order: int, slot: int) -> int:
     return (slot & 1) ^ _slot_order_parity_twist(slot_order, slot >> 1)
 
 
+def observation_role(slot_order: int, slot: int) -> int:
+    """Return 0 for an outbound primitive and 1 for an inbound one.
+
+    Role is origin-relative and fixed by position in the stroke pair: even slots
+    go out from the anchor, odd slots come back, under every schedule. The slot
+    order does not move it. What the order changes is which travel *direction*
+    is paired with each role, which is what [`_slot_order_parity_twist`]
+    encodes and what [`slot_direction_index`] applies.
+
+    That distinction is the whole basis of the paired experiment. Under the two
+    sequential orders role and direction are perfectly correlated, so a rate
+    difference between outbound and inbound strokes cannot be told apart from a
+    difference between forward and reverse travel. Paired order populates all
+    four (direction, role) cells and separates them.
+
+    `slot_order` is taken for symmetry with the other three helpers and to
+    validate the schedule, so a capture declaring an unknown order fails here
+    rather than being silently analysed against an assumed one.
+    """
+    _slot_order_parity_twist(slot_order, slot >> 1)
+    return slot & 1
+
+
 def slot_for_observation(slot_order: int, observation: int, direction: int) -> int:
     """Return the slot carrying one same-direction observation ordinal.
 
@@ -655,6 +678,7 @@ def reconstruct_observation(
         "slot": slot,
         "i_raw": int(identity["i_raw"]),
         "direction": direction,
+        "role": observation_role(plan_slot_order(plan), slot),
         "initial_lead_in": int(rung_index == 0 and slot == 0),
         "predicted_torque_target_abs": predicted,
     }

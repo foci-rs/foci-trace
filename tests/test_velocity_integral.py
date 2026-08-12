@@ -30,6 +30,7 @@ from foci_trace.velocity_integral import (
     integral_deficit_reaches_target,
     integral_numerator_for_build,
     integral_plan_digest,
+    observation_role,
     reconstruct_observation,
     recovery_quantization_exposed,
     select_transition_capable_test_point,
@@ -1537,6 +1538,80 @@ def test_schema_nine_reports_firmware_response_horizon_mismatch() -> None:
 
     assert audit["matches_firmware"] is False
     assert any("response horizon tau_us" in mismatch for mismatch in audit["mismatches"])
+
+
+def test_observation_role_is_the_fixed_out_and_back_alternation():
+    """Role is origin-relative and does not move with slot order.
+
+    A primitive's outbound or inbound role is fixed by its position in the
+    stroke pair: even slots go out, odd slots come back, under every schedule.
+    What the slot order changes is which travel *direction* is paired with each
+    role, which is what `_slot_order_parity_twist` encodes.
+    """
+    for slot_order in (
+        SLOT_ORDER_FORWARD_FIRST,
+        SLOT_ORDER_REVERSE_FIRST,
+        SLOT_ORDER_PAIRED_OUT_AND_BACK,
+    ):
+        for slot in range(8):
+            assert observation_role(slot_order, slot) == slot % 2
+
+    # Accepts slot order for symmetry with slot_direction_index, and validates
+    # it, so a capture with an unknown schedule fails loudly here too.
+    with pytest.raises(ValueError):
+        observation_role(99, 0)
+
+
+def test_slot_order_relates_role_and_direction_as_declared():
+    """The relationships the paired experiment depends on.
+
+    Under the two sequential orders role and direction are perfectly
+    correlated, so a rate difference between roles cannot be told apart from a
+    difference between directions. Paired breaks that, which is the entire
+    reason for running it.
+    """
+    forward = [
+        (
+            observation_role(SLOT_ORDER_FORWARD_FIRST, slot),
+            _DECLARED_DIRECTIONS[SLOT_ORDER_FORWARD_FIRST][slot],
+        )
+        for slot in range(8)
+    ]
+    assert all(role == direction for role, direction in forward)
+
+    reverse = [
+        (
+            observation_role(SLOT_ORDER_REVERSE_FIRST, slot),
+            _DECLARED_DIRECTIONS[SLOT_ORDER_REVERSE_FIRST][slot],
+        )
+        for slot in range(8)
+    ]
+    assert all(role != direction for role, direction in reverse)
+
+    # The exact paired schedule, not merely "decorrelated" -- a wrong pattern
+    # can decorrelate too, and would silently produce a plausible analysis.
+    assert _DECLARED_DIRECTIONS[SLOT_ORDER_PAIRED_OUT_AND_BACK] == (0, 1, 1, 0, 0, 1, 1, 0)
+    paired = [
+        (observation_role(SLOT_ORDER_PAIRED_OUT_AND_BACK, slot), direction)
+        for slot, direction in enumerate(_DECLARED_DIRECTIONS[SLOT_ORDER_PAIRED_OUT_AND_BACK])
+    ]
+    assert paired == [(0, 0), (1, 1), (0, 1), (1, 0), (0, 0), (1, 1), (0, 1), (1, 0)]
+    # Every (direction, role) cell is populated, which is what makes the two
+    # effects separable.
+    assert set(paired) == {(0, 0), (0, 1), (1, 0), (1, 1)}
+
+
+def test_audit_emits_the_role_alongside_direction():
+    raw, records = _synthetic_complete_capture(
+        schema_revision=11, slot_order=SLOT_ORDER_PAIRED_OUT_AND_BACK
+    )
+
+    response = audit_velocity_integral(raw, records)
+
+    for item in response["observations"]:
+        assert item["role"] == int(item["slot"]) % 2
+    cells = {(int(item["direction"]), int(item["role"])) for item in response["observations"]}
+    assert cells == {(0, 0), (0, 1), (1, 0), (1, 1)}
 
 
 def test_audit_emits_per_observation_records_with_slot_and_direction():
