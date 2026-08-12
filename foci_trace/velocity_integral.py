@@ -2144,6 +2144,15 @@ def audit_velocity_integral(
         "recovery_rest_diagnostics": [dict(record) for record in recovery_rest_records],
         "recovery_rest_distribution": summarize_recovery_rest_diagnostics(recovery_rest_records),
         "current_evidence": [dict(record) for record in current_records],
+        # The independently reconstructed observations, not firmware's reported
+        # ones: every field above was compared against these, so emitting the
+        # replay's own values keeps the output an audit rather than an echo.
+        #
+        # Aggregates cannot replace these. `run_evidence.positive` is indexed
+        # [direction][rung] and pools the slots, while a stroke's outbound or
+        # inbound role is carried by its slot position within the rung. Anything
+        # asking how role and direction differ needs the per-slot rate.
+        "observations": [dict(reconstructed[key]) for key in sorted(reconstructed)],
         "rest_boundary": dict(rest_boundary[1]) if rest_boundary is not None else None,
         "limit_evidence_capabilities": sorted(
             {int(record["capability"]) for record in current_records}

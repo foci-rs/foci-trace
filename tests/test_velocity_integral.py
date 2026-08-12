@@ -1539,6 +1539,53 @@ def test_schema_nine_reports_firmware_response_horizon_mismatch() -> None:
     assert any("response horizon tau_us" in mismatch for mismatch in audit["mismatches"])
 
 
+def test_audit_emits_per_observation_records_with_slot_and_direction():
+    """Per-observation evidence has to survive into the audit output.
+
+    The replay already verifies every observation field against an independent
+    reconstruction, then kept only the per-direction-per-rung aggregates. Role
+    lives in slot position within a rung, so pooling the slots away makes the
+    role-versus-direction question unanswerable from the output even though the
+    evidence was in hand.
+    """
+    raw, records = _synthetic_complete_capture(schema_revision=11)
+
+    response = audit_velocity_integral(raw, records)
+
+    observations = response["observations"]
+    assert observations, "the audit must emit the observations it verified"
+    # Identity, geometry and the measured rate: what the role/direction
+    # separation needs, and what the aggregates cannot supply.
+    for field in ("rung_index", "slot", "direction", "rate_low", "rate_mean", "rate_high"):
+        assert field in observations[0], f"observation record is missing {field}"
+    # One per (rung, slot), no duplicates, in a deterministic order.
+    keys = [(int(item["rung_index"]), int(item["slot"])) for item in observations]
+    assert len(keys) == len(set(keys))
+    assert keys == sorted(keys)
+
+
+def test_audit_observation_directions_follow_a_paired_slot_order():
+    """Under paired order the emitted direction must track the schedule.
+
+    This is the property the whole paired experiment rests on: if direction
+    still came from slot parity the emitted records would be wrong in exactly
+    the case they are being collected for.
+    """
+    raw, records = _synthetic_complete_capture(
+        schema_revision=11, slot_order=SLOT_ORDER_PAIRED_OUT_AND_BACK
+    )
+
+    response = audit_velocity_integral(raw, records)
+
+    declared = _DECLARED_DIRECTIONS[SLOT_ORDER_PAIRED_OUT_AND_BACK]
+    for item in response["observations"]:
+        slot = int(item["slot"])
+        assert int(item["direction"]) == declared[slot], f"slot {slot} direction"
+    # Paired order decorrelates direction from slot parity; forward-first does
+    # not. Without that the experiment cannot separate role from direction.
+    assert any(int(item["direction"]) != int(item["slot"]) & 1 for item in response["observations"])
+
+
 def _synthetic_boundary_capture(
     schema_revision: int = 5,
     slot_order: int = SLOT_ORDER_FORWARD_FIRST,
