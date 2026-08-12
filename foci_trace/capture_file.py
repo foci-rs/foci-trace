@@ -130,7 +130,11 @@ class CaptureReader:
                 raise ValueError("bad record magic")
             payload = self._source.read(payload_len)
             if len(payload) != payload_len:
-                raise ValueError("truncated record payload")
+                # A SIGTERM-terminated recorder can cut the final record
+                # mid-write. A short payload read means the stream ended, so
+                # stop cleanly and keep every complete record before it rather
+                # than discarding the whole capture.
+                return
             if version != RECORD_VERSION or flags != 0:
                 continue
             if header_len != RECORD_HEADER_LEN:
