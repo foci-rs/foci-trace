@@ -5545,6 +5545,111 @@ def _bw_observation_interval_percent(
 _BW_CONSENSUS_TRIPLES = (0b0111, 0b1011, 0b1101, 0b1110)
 
 
+def _bw_classify_is_inert(observation: dict[str, object]) -> bool:
+    """Whether one completed observation lands on firmware's `Inert` arm.
+
+    Distinct from "not eligible". `classify_velocity_observation`
+    (sweep_evidence.rs:686) checks invalid evidence, hard clip, wrong direction
+    and stationarity exclusion *before* `Inert`, and current headroom and
+    unresolved deficit *after* it. Only the stroke that passed every earlier
+    gate and still did not move is inert: commanded, and the axis stayed put.
+
+    That is the class the 82-84% baseline counted, so reproducing it here
+    is what makes the new number comparable to the old one. Folding in the other
+    exclusions would inflate it, and they have different remedies -- a hard clip
+    or a headroom stop is a ceiling problem, not a dead zone.
+    """
+    settled_low = int(observation["settled_rate_low_q"])
+    settled_high = int(observation["settled_rate_high_q"])
+    deficit_low = int(observation["deficit_low_q"])
+    deficit_high = int(observation["deficit_high_q"])
+    usable = int(observation["usable_torque_limit"])
+    hard = int(observation["hard_torque_limit"])
+    predicted = int(observation["predicted_torque_target_abs"])
+    forward = int(observation["direction"]) == 0
+
+    if not (settled_low <= settled_high and deficit_low <= deficit_high and usable <= hard):
+        return False  # InvalidEvidenceFault
+    if predicted >= hard:
+        return False  # HardClipFault
+    if (settled_high < 0) if forward else (settled_low > 0):
+        return False  # WrongDirectionFault
+    if int(observation["stationarity_code"]) != 0:
+        return False  # StationarityExcluded
+    moving = settled_low > 0 if forward else settled_high < 0
+    return not moving
+
+
+def _bw_discovery_inert_fraction(
+    observations: list[dict[str, object]],
+    ladder_gains: list[int],
+    breakaway_p_raw: int | None,
+) -> dict[str, object]:
+    """The discovery-ladder inert fraction, as two ratios.
+
+    The denominator is completed discovery observations only. Callers pass the
+    marker-160 records of the Discovery phase, so the upward breakaway probe,
+    the held-out confirmation, Stage C, and every recovery or hidden observation
+    are excluded by construction rather than by filtering here.
+
+    `gross` includes the intentional predecessor floor rung. It is the honest
+    cost of the ladder as planned, and the number the "falls substantially"
+    criterion is judged on.
+
+    `unexpected_above_breakaway` covers rungs at or above the resolved
+    breakaway. Inert strokes there are the ones the seed was supposed to
+    eliminate, so a nonzero ratio means the seed or the additive spacing is not
+    doing its job, whatever the gross figure looks like.
+    """
+    # Observations name their ladder index; the gain itself lives in the
+    # independently regenerated ladder, which is what makes the breakaway
+    # comparison below meaningful rather than a restatement of firmware's own
+    # rung numbering.
+    by_rung: dict[int, list[dict[str, object]]] = {}
+    for observation in observations:
+        rung_index = int(observation["rung_index"])
+        if rung_index >= len(ladder_gains):
+            continue
+        by_rung.setdefault(ladder_gains[rung_index], []).append(observation)
+
+    def ratio(rungs: list[int]) -> dict[str, object]:
+        completed = sum(len(by_rung[p_raw]) for p_raw in rungs)
+        inert = sum(
+            _bw_classify_is_inert(observation) for p_raw in rungs for observation in by_rung[p_raw]
+        )
+        return {
+            "inert": inert,
+            "completed": completed,
+            "fraction": (inert / completed) if completed else None,
+        }
+
+    every_rung = sorted(by_rung)
+    above = (
+        [p_raw for p_raw in every_rung if p_raw >= breakaway_p_raw]
+        if breakaway_p_raw is not None
+        else []
+    )
+    return {
+        "breakaway_p_raw": breakaway_p_raw,
+        "gross": ratio(every_rung),
+        "unexpected_above_breakaway": ratio(above),
+        "inert_rungs_above_breakaway": [
+            p_raw
+            for p_raw in above
+            if any(_bw_classify_is_inert(observation) for observation in by_rung[p_raw])
+        ],
+        "per_rung": [
+            {
+                "p_raw": p_raw,
+                "completed": len(by_rung[p_raw]),
+                "inert": sum(_bw_classify_is_inert(observation) for observation in by_rung[p_raw]),
+                "above_breakaway": breakaway_p_raw is not None and p_raw >= breakaway_p_raw,
+            }
+            for p_raw in every_rung
+        ],
+    }
+
+
 def _bw_classify_is_eligible(observation: dict[str, object]) -> bool:
     """Port of `classify_velocity_observation` (sweep_evidence.rs:663), reduced
     to the one verdict the consensus needs: a stroke is `Eligible` iff it passes
@@ -6620,6 +6725,7 @@ def audit_breakaway_campaign(
     discovery_planned: dict[str, object] | None = None
     ladder_gains: list[int] = []
     post_breakaway_transient: list[dict[str, int]] = []
+    discovery_inert_fraction: dict[str, object] | None = None
     if discovery_planned_tick is not None:
         discovery_planned = _bw_single_record(discovery_planned_tick, "breakaway_discovery_planned")
         if int(discovery_planned["prior_plan_digest"]) != int(probe_planned["plan_digest"]):
@@ -6748,6 +6854,9 @@ def audit_breakaway_campaign(
         )
         post_breakaway_transient = _bw_post_breakaway_transients(
             raw_discovery_observations, ladder_gains
+        )
+        discovery_inert_fraction = _bw_discovery_inert_fraction(
+            raw_discovery_observations, ladder_gains, resolved_breakaway_raw
         )
         for observation in raw_discovery_observations:
             if int(observation["plan_digest"]) != int(discovery_planned["plan_digest"]):
@@ -7191,6 +7300,7 @@ def audit_breakaway_campaign(
         "probe_replay": probe_replay,
         "discovery_planned": discovery_planned,
         "discovery_terminal": discovery_terminal,
+        "discovery_inert_fraction": discovery_inert_fraction,
         "post_breakaway_transient": post_breakaway_transient,
         "confirmation_planned": confirmation_planned,
         "confirmation_accepted": confirmation_accepted,

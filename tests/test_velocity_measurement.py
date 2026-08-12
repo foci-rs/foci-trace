@@ -11,7 +11,9 @@ from foci_trace.velocity_measurement import (
     AccuracyDecision,
     VelocityObservation,
     _bw_classify_is_eligible,
+    _bw_classify_is_inert,
     _bw_directional_included_mask,
+    _bw_discovery_inert_fraction,
     _bw_observation_interval_percent,
     _bw_observation_statistic,
     _bw_percent_to_milli,
@@ -3465,6 +3467,62 @@ def test_bw_classify_is_eligible_reproduces_the_firmware_cascade():
     assert _bw_classify_is_eligible(_bw_classifier_obs(0, 0, deficit_low_q=0)) is False
     # A reverse stroke with a mirrored eligible interval.
     assert _bw_classify_is_eligible(_bw_classifier_obs(1, 1)) is True
+
+
+def test_bw_classify_is_inert_separates_no_motion_from_every_other_exclusion():
+    """The inert fraction counts one class, not "everything ineligible".
+
+    The 82-84% baseline meant "commanded and did not measurably move". A
+    hard-clipped or stationarity-excluded stroke also yields no usable response,
+    but those are different failures with different remedies, and folding them
+    in would inflate the number the done-criterion is judged on.
+    """
+    # Moving and eligible: not inert.
+    assert _bw_classify_is_inert(_bw_classifier_obs(0, 0)) is False
+    # Settled interval no longer strictly positive: this is the inert class.
+    assert _bw_classify_is_inert(_bw_classifier_obs(0, 0, settled_rate_low_q=0)) is True
+    # Mirrored for a reverse stroke.
+    assert _bw_classify_is_inert(_bw_classifier_obs(1, 1)) is False
+    assert _bw_classify_is_inert(_bw_classifier_obs(1, 1, settled_rate_high_q=0)) is True
+
+    # Earlier arms of the cascade win over Inert, so a stroke that did not move
+    # but failed an earlier gate is not counted.
+    assert (
+        _bw_classify_is_inert(_bw_classifier_obs(0, 0, settled_rate_low_q=0, stationarity_code=3))
+        is False
+    )
+    assert (
+        _bw_classify_is_inert(
+            _bw_classifier_obs(
+                0, 0, settled_rate_low_q=0, predicted_torque_target_abs=1000, hard_torque_limit=1000
+            )
+        )
+        is False
+    )
+    # Later arms do not: a stroke that moved but sat at the usable boundary is
+    # CurrentHeadroom, which is a ceiling problem, not a dead-zone one.
+    assert _bw_classify_is_inert(_bw_classifier_obs(0, 0, predicted_torque_target_abs=500)) is False
+
+
+def test_bw_discovery_inert_fraction_reports_gross_and_above_breakaway():
+    """Two ratios: gross is the ladder's honest cost, above-breakaway is the
+    check that the seed actually solved the dead zone."""
+    ladder = [128, 181, 243]
+    observations = (
+        # Floor rung, below breakaway: inert by design, counted only in gross.
+        [_bw_classifier_obs(slot, 0, rung_index=0, settled_rate_low_q=0) for slot in range(4)]
+        # First rung at breakaway: moving.
+        + [_bw_classifier_obs(slot, 0, rung_index=1) for slot in range(4)]
+        # A rung above breakaway with one inert stroke: this is the signal.
+        + [_bw_classifier_obs(0, 0, rung_index=2, settled_rate_low_q=0)]
+        + [_bw_classifier_obs(slot, 0, rung_index=2) for slot in range(1, 4)]
+    )
+
+    report = _bw_discovery_inert_fraction(observations, ladder, breakaway_p_raw=181)
+
+    assert report["gross"] == {"inert": 5, "completed": 12, "fraction": 5 / 12}
+    assert report["unexpected_above_breakaway"] == {"inert": 1, "completed": 8, "fraction": 1 / 8}
+    assert report["inert_rungs_above_breakaway"] == [243]
 
 
 def test_bw_directional_included_mask_reproduces_depth_three_exclusion():
