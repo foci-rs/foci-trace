@@ -536,6 +536,11 @@ def test_post_fit_exclusion_reports_the_statistic_that_failed() -> None:
     # when several suffixes are tested.
     assert detail["suffix_len"] == 64
     assert detail["slope_passed"] is False or detail["lag_one_passed"] is False
+    # The rate the refusal cost. Both were computed before the classification
+    # rejected the fit, so asking what admitting it would have meant is a
+    # question about this observation rather than a fabricated value.
+    assert detail["would_be_rate_mean_q"] != 0
+    assert detail["would_be_rate_half_width_q"] > 0
 
     # Firmware zeroes these on its own excluded records, so they must stay out
     # of the compared surface or the replay disagrees with the device it exists

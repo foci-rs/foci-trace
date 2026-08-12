@@ -1304,6 +1304,13 @@ def _stationary_suffix(
                     "selected_level": level,
                     "selected_blocks": levels[level].moments.count,
                     "variance_of_mean_q2": variance,
+                    # The rate this observation would have carried had the gate
+                    # admitted it. Both were computed before the classification
+                    # refused, so reporting them asks what the refusal cost
+                    # rather than inventing a value: it is what makes "would
+                    # admitting this have changed the rung decision" answerable.
+                    "would_be_rate_mean_q": mean_rate_q,
+                    "would_be_rate_half_width_q": half_width_rate_q,
                     "slope_q": fit["slope_q"],
                     "slope_half_width_q": fit["slope_half_width_q"],
                     "slope_passed": fit["slope_passed"],
