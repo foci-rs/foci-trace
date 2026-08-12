@@ -59,6 +59,78 @@ STAGE_C_SUFFIX_WALK_MIN_SCHEMA_REVISION = 15
 STAGE_B_REST_WALK_MIN_SCHEMA_REVISION = 17
 STAGE_C_REST_WALK_MIN_SCHEMA_REVISION = 16
 
+# Firmware build_features bitset, mirrored from foci-firmware's BuildFeatures.
+# Each bit names one analysis rule the recording firmware compiled in, stated
+# explicitly on the wire so a capture carries its own rule contract instead of
+# being dated by schema revision. Captures recorded before the field existed
+# reconstruct these bits from their build_revision (bit 0) and the per-namespace
+# schema thresholds above (bits 1-3); see `reconstruct_build_features`.
+BUILD_FEATURE_Q4_12_GAINS = 1 << 0
+BUILD_FEATURE_DRIFT_BOUND_GATE = 1 << 1
+BUILD_FEATURE_SUFFIX_WALK_CONTINUES = 1 << 2
+BUILD_FEATURE_REST_CHAIN_ON_EVIDENCE = 1 << 3
+
+# The two firmware crate-version hashes every archived capture carries in its
+# `build_revision` field, retained here to reconstruct `build_features` for
+# captures recorded before firmware emitted it. build_revision was later retired
+# from new captures in favour of build_identity + build_features.
+_LEGACY_Q8_8_BUILD_REVISION = 0x75536758
+_CURRENT_Q4_12_BUILD_REVISION = 0x05E21F75
+
+
+class UnsupportedIntegralRepresentationError(ValueError):
+    """Raised when a firmware build has no declared integral-gain domain."""
+
+
+_STAGE_RULE_THRESHOLDS: dict[str, tuple[int, int, int]] = {
+    "b": (
+        STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+        STAGE_B_SUFFIX_WALK_MIN_SCHEMA_REVISION,
+        STAGE_B_REST_WALK_MIN_SCHEMA_REVISION,
+    ),
+    "c": (
+        STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+        STAGE_C_SUFFIX_WALK_MIN_SCHEMA_REVISION,
+        STAGE_C_REST_WALK_MIN_SCHEMA_REVISION,
+    ),
+}
+
+
+def reconstruct_build_features(
+    build_revision: int | None, schema_revision: int, *, stage: str
+) -> int:
+    """Rebuild the rule contract a pre-`build_features` capture ran under.
+
+    Bit 0 (integral representation) comes from the crate-version
+    `build_revision`; the three rule bits reconstruct from the per-namespace
+    schema thresholds, so an archived capture is analysed under exactly the gate
+    that recorded it. `stage` selects the schema namespace: "b" for Stage B, "c"
+    for Stage C.
+    """
+    try:
+        drift, suffix, rest = _STAGE_RULE_THRESHOLDS[stage]
+    except KeyError:
+        raise ValueError(f"unknown schema namespace {stage!r}") from None
+    if build_revision == _CURRENT_Q4_12_BUILD_REVISION:
+        features = BUILD_FEATURE_Q4_12_GAINS
+    elif build_revision == _LEGACY_Q8_8_BUILD_REVISION:
+        features = 0
+    elif build_revision is None:
+        raise UnsupportedIntegralRepresentationError(
+            "missing firmware build revision for integral-gain interpretation"
+        )
+    else:
+        raise UnsupportedIntegralRepresentationError(
+            f"unsupported integral-gain representation for build 0x{build_revision:08x}"
+        )
+    if schema_revision >= drift:
+        features |= BUILD_FEATURE_DRIFT_BOUND_GATE
+    if schema_revision >= suffix:
+        features |= BUILD_FEATURE_SUFFIX_WALK_CONTINUES
+    if schema_revision >= rest:
+        features |= BUILD_FEATURE_REST_CHAIN_ON_EVIDENCE
+    return features
+
 
 def project_combined_response_selection(
     rungs: list[dict[str, object]],

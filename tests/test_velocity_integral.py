@@ -29,6 +29,7 @@ from foci_trace.velocity_integral import (
     derive_integral_ladder,
     integral_deficit_reaches_target,
     integral_numerator_for_build,
+    integral_numerator_for_build_features,
     integral_plan_digest,
     observation_role,
     reconstruct_observation,
@@ -41,9 +42,11 @@ from foci_trace.velocity_integral import (
     velocity_i_tau_us,
 )
 from foci_trace.velocity_measurement import (
+    BUILD_FEATURE_Q4_12_GAINS,
     VelocityObservation,
     audit_rung_origin_recovery,
     audit_scored_rest_grammar,
+    reconstruct_build_features,
 )
 
 LEGACY_Q8_8_BUILD = 0x75536758
@@ -2110,6 +2113,29 @@ def test_build_revision_selects_the_recorded_integral_representation() -> None:
     samples_per_stroke = 25_000 * 512_000 // 1_000_000
     assert Fraction(samples_per_stroke * 16, 65_536) == Fraction(25, 8)
     assert Fraction(samples_per_stroke * 16, 1_048_576) == Fraction(25, 128)
+
+
+def test_build_features_bit0_selects_integral_representation() -> None:
+    assert integral_numerator_for_build_features(0) == 65_536
+    assert integral_numerator_for_build_features(BUILD_FEATURE_Q4_12_GAINS) == 1_048_576
+
+
+def test_reconstruct_build_features_maps_legacy_captures_by_namespace() -> None:
+    # The legacy Q8.8 build predates every rule bit.
+    assert reconstruct_build_features(LEGACY_Q8_8_BUILD, 4, stage="c") == 0b0000
+    # Q4.12 combined Stage C (schema 13) had only the drift bound, not the
+    # suffix walk (>=15) or the rest walk (>=16).
+    assert reconstruct_build_features(CURRENT_Q4_12_BUILD, 13, stage="c") == 0b0011
+    # Q4.12 breakaway Stage C (schema 16) had all four rules.
+    assert reconstruct_build_features(CURRENT_Q4_12_BUILD, 16, stage="c") == 0b1111
+    # Stage B numbers its own thresholds (14 drift / 16 suffix / 17 rest).
+    assert reconstruct_build_features(CURRENT_Q4_12_BUILD, 14, stage="b") == 0b0011
+    assert reconstruct_build_features(CURRENT_Q4_12_BUILD, 17, stage="b") == 0b1111
+
+
+def test_reconstruct_build_features_refuses_an_unknown_build() -> None:
+    with pytest.raises(UnsupportedIntegralRepresentationError):
+        reconstruct_build_features(0xDEADBEEF, 13, stage="c")
 
 
 def test_current_build_reconstructs_the_migrated_raw_q4_12_ladder() -> None:

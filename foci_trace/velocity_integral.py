@@ -6,8 +6,12 @@ from itertools import combinations
 from typing import Any
 
 from .velocity_measurement import (
+    _CURRENT_Q4_12_BUILD_REVISION,
+    _LEGACY_Q8_8_BUILD_REVISION,
+    BUILD_FEATURE_Q4_12_GAINS,
     STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION,
     STAGE_C_SUFFIX_WALK_MIN_SCHEMA_REVISION,
+    UnsupportedIntegralRepresentationError,
     VelocityObservation,
     _confidence_half_width,
     _encode_rate_values,
@@ -22,8 +26,6 @@ from .velocity_measurement import (
 )
 
 _MICROS_PER_SECOND = 1_000_000
-_LEGACY_Q8_8_BUILD_REVISION = 0x75536758
-_CURRENT_Q4_12_BUILD_REVISION = 0x05E21F75
 _LEGACY_Q8_8_I_NUMERATOR = 65_536
 _CURRENT_Q4_12_I_NUMERATOR = 1_048_576
 _I_MAX_POSITIVE_RUNGS = 30
@@ -86,10 +88,6 @@ _STANDALONE_STAGE_C_SCHEMA_REVISION = 7
 _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION = 8
 _COMBINED_STAGE_C_SCHEMA_REVISION = 13
 _BREAKAWAY_STAGE_C_SCHEMA_REVISION = 16
-
-
-class UnsupportedIntegralRepresentationError(ValueError):
-    """Raised when a firmware build has no declared integral-gain domain."""
 
 
 def _slot_order_parity_twist(slot_order: int, observation: int) -> int:
@@ -197,6 +195,13 @@ def integral_numerator_for_build(build_revision: int | None) -> int:
     raise UnsupportedIntegralRepresentationError(
         f"unsupported integral-gain representation for build 0x{build_revision:08x}"
     )
+
+
+def integral_numerator_for_build_features(build_features: int) -> int:
+    """Return the integral normalization named by a build_features bitset."""
+    if build_features & BUILD_FEATURE_Q4_12_GAINS:
+        return _CURRENT_Q4_12_I_NUMERATOR
+    return _LEGACY_Q8_8_I_NUMERATOR
 
 
 def _fnv1a64(data: bytes, initial: int = _FNV1A64_OFFSET) -> int:
