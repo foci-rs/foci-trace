@@ -419,9 +419,23 @@ def audit_rung_origin_recovery(
         try:
             runtime_us = recovery_runtime_us(return_distance, lower_rate_q, maximum_slot_us)
         except ValueError:
+            # The declared geometry does not fit the primitive cap, so the
+            # attempt is contained before any motion.
             expected = ((3, 3),)
         else:
-            expected = ((1, 1), (1, 5))
+            # Plan-time inputs cannot decide which of these firmware reports.
+            # The return may reach the origin band (Recovered), complete its
+            # move and settle outside it or exhaust the moving deadline
+            # (ContainedDeadline/Deadline), or be refused before motion for a
+            # start beyond the outer-safety position window
+            # (ContainedDeadline/LocalTravel). Only the run knows.
+            #
+            # Naming just the Recovered pair asserted more than the inputs
+            # support and reported every contained run as a mismatch. What the
+            # record can still be held to is internal consistency, checked
+            # below: whether its timings match the motion its outcome implies,
+            # and whether its final offset matches the band semantics.
+            expected = ((1, 1), (1, 5), (3, 3), (3, 4))
     if historical_schema_five_contact:
         expected = ((4, 6),)
     elif schema_six_contact:
@@ -433,9 +447,15 @@ def audit_rung_origin_recovery(
         )
     if outcome in (0, 1, 5) and abs(final) > origin_band:
         mismatches.append("successful recovery final offset is outside origin band")
-    if outcome in (0, 2, 3) and (moving_us != 0 or settle_us != 0 or total_us != 0):
+    moved = moving_us != 0 or settle_us != 0 or total_us != 0
+    # Outcomes 0 and 2 are decided before the gain write, and outcome 3 bound by
+    # LocalTravel is refused at the same point. Outcome 3 bound by Deadline has
+    # two producers: one before motion when the geometry exceeds the primitive
+    # cap, and one after a completed move, so it is the only outcome whose
+    # timings are not fixed by the outcome alone.
+    if (outcome in (0, 2) or (outcome == 3 and binding == 4)) and moved:
         mismatches.append("nonmoving recovery reports nonzero timing")
-    if outcome in (4, 5) and schema_six_contact or outcome == 1:
+    if outcome in (4, 5) and schema_six_contact or outcome == 1 or (outcome == 3 and moved):
         if total_us != moving_us + settle_us:
             mismatches.append("recovery total duration differs from moving plus settle duration")
         if runtime_us is not None and total_us > runtime_us:

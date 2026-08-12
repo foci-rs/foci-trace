@@ -235,6 +235,45 @@ def test_p512_schema_five_projection() -> None:
             },
             None,
         ),
+        # A recovery that completed its move and ended outside the band is
+        # contained at runtime, not at plan time. Firmware reports
+        # ContainedDeadline/Deadline here with real timings, and the plan-time
+        # inputs cannot distinguish this from the Recovered case.
+        (
+            {
+                "closest_offset_counts": 900,
+                "final_offset_counts": 1_001,
+                "binding_source": 3,
+                "outcome": 3,
+            },
+            None,
+        ),
+        # Containment refused before motion because the start offset sat outside
+        # the outer-safety position window. Reported as
+        # ContainedDeadline/LocalTravel with no timings.
+        (
+            {
+                "closest_offset_counts": 8_458,
+                "final_offset_counts": 8_458,
+                "moving_duration_us": 0,
+                "settle_duration_us": 0,
+                "total_duration_us": 0,
+                "binding_source": 4,
+                "outcome": 3,
+            },
+            None,
+        ),
+        # A contained recovery that moved still has to be internally consistent.
+        (
+            {
+                "closest_offset_counts": 900,
+                "final_offset_counts": 1_001,
+                "total_duration_us": 1_936_001,
+                "binding_source": 3,
+                "outcome": 3,
+            },
+            "total duration differs from moving plus settle",
+        ),
         ({"final_offset_counts": 1_001, "outcome": 1}, "outside origin band"),
         ({"closest_offset_counts": 8_460}, "wrong-way growth"),
         ({"planned_velocity_mrev_s": 4_393}, "planned velocity"),
