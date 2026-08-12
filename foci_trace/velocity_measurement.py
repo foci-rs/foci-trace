@@ -45,6 +45,13 @@ NO_REPORTABLE_DRIFT_RATIO_PPM = 0xFFFFFFFF
 STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION = 14  # tracks firmware's COMBINED_STAGE_B_SCHEMA_REVISION
 STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION = 13  # tracks firmware's COMBINED_STAGE_C_SCHEMA_REVISION
 
+# First revision whose walk continues past a rejected window instead of ending
+# there: firmware's BREAKAWAY_STAGE_B/C_SCHEMA_REVISION. Every earlier revision,
+# including the breakaway 15/14 and combined 14/13 that precede them, replays
+# under the historical walk.
+STAGE_B_SUFFIX_WALK_MIN_SCHEMA_REVISION = 16
+STAGE_C_SUFFIX_WALK_MIN_SCHEMA_REVISION = 15
+
 
 def project_combined_response_selection(
     rungs: list[dict[str, object]],
@@ -1217,6 +1224,7 @@ def _stationary_suffix(
     *,
     schema_revision: int | None = None,
     drift_bound_min_schema_revision: int | None = None,
+    suffix_walk_min_schema_revision: int | None = None,
 ) -> dict[str, int]:
     """Reconstruct the longest usable moving-stroke stationary suffix.
 
@@ -1224,8 +1232,19 @@ def _stationary_suffix(
     moving gate `_classify_stationarity` applies (see there); `None` for
     `schema_revision` means unknown and defaults to the legacy
     significance-based gate.
+
+    `suffix_walk_min_schema_revision` selects whether a rejected window ends the
+    walk (historical) or the walk continues to the longer windows; `None` or an
+    older capture keeps the historical walk.
     """
+    walk_past_rejection = (
+        schema_revision is not None
+        and suffix_walk_min_schema_revision is not None
+        and schema_revision >= suffix_walk_min_schema_revision
+    )
     selected: dict[str, int] | None = None
+    # Reported when the walk runs out of windows without selecting one.
+    last_rejection: dict[str, int] | None = None
     tested = 0
     for suffix_len in (64, 128, 256):
         if suffix_len > len(observations):
@@ -1240,7 +1259,7 @@ def _stationary_suffix(
             if selected is not None:
                 selected["tested_suffixes"] = tested
                 return selected
-            return {
+            last_rejection = {
                 "usable": 0,
                 "exclusion": 1 if _has_two_doubling_plateau(levels) else 0,
                 "tested_suffixes": tested,
@@ -1249,6 +1268,9 @@ def _stationary_suffix(
                 # same sentinel when select_plateau() finds nothing.
                 "drift_ratio_ppm": NO_REPORTABLE_DRIFT_RATIO_PPM,
             }
+            if not walk_past_rejection:
+                return last_rejection
+            continue
         variance = _q(levels[level].moments)
         assert variance is not None
         exact_delta = levels[level].exact_delta_counts
@@ -1260,7 +1282,7 @@ def _stationary_suffix(
             if selected is not None:
                 selected["tested_suffixes"] = tested
                 return selected
-            return {
+            last_rejection = {
                 "usable": 0,
                 "exclusion": fit,
                 "tested_suffixes": tested,
@@ -1268,6 +1290,9 @@ def _stationary_suffix(
                 # slope_q and span_x2_us never existed to form a ratio from.
                 "drift_ratio_ppm": NO_REPORTABLE_DRIFT_RATIO_PPM,
             }
+            if not walk_past_rejection:
+                return last_rejection
+            continue
         exclusion = _classify_stationarity(
             fit,
             "moving",
@@ -1280,7 +1305,7 @@ def _stationary_suffix(
             if selected is not None:
                 selected["tested_suffixes"] = tested
                 return selected
-            return {
+            last_rejection = {
                 "usable": 0,
                 "exclusion": exclusion,
                 "tested_suffixes": tested,
@@ -1320,6 +1345,9 @@ def _stationary_suffix(
                     "residual_magnitude_q2": fit["residual_magnitude_q2"],
                 },
             }
+            if not walk_past_rejection:
+                return last_rejection
+            continue
         selected = {
             "usable": 1,
             "suffix_len": suffix_len,
@@ -1337,7 +1365,13 @@ def _stationary_suffix(
             "residual_magnitude_q2": fit["residual_magnitude_q2"],
             "drift_ratio_ppm": fit["drift_ratio_ppm"],
         }
-    return selected or {
+    if selected is not None:
+        selected["tested_suffixes"] = tested
+        return selected
+    if last_rejection is not None:
+        last_rejection["tested_suffixes"] = tested
+        return last_rejection
+    return {
         "usable": 0,
         "exclusion": 1,
         "tested_suffixes": tested,
@@ -1350,6 +1384,7 @@ def analyze_stationary_tail(
     *,
     schema_revision: int | None = None,
     drift_bound_min_schema_revision: int | None = None,
+    suffix_walk_min_schema_revision: int | None = None,
 ) -> dict[str, int]:
     """Reconstruct the firmware's nested-dyadic stationary tail from raw samples.
 
@@ -1369,6 +1404,7 @@ def analyze_stationary_tail(
         observations[-256:],
         schema_revision=schema_revision,
         drift_bound_min_schema_revision=drift_bound_min_schema_revision,
+        suffix_walk_min_schema_revision=suffix_walk_min_schema_revision,
     )
 
 
@@ -2021,6 +2057,7 @@ def _reconstruct_observation(
         raw[-256:],
         schema_revision=schema_revision,
         drift_bound_min_schema_revision=STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+        suffix_walk_min_schema_revision=STAGE_B_SUFFIX_WALK_MIN_SCHEMA_REVISION,
     )
     p = int(record["velocity_p"])
     target_velocity_rpm = int(record["target_velocity_rpm"])
@@ -5458,7 +5495,8 @@ _BW_STATIONARITY_EXCESSIVE_DRIFT = 6
 # `AdditiveDiscoveryPlanned.schema_revision` reports, so an offline decoder can
 # confirm it is regenerating the ladder under the exact rules the firmware
 # applied rather than a stale or newer revision.
-_BW_STAGE_B_SCHEMA_REVISION = 15
+_BW_STAGE_B_MIN_SCHEMA_REVISION = 15
+_BW_STAGE_B_SCHEMA_REVISION = 16
 
 # `NOMINATION_SCREEN_C_SIGMA` (band_confirmation.rs): the pointwise 95%
 # scale-inflation heuristic the nomination screen applies on top of the
@@ -6761,10 +6799,15 @@ def audit_breakaway_campaign(
         discovery_planned = _bw_single_record(discovery_planned_tick, "breakaway_discovery_planned")
         if int(discovery_planned["prior_plan_digest"]) != int(probe_planned["plan_digest"]):
             raise ValueError("breakaway discovery plan does not chain to the probe plan digest")
-        if int(discovery_planned["schema_revision"]) != _BW_STAGE_B_SCHEMA_REVISION:
+        if not (
+            _BW_STAGE_B_MIN_SCHEMA_REVISION
+            <= int(discovery_planned["schema_revision"])
+            <= _BW_STAGE_B_SCHEMA_REVISION
+        ):
             mismatches.append(
                 f"discovery schema_revision: firmware="
                 f"{int(discovery_planned['schema_revision'])} want="
+                f"{int(_BW_STAGE_B_MIN_SCHEMA_REVISION)}-"
                 f"{int(_BW_STAGE_B_SCHEMA_REVISION)} (offline replay regenerates the ladder "
                 f"under a different rules revision than the firmware applied)"
             )

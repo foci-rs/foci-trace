@@ -426,6 +426,31 @@ def test_stationary_tail_matches_firmware_single_precision_rounding() -> None:
     assert result["residual_magnitude_q2"] == 1_663_058_048
 
 
+def test_rejected_short_window_ends_the_walk_only_before_the_schema_bump() -> None:
+    # Last 64 samples oscillate, so the 64-sample window fails lag-one while the
+    # 256-sample window is stationary. Mirrors the firmware fixture.
+    observations = [
+        _observation(
+            (10 if (index // 4) % 2 == 0 else -10) if index >= 192 else [1, -1, 0, -1, 1][index % 5]
+        )
+        for index in range(256)
+    ]
+
+    from foci_trace.velocity_measurement import STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION
+
+    gate = {
+        "schema_revision": 15,
+        "drift_bound_min_schema_revision": STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+    }
+    historical = analyze_stationary_tail(observations, **gate)
+    corrected = analyze_stationary_tail(observations, **gate, suffix_walk_min_schema_revision=15)
+
+    assert historical["usable"] == 0
+    assert historical["tested_suffixes"] == 1
+    assert corrected["usable"] == 1
+    assert corrected["suffix_len"] == 256
+
+
 def test_excluded_observation_zeros_unavailable_suffix_metrics() -> None:
     from foci_trace.velocity_measurement import _reconstruct_observation
 

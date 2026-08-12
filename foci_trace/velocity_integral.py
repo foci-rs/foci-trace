@@ -7,6 +7,7 @@ from typing import Any
 
 from .velocity_measurement import (
     STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+    STAGE_C_SUFFIX_WALK_MIN_SCHEMA_REVISION,
     VelocityObservation,
     _confidence_half_width,
     _encode_rate_values,
@@ -63,10 +64,11 @@ _U128_MAX = (1 << 128) - 1
 #         `COMBINED_STAGE_C_SCHEMA_REVISION = 13`, `combined_plan.rs:20,22`).
 #         `plan_combined_velocity_integral_response` is the only builder in
 #         that range and it always supplies `Some(selected)`.
-#   14    the breakaway-seeded campaign
-#         (`BREAKAWAY_STAGE_C_SCHEMA_REVISION = 14`, `combined_plan.rs:40`),
+#   14-15 the breakaway-seeded campaign
+#         (`BREAKAWAY_STAGE_C_SCHEMA_REVISION = 15`, `combined_plan.rs:40`),
 #         planned by `plan_breakaway_velocity_integral_response` with
-#         `combined_selected_response: None`.
+#         `combined_selected_response: None`. 15 differs from 14 only in that
+#         the stationarity walk continues past a rejected suffix.
 #
 # The workflow is therefore a property of the schema revision alone. Deriving
 # it from the capture's own `combined_selected_response` instead lets a
@@ -76,7 +78,7 @@ _U128_MAX = (1 << 128) - 1
 _STANDALONE_STAGE_C_SCHEMA_REVISION = 7
 _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION = 8
 _COMBINED_STAGE_C_SCHEMA_REVISION = 13
-_BREAKAWAY_STAGE_C_SCHEMA_REVISION = 14
+_BREAKAWAY_STAGE_C_SCHEMA_REVISION = 15
 
 
 class UnsupportedIntegralRepresentationError(ValueError):
@@ -667,6 +669,7 @@ def reconstruct_observation(
         raw[-256:],
         schema_revision=int(plan_schema_revision) if plan_schema_revision is not None else None,
         drift_bound_min_schema_revision=STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+        suffix_walk_min_schema_revision=STAGE_C_SUFFIX_WALK_MIN_SCHEMA_REVISION,
     )
     predicted = (
         max(item.peak_torque_target_abs or 0 for item in raw)

@@ -2429,12 +2429,12 @@ def test_schema_four_sufficiency_requires_both_closing_bookends() -> None:
     assert _stage_c_run_sufficient(3, opening, [None, None], masks) is True
 
 
-@pytest.mark.parametrize("schema_revision", [0, 15])
+@pytest.mark.parametrize("schema_revision", [0, 16])
 def test_integral_ladder_rejects_unsupported_schema(schema_revision: int) -> None:
-    """Schema 14 -- the breakaway campaign -- is now a real firmware schema
+    """Schema 15 -- the breakaway campaign -- is a real firmware schema
     (`BREAKAWAY_STAGE_C_SCHEMA_REVISION`, combined_plan.rs:40) and builds its
-    ladder without the combined exact-cap append, so the rejected boundary
-    moves up by one. 15 does not exist in firmware.
+    ladder without the combined exact-cap append, so the rejected boundary sits
+    one above it. 16 does not exist as a Stage-C revision in firmware.
     """
     with pytest.raises(ValueError, match="unsupported Stage-C evidence schema"):
         derive_integral_ladder(
