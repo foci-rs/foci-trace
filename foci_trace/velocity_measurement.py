@@ -1288,6 +1288,30 @@ def _stationary_suffix(
                 # matching firmware's finish_on_exclusion call sites that pass
                 # metrics.drift_ratio_ppm rather than the sentinel.
                 "drift_ratio_ppm": fit["drift_ratio_ppm"],
+                # The fit succeeded and only the classification refused it, so
+                # every statistic behind the verdict exists. Firmware zeroes
+                # these on its own excluded records, so they cannot join the
+                # fields above without the replay disagreeing with the device it
+                # exists to verify. They are offline-derived diagnostics, kept
+                # under their own key and excluded from every field comparison.
+                #
+                # The two earlier returns carry no such key. Neither reached a
+                # regression, so there is nothing to derive, and a zero there
+                # would read as a measurement of no structure rather than an
+                # absence of evidence.
+                "offline_exclusion_detail": {
+                    "suffix_len": suffix_len,
+                    "selected_level": level,
+                    "selected_blocks": levels[level].moments.count,
+                    "variance_of_mean_q2": variance,
+                    "slope_q": fit["slope_q"],
+                    "slope_half_width_q": fit["slope_half_width_q"],
+                    "slope_passed": fit["slope_passed"],
+                    "lag_one_q": fit["lag_one_q"],
+                    "lag_one_half_width_q": fit["lag_one_half_width_q"],
+                    "lag_one_passed": fit["lag_one_passed"],
+                    "residual_magnitude_q2": fit["residual_magnitude_q2"],
+                },
             }
         selected = {
             "usable": 1,

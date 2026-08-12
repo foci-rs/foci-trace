@@ -1614,6 +1614,28 @@ def test_audit_emits_the_role_alongside_direction():
     assert cells == {(0, 0), (0, 1), (1, 0), (1, 1)}
 
 
+def test_excluded_observation_carries_the_statistic_behind_its_refusal():
+    """An excluded observation must say how it failed, not only that it did.
+
+    Emitted separately from the compared fields because firmware zeroes these on
+    its own excluded records; folding them in would make the replay disagree
+    with the device it exists to verify.
+    """
+    raw, _records = _synthetic_complete_capture(schema_revision=11)
+    plan = _plan(schema_revision=11)
+
+    excluded = reconstruct_observation(
+        # Too few samples for any declared suffix: refused before any fit, so
+        # there is nothing to derive and nothing must be invented.
+        raw[:8],
+        {"rung_index": 0, "slot": 0, "i_raw": 0},
+        plan,
+    )
+
+    assert excluded["stationarity_code"] != 0
+    assert "offline_exclusion_detail" not in excluded
+
+
 def test_audit_emits_per_observation_records_with_slot_and_direction():
     """Per-observation evidence has to survive into the audit output.
 

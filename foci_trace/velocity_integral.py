@@ -697,6 +697,15 @@ def reconstruct_observation(
             **common,
             "classification": classification,
             "stationarity_code": int(stationarity["exclusion"]) + 1,
+            # Offline-derived, and only where a fit was reached: firmware zeroes
+            # these on its own excluded records, so they are diagnostics rather
+            # than reported values. Without them an excluded observation says
+            # that it failed but never how.
+            **(
+                {"offline_exclusion_detail": stationarity["offline_exclusion_detail"]}
+                if "offline_exclusion_detail" in stationarity
+                else {}
+            ),
             "settled_rate_interval_q": [0, 0],
             "settled_rate_mean_q": 0,
             "deficit_interval_q": [0, 0],

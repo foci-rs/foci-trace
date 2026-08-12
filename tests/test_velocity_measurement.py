@@ -508,6 +508,60 @@ def test_host_drift_ratio_matches_firmware_exactly() -> None:
     assert _drift_ratio_ppm(-8_823_529, 2 * 60_000, 13_750_000) == 38_503
 
 
+def test_post_fit_exclusion_reports_the_statistic_that_failed() -> None:
+    """A refusal is the one case that most needs its evidence.
+
+    When `_classify_stationarity` rejects a fit, the fit itself succeeded and
+    every statistic behind the verdict is in hand. Reporting only the code
+    leaves an excluded observation saying that it failed but never how, which is
+    exactly backwards for diagnosis.
+    """
+    from foci_trace.velocity_measurement import _stationary_suffix
+
+    # A steady ramp: the fit succeeds and the classifier rejects it, which is
+    # the post-fit path (the plateau and fit paths below have no statistics).
+    result = _stationary_suffix([_observation(index) for index in range(64)])
+
+    assert result["usable"] == 0
+    detail = result["offline_exclusion_detail"]
+    for field in (
+        "lag_one_q",
+        "lag_one_half_width_q",
+        "slope_q",
+        "slope_half_width_q",
+        "residual_magnitude_q2",
+    ):
+        assert field in detail, f"post-fit exclusion is missing {field}"
+    # Which gate actually failed, and which window bound: half the question
+    # when several suffixes are tested.
+    assert detail["suffix_len"] == 64
+    assert detail["slope_passed"] is False or detail["lag_one_passed"] is False
+
+    # Firmware zeroes these on its own excluded records, so they must stay out
+    # of the compared surface or the replay disagrees with the device it exists
+    # to verify. Keeping them nested is what makes that structural.
+    for field in ("lag_one_q", "slope_q", "suffix_len"):
+        assert field not in result, f"{field} must not join the compared fields"
+
+
+def test_pre_fit_exclusions_report_no_statistics_they_never_computed() -> None:
+    """The other two refusal paths must stay bare.
+
+    No plateau means no regression was attempted, so there is no slope, no
+    lag-one and no residual. Emitting zeros there would read as a measurement of
+    zero structure rather than an absence of evidence, which is the same trap
+    that already produced one false reading off this data.
+    """
+    from foci_trace.velocity_measurement import NO_REPORTABLE_DRIFT_RATIO_PPM, _stationary_suffix
+
+    # Too few samples for any declared suffix: nothing is ever fitted.
+    result = _stationary_suffix([_observation(index) for index in range(8)])
+
+    assert result["usable"] == 0
+    assert result["drift_ratio_ppm"] == NO_REPORTABLE_DRIFT_RATIO_PPM
+    assert "offline_exclusion_detail" not in result
+
+
 def test_rest_mode_keeps_the_significance_gate() -> None:
     """At rest the zero-slope null is correct, and a drift bound relative to
     the mean would collapse with it: keep the significance test unchanged."""
