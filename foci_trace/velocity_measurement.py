@@ -132,6 +132,25 @@ def reconstruct_build_features(
     return features
 
 
+def capture_build_features(plan: dict[str, object], *, stage: str) -> int:
+    """Return the effective rule contract for one decoded capture.
+
+    A newer capture states `build_features` directly; a legacy capture
+    carries only `build_revision`, from which the contract is reconstructed via
+    the per-namespace schema thresholds. `stage` selects the namespace: "b" for
+    Stage B, "c" for Stage C.
+    """
+    explicit = plan.get("build_features")
+    if explicit is not None:
+        return int(explicit)  # type: ignore[arg-type]
+    build_revision = plan.get("build_revision")
+    return reconstruct_build_features(
+        int(build_revision) if isinstance(build_revision, int) else None,
+        int(plan["schema_revision"]),  # type: ignore[arg-type]
+        stage=stage,
+    )
+
+
 def project_combined_response_selection(
     rungs: list[dict[str, object]],
     *,

@@ -46,6 +46,7 @@ from foci_trace.velocity_measurement import (
     VelocityObservation,
     audit_rung_origin_recovery,
     audit_scored_rest_grammar,
+    capture_build_features,
     reconstruct_build_features,
 )
 
@@ -328,7 +329,7 @@ def test_schema_eight_plan_hashes_selected_response_and_appends_exact_cap() -> N
         64_000,
         32_767,
         schema_revision=8,
-        build_revision=CURRENT_Q4_12_BUILD,
+        build_features=BUILD_FEATURE_Q4_12_GAINS,
     ) == {
         "i_start": 1,
         "i_top_cap": 1_310,
@@ -367,7 +368,7 @@ def test_breakaway_schema_ladder_omits_the_combined_exact_cap() -> None:
         "moving_stroke_us": 512_000,
         "shortest_suffix_us": 64_000,
         "maximum_i": 32_767,
-        "build_revision": CURRENT_Q4_12_BUILD,
+        "build_features": BUILD_FEATURE_Q4_12_GAINS,
     }
     breakaway = derive_integral_ladder(
         geometry["pwm_hz"],
@@ -375,7 +376,7 @@ def test_breakaway_schema_ladder_omits_the_combined_exact_cap() -> None:
         geometry["shortest_suffix_us"],
         geometry["maximum_i"],
         schema_revision=14,
-        build_revision=geometry["build_revision"],
+        build_features=geometry["build_features"],
     )
     combined = derive_integral_ladder(
         geometry["pwm_hz"],
@@ -383,7 +384,7 @@ def test_breakaway_schema_ladder_omits_the_combined_exact_cap() -> None:
         geometry["shortest_suffix_us"],
         geometry["maximum_i"],
         schema_revision=13,
-        build_revision=geometry["build_revision"],
+        build_features=geometry["build_features"],
     )
 
     assert breakaway["i_top_cap"] == 1_310
@@ -2057,8 +2058,8 @@ def test_schema_five_pair_reports_boundary_references_without_gating() -> None:
 
 
 def test_schema_aware_geometry_preserves_old_and_new_whole_octave_ladders() -> None:
-    assert velocity_i_tau_us(5, 25_000, LEGACY_Q8_8_BUILD) == 524_288
-    assert velocity_i_tau_us(80, 25_000, LEGACY_Q8_8_BUILD) == 32_768
+    assert velocity_i_tau_us(5, 25_000, 0) == 524_288
+    assert velocity_i_tau_us(80, 25_000, 0) == 32_768
 
     schema_three = derive_integral_ladder(
         25_000,
@@ -2066,7 +2067,7 @@ def test_schema_aware_geometry_preserves_old_and_new_whole_octave_ladders() -> N
         64_000,
         32_767,
         schema_revision=3,
-        build_revision=LEGACY_Q8_8_BUILD,
+        build_features=0,
     )
     schema_four = derive_integral_ladder(
         25_000,
@@ -2074,7 +2075,7 @@ def test_schema_aware_geometry_preserves_old_and_new_whole_octave_ladders() -> N
         64_000,
         32_767,
         schema_revision=4,
-        build_revision=LEGACY_Q8_8_BUILD,
+        build_features=0,
     )
     schema_five = derive_integral_ladder(
         25_000,
@@ -2082,7 +2083,7 @@ def test_schema_aware_geometry_preserves_old_and_new_whole_octave_ladders() -> N
         64_000,
         32_767,
         schema_revision=5,
-        build_revision=CURRENT_Q4_12_BUILD,
+        build_features=BUILD_FEATURE_Q4_12_GAINS,
     )
 
     assert schema_three == {
@@ -2108,8 +2109,8 @@ def test_build_revision_selects_the_recorded_integral_representation() -> None:
     assert integral_numerator_for_build(LEGACY_Q8_8_BUILD) == 65_536
     assert integral_numerator_for_build(CURRENT_Q4_12_BUILD) == 1_048_576
 
-    assert velocity_i_tau_us(16, 25_000, LEGACY_Q8_8_BUILD) == 163_840
-    assert velocity_i_tau_us(16, 25_000, CURRENT_Q4_12_BUILD) == 2_621_440
+    assert velocity_i_tau_us(16, 25_000, 0) == 163_840
+    assert velocity_i_tau_us(16, 25_000, BUILD_FEATURE_Q4_12_GAINS) == 2_621_440
     samples_per_stroke = 25_000 * 512_000 // 1_000_000
     assert Fraction(samples_per_stroke * 16, 65_536) == Fraction(25, 8)
     assert Fraction(samples_per_stroke * 16, 1_048_576) == Fraction(25, 128)
@@ -2136,6 +2137,16 @@ def test_reconstruct_build_features_maps_legacy_captures_by_namespace() -> None:
 def test_reconstruct_build_features_refuses_an_unknown_build() -> None:
     with pytest.raises(UnsupportedIntegralRepresentationError):
         reconstruct_build_features(0xDEADBEEF, 13, stage="c")
+
+
+def test_capture_build_features_prefers_explicit_field_else_reconstructs() -> None:
+    # A newer capture states its rule contract directly.
+    explicit = {"build_features": 0b1111, "schema_revision": 16}
+    assert capture_build_features(explicit, stage="c") == 0b1111
+    # A legacy capture reconstructs from build_revision (bit 0) and the schema
+    # thresholds: schema-13 combined had Q4.12 gains and the drift bound only.
+    legacy = {"build_revision": CURRENT_Q4_12_BUILD, "schema_revision": 13}
+    assert capture_build_features(legacy, stage="c") == 0b0011
 
 
 def test_current_build_reconstructs_the_migrated_raw_q4_12_ladder() -> None:
@@ -2469,7 +2480,7 @@ def test_integral_ladder_rejects_unsupported_schema(schema_revision: int) -> Non
             64_000,
             32_767,
             schema_revision=schema_revision,
-            build_revision=LEGACY_Q8_8_BUILD,
+            build_features=0,
         )
 
 
@@ -2901,7 +2912,9 @@ def test_breakaway_rung_carrying_a_response_horizon_is_rejected() -> None:
     header_len = 18
     horizon = {
         "tau_us": velocity_i_tau_us(
-            int(decoded["i_raw"]), int(plan["pwm_hz"]), plan.get("build_revision")
+            int(decoded["i_raw"]),
+            int(plan["pwm_hz"]),
+            capture_build_features(plan, stage="c"),
         ),
         "moving_horizon_us": int(plan["moving_stroke_us"]),
         "horizon_class": 1,

@@ -21,6 +21,7 @@ from .velocity_measurement import (
     audit_recovery_rest_geometry,
     audit_rung_origin_recovery,
     audit_scored_rest_grammar,
+    capture_build_features,
     plan_rung_origin_recovery,
     summarize_recovery_rest_diagnostics,
 )
@@ -319,11 +320,11 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     return _fnv1a64(bytes(encoded))
 
 
-def velocity_i_tau_us(i_raw: int, pwm_hz: int, build_revision: int | None) -> int:
+def velocity_i_tau_us(i_raw: int, pwm_hz: int, build_features: int) -> int:
     """Return the advanced-PI time constant with firmware-equivalent ceiling."""
     if i_raw <= 0 or pwm_hz <= 0:
         raise ValueError("velocity I and PWM frequency must be positive")
-    numerator = integral_numerator_for_build(build_revision) * _MICROS_PER_SECOND
+    numerator = integral_numerator_for_build_features(build_features) * _MICROS_PER_SECOND
     denominator = i_raw * pwm_hz
     return (numerator + denominator - 1) // denominator
 
@@ -332,13 +333,13 @@ def _largest_i_for_tau(
     pwm_hz: int,
     minimum_tau_us: int,
     maximum_i: int,
-    build_revision: int | None,
+    build_features: int,
 ) -> int:
     if pwm_hz <= 0 or minimum_tau_us <= 0 or maximum_i <= 0:
         raise ValueError("integral ladder geometry must be positive")
     largest = 0
     for candidate in range(1, maximum_i + 1):
-        if velocity_i_tau_us(candidate, pwm_hz, build_revision) < minimum_tau_us:
+        if velocity_i_tau_us(candidate, pwm_hz, build_features) < minimum_tau_us:
             break
         largest = candidate
     if largest == 0:
@@ -353,14 +354,14 @@ def derive_integral_ladder(
     maximum_i: int,
     *,
     schema_revision: int,
-    build_revision: int | None,
+    build_features: int,
 ) -> dict[str, object]:
     """Reconstruct the cap-only whole-octave positive-I ladder."""
     if not stage_c_schema_is_known(schema_revision):
         raise ValueError("unsupported Stage-C evidence schema")
     if shortest_suffix_us < 2:
         raise ValueError("shortest suffix must contain at least two microseconds")
-    numerator = integral_numerator_for_build(build_revision)
+    numerator = integral_numerator_for_build_features(build_features)
     if schema_revision >= 5:
         i_start = 1
     elif schema_revision >= 4:
@@ -370,13 +371,13 @@ def derive_integral_ladder(
             pwm_hz,
             moving_stroke_us,
             maximum_i,
-            build_revision,
+            build_features,
         )
     i_top_cap = _largest_i_for_tau(
         pwm_hz,
         shortest_suffix_us // 2,
         maximum_i,
-        build_revision,
+        build_features,
     )
     if i_start > i_top_cap:
         raise ValueError("integral ladder has insufficient structural span")
@@ -1009,9 +1010,10 @@ def _direction_consensus(
 
 
 def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
-    build_revision = plan.get("build_revision")
-    integral_numerator_for_build(build_revision if isinstance(build_revision, int) else None)
     schema_revision = int(plan["schema_revision"])
+    # Raises for a legacy capture whose build_revision names no known
+    # representation, preserving the old refuse-to-guess behavior.
+    build_features = capture_build_features(plan, stage="c")
     if not stage_c_schema_is_known(schema_revision):
         mismatches.append(
             f"plan schema revision {schema_revision} is outside the firmware Stage-C range"
@@ -1056,7 +1058,7 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
             64_000,
             32_767,
             schema_revision=schema_revision,
-            build_revision=plan.get("build_revision"),
+            build_features=build_features,
         )
     except ValueError as error:
         mismatches.append(f"plan ladder reconstruction failed: {error}")
