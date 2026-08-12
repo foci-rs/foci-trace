@@ -792,6 +792,33 @@ def test_scored_rest_record_must_match_independent_recomputation() -> None:
         verify_scored_rest_selection(observations, record)
 
 
+def test_scored_rest_verification_recomputes_under_the_captures_own_rule() -> None:
+    """The selector rule changed with the rest-walk schema, so verification has to
+    recompute under the rule that recorded the capture. Forwarding is what is
+    asserted: a capture that disagrees between the rules needs a sample pattern the
+    classifier only produces on hardware, so the seam is checked directly.
+    """
+    from foci_trace import velocity_measurement as vm
+
+    seen: list[bool] = []
+    original = vm.analyze_scored_rest_selection
+
+    def spy(observations, *, rest_walk_revision=False):
+        seen.append(rest_walk_revision)
+        return original(observations, rest_walk_revision=rest_walk_revision)
+
+    observations = [_observation(0) for _ in range(256)]
+    record = original(observations, rest_walk_revision=True)
+
+    vm.analyze_scored_rest_selection = spy
+    try:
+        vm.verify_scored_rest_selection(observations, record, rest_walk_revision=True)
+    finally:
+        vm.analyze_scored_rest_selection = original
+
+    assert seen == [True], "verification must recompute under the capture's own rule"
+
+
 def test_scored_rest_grammar_requires_fixed_observation_and_recovery_joins() -> None:
     """A scored-rest selection follows the observation it describes (R4): the
     grammar had this backwards, requiring the selection first. This is the

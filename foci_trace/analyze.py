@@ -55,6 +55,8 @@ from .velocity_integral import (
     audit_velocity_integral,
 )
 from .velocity_measurement import (
+    STAGE_B_REST_WALK_MIN_SCHEMA_REVISION,
+    STAGE_C_REST_WALK_MIN_SCHEMA_REVISION,
     VelocityMeasurementReport,
     VelocityObservation,
     analyze_velocity_observations,
@@ -1985,6 +1987,7 @@ def _attach_rest_selection_audit(
     state: _DeviceState,
     evidence: list[_VelocitySweepEvidenceFrame],
     source_index: int,
+    rest_walk_min_schema_revision: int | None = None,
 ) -> None:
     """Compare each raw-verifiable Event 151 with the 256 samples before it.
 
@@ -1995,6 +1998,13 @@ def _attach_rest_selection_audit(
     `rest_selection_raw_unverifiable_count` and never compared against the
     unrelated window that happens to precede them.
     """
+    plan = report.get("plan")
+    schema_revision = plan.get("schema_revision") if isinstance(plan, dict) else None
+    rest_walk_revision = (
+        schema_revision is not None
+        and rest_walk_min_schema_revision is not None
+        and int(schema_revision) >= rest_walk_min_schema_revision
+    )
     mismatches: list[str] = []
     verified = 0
     raw_unverifiable = 0
@@ -2013,7 +2023,9 @@ def _attach_rest_selection_audit(
             mismatches.append("scored-rest selection lacks 256 causal raw samples")
             continue
         try:
-            verify_scored_rest_selection(observations, event.payload)
+            verify_scored_rest_selection(
+                observations, event.payload, rest_walk_revision=rest_walk_revision
+            )
         except ValueError as error:
             mismatches.append(str(error))
         else:
@@ -2101,7 +2113,13 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                 raw,
                 [(item.raw_payload, item.payload) for item in evidence],
             )
-            _attach_rest_selection_audit(report, state, evidence, source_index)
+            _attach_rest_selection_audit(
+                report,
+                state,
+                evidence,
+                source_index,
+                STAGE_B_REST_WALK_MIN_SCHEMA_REVISION,
+            )
             companion_stage_c = next(
                 (
                     item.payload
@@ -2226,7 +2244,13 @@ def _velocity_integral_audits(states: dict[int, _DeviceState]) -> list[dict[str,
                 raw,
                 [(item.raw_payload, item.payload) for item in evidence],
             )
-            _attach_rest_selection_audit(report, state, evidence, source_index)
+            _attach_rest_selection_audit(
+                report,
+                state,
+                evidence,
+                source_index,
+                STAGE_C_REST_WALK_MIN_SCHEMA_REVISION,
+            )
             report["device_index"] = device_index
             report["source_index"] = source_index
             report["serial"] = state.report.serial or state.report.metadata_serial

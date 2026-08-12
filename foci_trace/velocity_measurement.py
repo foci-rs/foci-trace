@@ -54,6 +54,11 @@ STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION = 13  # tracks firmware's COMBINED_STAGE
 STAGE_B_SUFFIX_WALK_MIN_SCHEMA_REVISION = 16
 STAGE_C_SUFFIX_WALK_MIN_SCHEMA_REVISION = 15
 
+# First revision whose scored-rest chain closes only on evidence against rest,
+# rather than on any suffix that is not zero-compatible.
+STAGE_B_REST_WALK_MIN_SCHEMA_REVISION = 17
+STAGE_C_REST_WALK_MIN_SCHEMA_REVISION = 16
+
 
 def project_combined_response_selection(
     rungs: list[dict[str, object]],
@@ -1524,9 +1529,13 @@ def analyze_scored_rest_selection(
 def verify_scored_rest_selection(
     observations: list[VelocityObservation],
     record: dict[str, object],
+    *,
+    rest_walk_revision: bool = False,
 ) -> dict[str, object]:
     """Require a decoded Event 151 to match independent raw-sample analysis."""
-    reconstructed = analyze_scored_rest_selection(observations)
+    reconstructed = analyze_scored_rest_selection(
+        observations, rest_walk_revision=rest_walk_revision
+    )
     for field_name, expected in reconstructed.items():
         if record.get(field_name) != expected:
             raise ValueError(
