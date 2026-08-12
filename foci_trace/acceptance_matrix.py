@@ -43,16 +43,21 @@ def robust_rate_location(means: list[int | None]) -> int | None:
 def matrix_plan_digest(plan: dict[str, Any]) -> int:
     """Recompute the immutable matrix-plan digest in firmware field order."""
     encoded = bytearray()
-    fields = (
-        ("schema_revision", 2, False),
-        ("channel", 1, False),
-        ("build_revision", 4, False),
-        ("acceptance_schema_revision", 2, False),
-        ("acceptance_plan_digest", 8, False),
-        ("order", 1, False),
-    )
-    for name, size, signed in fields:
-        _append(encoded, int(plan[name]), size, signed=signed)
+    _append(encoded, int(plan["schema_revision"]), 2)
+    _append(encoded, int(plan["channel"]), 1)
+    # A newer capture carries build_features (u16) where a legacy capture
+    # carried build_revision (u32); the firmware acceptance digest hashes the
+    # same field in place.
+    if "build_features" in plan:
+        _append(encoded, int(plan["build_features"]), 2)
+    else:
+        _append(encoded, int(plan["build_revision"]), 4)
+    for name, size in (
+        ("acceptance_schema_revision", 2),
+        ("acceptance_plan_digest", 8),
+        ("order", 1),
+    ):
+        _append(encoded, int(plan[name]), size)
     for target in plan["target_rpm"]:
         _append(encoded, int(target), 2, signed=True)
     for name, size in (

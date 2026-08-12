@@ -220,8 +220,18 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     """Recompute the firmware Stage-C plan digest over every immutable input."""
     schema_revision = int(plan["schema_revision"])
     combined_workflow = stage_c_combined_workflow(schema_revision)
+    # A newer capture states build_features and, like the single-path
+    # firmware writer, gates the selected-response blocks on content
+    # (`combined_selected_response.is_some()`) rather than the schema number. A
+    # legacy capture keeps the build_revision and the schema-gated reproduction
+    # that reproduces every archived digest exactly.
+    is_post_foc252 = "build_features" in plan
+    selected = bool(plan.get("combined_selected_response", False))
     encoded = bytearray()
-    _append_integer(encoded, int(plan["build_revision"]), 4)
+    if is_post_foc252:
+        _append_integer(encoded, int(plan["build_features"]), 2)
+    else:
+        _append_integer(encoded, int(plan["build_revision"]), 4)
     _append_integer(encoded, schema_revision, 2)
     _append_integer(encoded, int(plan["channel"]), 1)
     _append_integer(encoded, int(plan["stage_b_plan_digest"]), 8)
@@ -238,12 +248,11 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     for interval in plan["directional_pooled_intervals"]:  # type: ignore[union-attr]
         _append_integer(encoded, int(interval[0]), 4, signed=True)
         _append_integer(encoded, int(interval[1]), 4, signed=True)
-    if schema_revision >= _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION:
-        # Firmware hashes the presence byte from
-        # `combined_selected_response.is_some()` and the intervals only behind
-        # it, so a breakaway plan (schema 14) hashes a bare zero and carries no
-        # `selected_response_intervals_q` key at all.
-        selected = bool(plan.get("combined_selected_response", False))
+    # Firmware hashes the presence byte from `combined_selected_response
+    # .is_some()` and the intervals only behind it, so a breakaway plan hashes a
+    # bare zero and carries no `selected_response_intervals_q` key. A newer
+    # writer does this unconditionally; a legacy writer only from FIRST_COMBINED.
+    if is_post_foc252 or schema_revision >= _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION:
         _append_integer(encoded, int(selected), 1)
         if selected:
             _append_integer(encoded, int(plan["final_p"]), 2)
@@ -263,14 +272,16 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     _append_integer(encoded, int(plan["expected_observations"]), 2)
     for name in ("moving_stroke_us", "zero_settle_us", "analysis_budget_us"):
         _append_integer(encoded, int(plan[name]), 4)
-    if schema_revision >= 9 and combined_workflow:
-        # Firmware gates both of these on the *combined* workflow, not on the
-        # schema alone (`integral_plan.rs:439-445` hashes them only when
-        # `combined_selected_response.is_some()`). Every schema in 9..13 is
-        # combined, so this reproduces every archived digest unchanged, while
-        # the breakaway schema 14 -- which emits no
-        # `slot_transition_allowance_us` at all, on the wire or in the hash
-        # (`integral_reporting.rs:316-321`) -- correctly hashes neither.
+    # The current firmware hashes both of these whenever a selected response is
+    # present (`integral_plan.rs:477-479`), so a newer capture mirrors that
+    # by content. A legacy capture keeps the archived schema-gated reproduction:
+    # every schema in 9..13 hashed the slot-transition reserve, and only schema 11
+    # additionally hashed the stabilized-recovery code.
+    if is_post_foc252:
+        if selected:
+            _append_integer(encoded, int(plan["slot_transition_allowance_us"]), 4)
+            _append_integer(encoded, _STABILIZED_RECOVERY_SCHEDULE_CODE, 1)
+    elif schema_revision >= 9 and combined_workflow:
         _append_integer(encoded, int(plan["slot_transition_allowance_us"]), 4)
         if schema_revision == 11:
             _append_integer(encoded, _STABILIZED_RECOVERY_SCHEDULE_CODE, 1)
