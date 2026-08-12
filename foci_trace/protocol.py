@@ -544,6 +544,31 @@ def _take_fields(cursor: _EvidenceCursor, fields: tuple[tuple[str, str], ...]) -
     return {name: cursor.take(fmt) for name, fmt in fields}
 
 
+# The only two build_revision values that ever existed: FNV-1a of the crate
+# versions "0.1.0" and "0.2.0" (mirrors velocity_measurement's legacy build
+# constants). The field was later retired, so a u32 at the build position equal to
+# one of these marks a legacy capture; any other value is a build_features
+# (u16) + build_identity (u32) pair.
+_LEGACY_BUILD_REVISIONS = (0x75536758, 0x05E21F75)
+
+
+def _take_build_identity(cursor: _EvidenceCursor) -> dict[str, int]:
+    """Read the build identity at the cursor, old or new layout.
+
+    Legacy captures carry a single `build_revision` u32; newer captures
+    carry `build_features` (u16) then `build_identity` (u32) in its place. A peek
+    distinguishes them with no schema or record-length dependency: a new record
+    starts with `build_features` (a small mask such as 0x000F) plus a git hash,
+    which cannot equal either legacy `build_revision` constant.
+    """
+    if cursor.offset + 4 > len(cursor.payload):
+        raise DecodeError("velocity-sweep evidence record is truncated")
+    peeked = struct.unpack_from("<I", cursor.payload, cursor.offset)[0]
+    if peeked in _LEGACY_BUILD_REVISIONS:
+        return {"build_revision": cursor.take("I")}
+    return {"build_features": cursor.take("H"), "build_identity": cursor.take("I")}
+
+
 def _take_optional_interval(cursor: _EvidenceCursor) -> list[int] | None:
     present = cursor.take("B")
     if present not in (0, 1):
@@ -633,7 +658,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
     _require(payload, 1, "velocity-sweep evidence")
     cursor = _EvidenceCursor(payload)
     kind = cursor.take("B")
-    if kind == 0 and len(payload) in (43, 56, 72, 73):
+    if kind == 0 and len(payload) in (43, 56, 72, 73, 75):
         decoded = _take_fields(
             cursor,
             (
@@ -644,14 +669,13 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             ),
         )
         fragment = decoded["fragment"]
-        if (fragment, len(payload)) == (0, 73):
+        if fragment == 0 and len(payload) in (73, 75):
+            decoded.update(_take_fields(cursor, (("schema_revision", "H"), ("channel", "B"))))
+            decoded.update(_take_build_identity(cursor))
             decoded.update(
                 _take_fields(
                     cursor,
                     (
-                        ("schema_revision", "H"),
-                        ("channel", "B"),
-                        ("build_revision", "I"),
                         ("acceptance_schema_revision", "H"),
                         ("acceptance_plan_digest", "Q"),
                         ("order", "B"),
@@ -792,11 +816,11 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         )
         fragment = cursor.take("B")
         if fragment == 0:
+            decoded.update(_take_build_identity(cursor))
             decoded.update(
                 _take_fields(
                     cursor,
                     (
-                        ("build_revision", "I"),
                         ("schema_revision", "H"),
                         ("channel", "B"),
                         ("stage_b_plan_digest_low", "I"),

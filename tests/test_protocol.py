@@ -322,7 +322,7 @@ def test_decodes_fragmented_velocity_integral_response_plan() -> None:
     core = bytearray([0])
     core.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
     core.append(0)
-    core.extend(struct.pack("<IHBIIH", 3, 1, 0, 0x99AA_BBCC, 0xDDEE_FF00, 1_448))
+    core.extend(struct.pack("<IHBIIH", 0x05E2_1F75, 1, 0, 0x99AA_BBCC, 0xDDEE_FF00, 1_448))
     core.extend(
         struct.pack(
             "<IIIiiii",
@@ -387,7 +387,7 @@ def test_decodes_schema_four_velocity_integral_authority() -> None:
     core = bytearray([0])
     core.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
     core.append(0)
-    core.extend(struct.pack("<IHBIIH", 3, 4, 0, 0x99AA_BBCC, 0xDDEE_FF00, 1_024))
+    core.extend(struct.pack("<IHBIIH", 0x05E2_1F75, 4, 0, 0x99AA_BBCC, 0xDDEE_FF00, 1_024))
     core.extend(struct.pack("<III", 0x001C_0000, 0x0018_0000, 0x0018_0000))
     core.extend(struct.pack("<BBB", 3, 1, 1))
     core.extend(struct.pack("<iiii", 17_000_000, 18_000_000, -19_000_000, -18_000_000))
@@ -476,7 +476,7 @@ def test_decodes_acceptance_matrix_plan_fragments() -> None:
             "<HBIHQBHHHII5iBHH",
             1,
             0,
-            0x1122_3344,
+            0x05E2_1F75,
             10,
             0xAABB_CCDD_EEFF_0011,
             1,
@@ -2219,7 +2219,7 @@ def _matrix_plan_core(order_byte: int, schema_revision: int = 5) -> bytes:
             "<HBIHQBHHHII5iBHH",
             schema_revision,
             0,
-            0x1122_3344,
+            0x05E2_1F75,
             10,
             0xAABB_CCDD_EEFF_0011,
             order_byte,
@@ -3589,3 +3589,24 @@ def test_decode_breakaway_origin_mismatch_rejects_an_out_of_window_start() -> No
             _bw_origin_mismatch(expected=-9000, observed=-8999, window=4000),
             protocol_version=18,
         )
+
+
+def test_take_build_identity_reads_legacy_and_new_layouts() -> None:
+    from foci_trace.protocol import _EvidenceCursor, _take_build_identity
+
+    # A u32 equal to a legacy build_revision constant (FNV of the crate version)
+    # decodes as the old single-field layout.
+    legacy = struct.pack("<I", 0x05E21F75) + b"\xaa\xbb"
+    cursor = _EvidenceCursor(legacy)
+    assert _take_build_identity(cursor) == {"build_revision": 0x05E21F75}
+    assert cursor.offset == 4
+
+    # Any other u32 is a new-layout record: build_features (u16) then
+    # build_identity (u32).
+    new = struct.pack("<HI", 0x000F, 0xABCD1234)
+    cursor = _EvidenceCursor(new)
+    assert _take_build_identity(cursor) == {
+        "build_features": 0x000F,
+        "build_identity": 0xABCD1234,
+    }
+    assert cursor.offset == 6
