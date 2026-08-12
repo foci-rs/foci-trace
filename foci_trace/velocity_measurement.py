@@ -11,6 +11,8 @@ from enum import StrEnum
 from fractions import Fraction
 from statistics import median
 
+from .scored_rest import select_causal_rest_suffixes
+
 RATE_Q_SCALE = 1_000
 RECOVERY_MOVING_ALLOWANCE_US = 512_000
 RECOVERY_ZERO_SETTLE_US = 500_000
@@ -1466,23 +1468,6 @@ def analyze_scored_rest_selection(
             if interval[0] <= 0 <= interval[1]:
                 zero_compatible_mask |= 1 << index
 
-    selected_mask = 0
-    selected_suffix_len = 0
-    chain_open = True
-    for index, suffix_len in enumerate((64, 128, 256)):
-        bit = 1 << index
-        interval = intervals_q[index]
-        contradicts_rest = (
-            bool(interval_present_mask & bit) and (interval[1] < 0 or interval[0] > 0)
-        ) or structural_codes[index] == 3
-        if not rest_walk_revision:
-            contradicts_rest = zero_compatible_mask & bit == 0
-        if chain_open and zero_compatible_mask & bit:
-            selected_mask = bit
-            selected_suffix_len = suffix_len
-        elif contradicts_rest:
-            chain_open = False
-
     cumulative = 0
     minimum = 0
     maximum = 0
@@ -1490,22 +1475,49 @@ def analyze_scored_rest_selection(
         cumulative += observation.delta_counts
         minimum = min(minimum, cumulative)
         maximum = max(maximum, cumulative)
-    if selected_mask != 0:
-        disposition = 0
-    elif maximum - minimum <= 1:
-        disposition = 1
+    one_count_fallback = maximum - minimum <= 1
+    if rest_walk_revision:
+        selected = select_causal_rest_suffixes(
+            structural_codes,
+            intervals_q,
+            interval_present_mask,
+            one_count_fallback=one_count_fallback,
+        )
     else:
-        disposition = 2
+        selected_mask = 0
+        selected_suffix_len = 0
+        chain_open = True
+        for index, suffix_len in enumerate((64, 128, 256)):
+            bit = 1 << index
+            contradicts_rest = zero_compatible_mask & bit == 0
+            if chain_open and zero_compatible_mask & bit:
+                selected_mask = bit
+                selected_suffix_len = suffix_len
+            elif contradicts_rest:
+                chain_open = False
+        if selected_mask != 0:
+            disposition = 0
+        elif one_count_fallback:
+            disposition = 1
+        else:
+            disposition = 2
+        selected = {
+            "selected_mask": selected_mask,
+            "selected_suffix_len": selected_suffix_len,
+            "disposition": disposition,
+            "usable_mask": usable_mask,
+            "zero_compatible_mask": zero_compatible_mask,
+        }
     return {
         "structural_codes": structural_codes,
         "interval_present_mask": interval_present_mask,
-        "usable_mask": usable_mask,
-        "zero_compatible_mask": zero_compatible_mask,
-        "selected_mask": selected_mask,
-        "selected_suffix_len": selected_suffix_len,
-        "disposition": disposition,
+        "usable_mask": selected["usable_mask"],
+        "zero_compatible_mask": selected["zero_compatible_mask"],
+        "selected_mask": selected["selected_mask"],
+        "selected_suffix_len": selected["selected_suffix_len"],
+        "disposition": selected["disposition"],
         "intervals_q": intervals_q,
-        "conditioned_rest_evidence": disposition == 0,
+        "conditioned_rest_evidence": selected["disposition"] == 0,
     }
 
 

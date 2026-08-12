@@ -6,6 +6,8 @@ import struct
 from dataclasses import dataclass
 from typing import Any
 
+from .scored_rest import select_causal_rest_suffixes
+
 FRAME_MAGIC = 0x43525446
 # Version 17 adds `error_code` to the breakaway discovery terminal, so a
 # `*_internal_fault` terminal names the CommissionError behind it instead of
@@ -1884,32 +1886,36 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 raise DecodeError("excluded scored-rest suffix carries an interval")
         if int(decoded["interval_present_mask"]) != expected_interval_mask:
             raise DecodeError("scored-rest interval-presence mask is inconsistent")
-        if int(decoded["usable_mask"]) != expected_usable_mask:
+        expected = select_causal_rest_suffixes(
+            decoded["structural_codes"],
+            intervals,
+            expected_interval_mask,
+            one_count_fallback=int(decoded["disposition"]) == 1,
+        )
+        if expected["usable_mask"] != expected_usable_mask:
+            raise DecodeError("scored-rest selector reconstruction failed")
+        if int(decoded["usable_mask"]) != expected["usable_mask"]:
             raise DecodeError("scored-rest usable mask is inconsistent")
-        if int(decoded["zero_compatible_mask"]) != expected_zero_mask:
+        if expected["zero_compatible_mask"] != expected_zero_mask:
+            raise DecodeError("scored-rest selector reconstruction failed")
+        if int(decoded["zero_compatible_mask"]) != expected["zero_compatible_mask"]:
             raise DecodeError("scored-rest zero-compatible mask is inconsistent")
 
-        expected_selected_mask = 0
-        expected_selected_len = 0
-        for index, suffix_len in enumerate((64, 128, 256)):
-            bit = 1 << index
-            if expected_zero_mask & bit == 0:
-                break
-            expected_selected_mask = bit
-            expected_selected_len = suffix_len
         disposition = int(decoded["disposition"])
         if disposition == 0:
             if (
-                expected_selected_mask == 0
-                or int(decoded["selected_mask"]) != expected_selected_mask
-                or int(decoded["selected_suffix_len"]) != expected_selected_len
+                expected["selected_mask"] == 0
+                or int(decoded["selected_mask"]) != expected["selected_mask"]
+                or int(decoded["selected_suffix_len"]) != expected["selected_suffix_len"]
+                or disposition != expected["disposition"]
             ):
                 raise DecodeError("scored-rest statistical selection is inconsistent")
         elif disposition in (1, 2):
             if (
-                expected_selected_mask != 0
+                expected["selected_mask"] != 0
                 or int(decoded["selected_mask"]) != 0
                 or int(decoded["selected_suffix_len"]) != 0
+                or disposition != expected["disposition"]
             ):
                 raise DecodeError("scored-rest terminal selection is inconsistent")
         else:

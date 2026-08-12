@@ -981,6 +981,43 @@ def test_decodes_exact_scored_rest_selection_record() -> None:
     }
 
 
+def test_decodes_noncontiguous_scored_rest_selection_record() -> None:
+    payload = struct.pack(
+        "<BIHBBBBBQ3B4BHB6q",
+        11,
+        0x0102_0304,
+        0x0506,
+        1,
+        4,
+        10,
+        0,
+        6,
+        0x1122_3344_5566_7788,
+        0,
+        4,
+        0,
+        0b111,
+        0b101,
+        0b101,
+        0b100,
+        256,
+        0,
+        -58_721,
+        90_287,
+        -29_401,
+        45_103,
+        -6_848,
+        22_512,
+    )
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert frame.payload["structural_codes"] == [0, 4, 0]
+    assert frame.payload["zero_compatible_mask"] == 0b101
+    assert frame.payload["selected_mask"] == 0b100
+    assert frame.payload["selected_suffix_len"] == 256
+
+
 @pytest.mark.parametrize(
     "replacement",
     (
