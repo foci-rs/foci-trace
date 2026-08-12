@@ -54,21 +54,28 @@ _STABILIZED_RECOVERY_SCHEDULE_CODE = 1
 _U128_MAX = (1 << 128) - 1
 
 # Stage-C evidence schema revisions, mirrored from firmware. Every revision
-# belongs to exactly one acquisition workflow, and no two workflows share one:
+# belongs to exactly one acquisition workflow, and no two workflows share one.
+# The ranges are named by the constants below rather than by literals, so a
+# firmware bump widens a range without stranding this comment:
 #
-#   1..7  standalone Stage C (`STAGE_C_EVIDENCE_SCHEMA_REVISION = 7`,
-#         `integral_plan.rs:24`), planned by `plan_velocity_integral_response`
-#         with `combined_selected_response: None`.
-#   8..13 the combined P-then-I workflow
-#         (`FIRST_COMBINED_STAGE_C_SCHEMA_REVISION = 8`,
-#         `COMBINED_STAGE_C_SCHEMA_REVISION = 13`, `combined_plan.rs:20,22`).
+#   through _STANDALONE_STAGE_C_SCHEMA_REVISION
+#         standalone Stage C (`integral_plan.rs:24`), planned by
+#         `plan_velocity_integral_response` with `combined_selected_response:
+#         None`.
+#   _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION through
+#   _COMBINED_STAGE_C_SCHEMA_REVISION
+#         the combined P-then-I workflow (`combined_plan.rs:20,22`).
 #         `plan_combined_velocity_integral_response` is the only builder in
 #         that range and it always supplies `Some(selected)`.
-#   14-15 the breakaway-seeded campaign
-#         (`BREAKAWAY_STAGE_C_SCHEMA_REVISION = 15`, `combined_plan.rs:40`),
-#         planned by `plan_breakaway_velocity_integral_response` with
-#         `combined_selected_response: None`. 15 differs from 14 only in that
-#         the stationarity walk continues past a rejected suffix.
+#   above the combined range, through _BREAKAWAY_STAGE_C_SCHEMA_REVISION
+#         the breakaway-seeded campaign (`combined_plan.rs:40`), planned by
+#         `plan_breakaway_velocity_integral_response` with
+#         `combined_selected_response: None`.
+#
+# Revisions inside one range differ only in measurement rules -- which suffix a
+# walk selects, which evidence closes a chain -- never in workflow, builder, or
+# record layout. That is why a range widens rather than a new one appearing, and
+# why the workflow mapping here does not change when firmware bumps.
 #
 # The workflow is therefore a property of the schema revision alone. Deriving
 # it from the capture's own `combined_selected_response` instead lets a
@@ -78,7 +85,7 @@ _U128_MAX = (1 << 128) - 1
 _STANDALONE_STAGE_C_SCHEMA_REVISION = 7
 _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION = 8
 _COMBINED_STAGE_C_SCHEMA_REVISION = 13
-_BREAKAWAY_STAGE_C_SCHEMA_REVISION = 15
+_BREAKAWAY_STAGE_C_SCHEMA_REVISION = 16
 
 
 class UnsupportedIntegralRepresentationError(ValueError):

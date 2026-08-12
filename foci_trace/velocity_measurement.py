@@ -1410,8 +1410,14 @@ def analyze_stationary_tail(
 
 def analyze_scored_rest_selection(
     observations: list[VelocityObservation],
+    *,
+    rest_walk_revision: bool = False,
 ) -> dict[str, object]:
-    """Recompute one causal scored-rest decision from raw observations."""
+    """Recompute one causal scored-rest decision from raw observations.
+
+    `rest_walk_revision` selects whether an unfittable shortest window vetoes the
+    longer ones (historical) or only evidence against rest closes the chain.
+    """
     if len(observations) < 256:
         raise ValueError("scored-rest analysis requires at least 256 observations")
     if any(item.elapsed_us <= 0 for item in observations):
@@ -1462,12 +1468,20 @@ def analyze_scored_rest_selection(
 
     selected_mask = 0
     selected_suffix_len = 0
+    chain_open = True
     for index, suffix_len in enumerate((64, 128, 256)):
         bit = 1 << index
-        if zero_compatible_mask & bit == 0:
-            break
-        selected_mask = bit
-        selected_suffix_len = suffix_len
+        interval = intervals_q[index]
+        contradicts_rest = (
+            bool(interval_present_mask & bit) and (interval[1] < 0 or interval[0] > 0)
+        ) or structural_codes[index] == 3
+        if not rest_walk_revision:
+            contradicts_rest = zero_compatible_mask & bit == 0
+        if chain_open and zero_compatible_mask & bit:
+            selected_mask = bit
+            selected_suffix_len = suffix_len
+        elif contradicts_rest:
+            chain_open = False
 
     cumulative = 0
     minimum = 0
@@ -5496,7 +5510,7 @@ _BW_STATIONARITY_EXCESSIVE_DRIFT = 6
 # confirm it is regenerating the ladder under the exact rules the firmware
 # applied rather than a stale or newer revision.
 _BW_STAGE_B_MIN_SCHEMA_REVISION = 15
-_BW_STAGE_B_SCHEMA_REVISION = 16
+_BW_STAGE_B_SCHEMA_REVISION = 17
 
 # `NOMINATION_SCREEN_C_SIGMA` (band_confirmation.rs): the pointwise 95%
 # scale-inflation heuristic the nomination screen applies on top of the
