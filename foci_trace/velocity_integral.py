@@ -1930,7 +1930,7 @@ def audit_velocity_integral(
                 else velocity_i_tau_us(
                     i_raw,
                     int(plan["pwm_hz"]),
-                    plan.get("build_revision"),
+                    capture_build_features(plan, stage="c"),
                 )
             )
             expected_horizon_class = (
