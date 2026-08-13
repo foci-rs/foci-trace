@@ -3139,6 +3139,74 @@ def test_combined_sufficient_terminal_claiming_the_standalone_outcome_is_rejecte
     assert audit["mismatches"] == ["combined sufficient run did not complete without retention"]
 
 
+def test_breakaway_reproduced_complete_audits_clean() -> None:
+    """A breakaway (schema-16) run reproduced to `Complete` (outcome 1) must
+    not be flagged by the standalone-outcome guard. Breakaway
+    (`plan_breakaway_velocity_integral_response`) sets no
+    `combined_selected_response`, so `stage_c_combined_workflow` is False for
+    schema 16 exactly as it is for the pre-existing schema-14 immediate-scored
+    range -- but unlike that range, a breakaway run that is reproduced via
+    `stage_c_resume` genuinely reaches `Complete`, not just
+    `CompleteCandidate`. The guard must carve out schema 16 alone (not the
+    whole >= 8 non-combined range) so this legitimate terminal audits clean
+    while a real standalone claim of the same outcome (schema 14, tested
+    below) still fails.
+    """
+    raw, records = _synthetic_complete_capture(schema_revision=16)
+    terminal_raw, terminal = records[-1]
+    terminal = {**terminal, "outcome": 1}
+    records[-1] = (terminal_raw, terminal)
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["mismatches"] == []
+
+
+def test_breakaway_candidate_first_run_audits_clean() -> None:
+    """A breakaway (schema-16) run's first pass, before reproduction, reports
+    `CompleteCandidate` (outcome 0) exactly like every other non-combined
+    schema, and audits clean unmodified.
+    """
+    raw, records = _synthetic_complete_capture(schema_revision=16)
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["mismatches"] == []
+
+
+def test_standalone_non_breakaway_complete_still_flagged() -> None:
+    """The breakaway carve-out is schema-16-only: a genuinely standalone,
+    non-breakaway, non-combined sufficient run (schema 14, immediate-scored --
+    the outcome guard is only reachable for schema >= 8, so schema 14 is the
+    lowest schema that exercises it) claiming `Complete` (outcome 1) must
+    still be rejected, proving the relaxation did not widen past schema 16.
+    This mirrors the pre-existing
+    `test_standalone_sufficient_terminal_claiming_the_combined_outcome_is_rejected`
+    and would regress identically if the guard were loosened too far.
+    """
+    raw, records = _synthetic_complete_capture(schema_revision=14)
+    terminal_raw, terminal = records[-1]
+    terminal = {**terminal, "outcome": 1}
+    records[-1] = (terminal_raw, terminal)
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["mismatches"] == ["standalone sufficient run falsely reports the combined outcome"]
+
+
+def test_combined_stage_c_audit_unchanged() -> None:
+    """Locks the combined branch (schemas 8-13) against the schema-16
+    breakaway carve-out: a combined (schema-13) sufficient run reporting
+    `Complete` (outcome 1) still audits clean, unmodified by the new
+    schema-16 exception.
+    """
+    raw, records = _synthetic_complete_capture(schema_revision=13)
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["mismatches"] == []
+
+
 def _fault_the_terminal(
     records: list[tuple[bytes, dict[str, object]]],
 ) -> list[tuple[bytes, dict[str, object]]]:

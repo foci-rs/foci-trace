@@ -2095,6 +2095,16 @@ def audit_velocity_integral(
         # Recorded firmware output (a real standalone capture, outcome=3,
         # cause=4/`INTEGRAL_CAUSE_INTEGRITY`, sufficient replay) hit exactly
         # this gap before the guard was added.
+        #
+        # One further exception: schema 16 is the breakaway-seeded campaign
+        # (`plan_breakaway_velocity_integral_response`), which is also
+        # non-combined (`plan_combined_workflow` is False for it) but, unlike
+        # the immediate-scored range below it, can be legitimately
+        # *reproduced* via `stage_c_resume` -- and a reproduced breakaway run
+        # genuinely reports `Complete` (1), not `CompleteCandidate` (0).
+        # Breakaway sets no combined recovery-flags bit and emits no combined
+        # tail (both checked above and unaffected by this carve-out), so the
+        # outcome check is the only one that needs to know about it.
         plan_combined_workflow = stage_c_combined_workflow(schema_revision)
         recovery_flags = int(terminal.get("recovery_flags", 0))
         terminal_combined_workflow = bool(recovery_flags & _TERMINAL_COMBINED_WORKFLOW)
@@ -2103,7 +2113,13 @@ def audit_velocity_integral(
         terminal_combined_tail = bool(terminal.get("combined_workflow", False))
         if terminal_combined_tail != plan_combined_workflow:
             mismatches.append("terminal combined tail differs from the plan")
-        if not faulted and sufficient and not plan_combined_workflow and outcome != 0:
+        if (
+            not faulted
+            and sufficient
+            and not plan_combined_workflow
+            and schema_revision != _BREAKAWAY_STAGE_C_SCHEMA_REVISION
+            and outcome != 0
+        ):
             mismatches.append("standalone sufficient run falsely reports the combined outcome")
         if plan_combined_workflow:
             # `terminal_target_status` (`integral_reporting.rs:51-76`) reads
