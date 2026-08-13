@@ -426,7 +426,7 @@ def test_stationary_tail_matches_firmware_single_precision_rounding() -> None:
     assert result["residual_magnitude_q2"] == 1_663_058_048
 
 
-def test_rejected_short_window_ends_the_walk_only_before_the_schema_bump() -> None:
+def test_rejected_short_window_ends_the_walk_without_the_suffix_walk_feature() -> None:
     # Last 64 samples oscillate, so the 64-sample window fails lag-one while the
     # 256-sample window is stationary. Mirrors the firmware fixture.
     observations = [
@@ -436,14 +436,22 @@ def test_rejected_short_window_ends_the_walk_only_before_the_schema_bump() -> No
         for index in range(256)
     ]
 
-    from foci_trace.velocity_measurement import STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION
+    from foci_trace.velocity_measurement import (
+        BUILD_FEATURE_DRIFT_BOUND_GATE,
+        BUILD_FEATURE_SUFFIX_WALK_CONTINUES,
+    )
 
-    gate = {
-        "schema_revision": 15,
-        "drift_bound_min_schema_revision": STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
-    }
-    historical = analyze_stationary_tail(observations, **gate)
-    corrected = analyze_stationary_tail(observations, **gate, suffix_walk_min_schema_revision=15)
+    # Drift-bound firmware without the suffix walk ends the walk at the rejected
+    # 64-sample window; the same firmware with the suffix walk continues to the
+    # stationary 256-sample window. The gate keys on build_features, so this no
+    # longer depends on which schema revision recorded the capture.
+    historical = analyze_stationary_tail(
+        observations, build_features=BUILD_FEATURE_DRIFT_BOUND_GATE
+    )
+    corrected = analyze_stationary_tail(
+        observations,
+        build_features=BUILD_FEATURE_DRIFT_BOUND_GATE | BUILD_FEATURE_SUFFIX_WALK_CONTINUES,
+    )
 
     assert historical["usable"] == 0
     assert historical["tested_suffixes"] == 1
@@ -632,13 +640,13 @@ def test_moving_mode_bypasses_drift_bound_when_settled_interval_contains_zero() 
     drift bound entirely rather than reporting a ratio against a near-zero
     denominator, exactly as firmware's classify_moving_metrics does.
 
-    The drift bound only applies at or above the stage-qualified threshold
-    (see test_moving_gate_is_schema_gated below for the legacy side of that
-    split), so this test must pass a schema_revision and its matching
-    threshold to exercise it at all.
+    The drift bound only applies when build_features declares it (see
+    test_moving_gate_keys_on_build_features below for the legacy side of that
+    split), so this test must pass a build_features with the drift-bound bit set
+    to exercise it at all.
     """
     from foci_trace.velocity_measurement import (
-        STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+        BUILD_FEATURE_DRIFT_BOUND_GATE,
         _classify_stationarity,
     )
 
@@ -656,8 +664,7 @@ def test_moving_mode_bypasses_drift_bound_when_settled_interval_contains_zero() 
             "moving",
             mean_rate_q=5,
             half_width_rate_q=10,
-            schema_revision=STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
-            drift_bound_min_schema_revision=STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+            build_features=BUILD_FEATURE_DRIFT_BOUND_GATE,
         )
         is None
     )
@@ -665,7 +672,7 @@ def test_moving_mode_bypasses_drift_bound_when_settled_interval_contains_zero() 
 
 def test_moving_mode_rejects_excessive_drift_outside_the_inert_interval() -> None:
     from foci_trace.velocity_measurement import (
-        STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+        BUILD_FEATURE_DRIFT_BOUND_GATE,
         _classify_stationarity,
     )
 
@@ -681,24 +688,26 @@ def test_moving_mode_rejects_excessive_drift_outside_the_inert_interval() -> Non
             "moving",
             mean_rate_q=100,
             half_width_rate_q=10,
-            schema_revision=STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
-            drift_bound_min_schema_revision=STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+            build_features=BUILD_FEATURE_DRIFT_BOUND_GATE,
         )
         == 5
     )
 
 
-def test_moving_gate_is_schema_gated() -> None:
-    """Below the stage-qualified threshold (and when the revision is
-    unknown), moving mode falls back to the significance test instead of the
-    drift bound, matching firmware that never ran the drift bound at all."""
+def test_moving_gate_keys_on_build_features() -> None:
+    """The moving gate keys on build_features, not schema revision. A capture
+    whose build_features omits the drift-bound bit -- or offers no signal at all
+    (None) -- falls back to the significance test, matching firmware that never
+    ran the drift bound; a capture that declares the bit takes the drift bound
+    regardless of schema. This is what lets a schema-13 combined capture from
+    drift-bound firmware be gated by the rule it ran, not by its schema number."""
     from foci_trace.velocity_measurement import (
-        STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+        BUILD_FEATURE_DRIFT_BOUND_GATE,
         _classify_stationarity,
     )
 
-    # A huge drift ratio would reject under the new gate, but a passing
-    # significance test must accept it under the legacy gate.
+    # A huge drift ratio would reject under the drift bound, but a passing
+    # significance test must accept it when the drift bit is absent or unknown.
     passing_fit = {
         "drift_ratio_ppm": 999_999_999,
         "slope_passed": True,
@@ -706,24 +715,19 @@ def test_moving_gate_is_schema_gated() -> None:
     }
     assert (
         _classify_stationarity(
-            passing_fit,
-            "moving",
-            mean_rate_q=100,
-            half_width_rate_q=10,
-            schema_revision=STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION - 1,
-            drift_bound_min_schema_revision=STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+            passing_fit, "moving", mean_rate_q=100, half_width_rate_q=10, build_features=0
         )
         is None
     )
     assert (
         _classify_stationarity(
-            passing_fit, "moving", mean_rate_q=100, half_width_rate_q=10, schema_revision=None
+            passing_fit, "moving", mean_rate_q=100, half_width_rate_q=10, build_features=None
         )
         is None
     )
 
-    # A tiny drift ratio would pass under the new gate, but a failing
-    # significance test must still reject it under the legacy gate.
+    # A tiny drift ratio would pass under the drift bound, but a failing
+    # significance test must still reject it when the drift bit is absent.
     failing_fit = {
         "drift_ratio_ppm": 1,
         "slope_passed": False,
@@ -731,33 +735,77 @@ def test_moving_gate_is_schema_gated() -> None:
     }
     assert (
         _classify_stationarity(
-            failing_fit,
-            "moving",
-            mean_rate_q=100,
-            half_width_rate_q=10,
-            schema_revision=STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION - 1,
-            drift_bound_min_schema_revision=STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+            failing_fit, "moving", mean_rate_q=100, half_width_rate_q=10, build_features=0
         )
         == 2
     )
     assert (
         _classify_stationarity(
-            failing_fit, "moving", mean_rate_q=100, half_width_rate_q=10, schema_revision=None
+            failing_fit, "moving", mean_rate_q=100, half_width_rate_q=10, build_features=None
         )
         == 2
     )
 
+    # With the drift bit declared the drift bound applies regardless of schema:
+    # the huge-drift fit rejects as ExcessiveDrift (5) and the tiny-drift fit,
+    # whose failing significance test the drift bound ignores, now passes.
+    assert (
+        _classify_stationarity(
+            passing_fit,
+            "moving",
+            mean_rate_q=100,
+            half_width_rate_q=10,
+            build_features=BUILD_FEATURE_DRIFT_BOUND_GATE,
+        )
+        == 5
+    )
+    assert (
+        _classify_stationarity(
+            failing_fit,
+            "moving",
+            mean_rate_q=100,
+            half_width_rate_q=10,
+            build_features=BUILD_FEATURE_DRIFT_BOUND_GATE,
+        )
+        is None
+    )
 
-def test_classify_stationarity_requires_stage_qualified_threshold_with_schema_revision() -> None:
-    """A schema_revision without its matching threshold is a caller bug, not a
-    silently-picked default -- there are two namespaces and no safe single
-    choice."""
-    from foci_trace.velocity_measurement import _classify_stationarity
 
-    fit = {"drift_ratio_ppm": 0, "slope_passed": True, "lag_one_passed": True}
+def test_capture_rule_features_prefers_explicit_bits_then_reconstructs() -> None:
+    """The stationarity gates read their contract from build_features when the
+    capture states it, and reconstruct only the rule bits from the stage's
+    schema thresholds otherwise. Unlike capture_build_features it never consults
+    build_revision, so an archived capture with no integral-representation signal
+    still gates under its schema instead of raising."""
+    from foci_trace.velocity_measurement import (
+        BUILD_FEATURE_DRIFT_BOUND_GATE,
+        BUILD_FEATURE_REST_CHAIN_ON_EVIDENCE,
+        BUILD_FEATURE_SUFFIX_WALK_CONTINUES,
+        STAGE_C_SUFFIX_WALK_MIN_SCHEMA_REVISION,
+        capture_rule_features,
+    )
 
-    with pytest.raises(ValueError, match="drift_bound_min_schema_revision"):
-        _classify_stationarity(fit, "moving", mean_rate_q=0, half_width_rate_q=0, schema_revision=1)
+    # A newer capture states build_features directly, returned verbatim
+    # at any schema revision -- this is the case schema gating got wrong.
+    assert capture_rule_features({"build_features": 0xF, "schema_revision": 13}, stage="c") == 0xF
+
+    # A legacy Stage C capture reconstructs from its own plan schema_revision. At
+    # the suffix-walk floor the drift and suffix bits are set but rest-walk (16)
+    # is not, and no build_revision is needed to say so.
+    features = capture_rule_features(
+        {"schema_revision": STAGE_C_SUFFIX_WALK_MIN_SCHEMA_REVISION}, stage="c"
+    )
+    assert features & BUILD_FEATURE_DRIFT_BOUND_GATE
+    assert features & BUILD_FEATURE_SUFFIX_WALK_CONTINUES
+    assert not features & BUILD_FEATURE_REST_CHAIN_ON_EVIDENCE
+
+    # A legacy Stage B capture takes its schema from the caller (its wire plan
+    # record carries none); revision 13 is below every Stage B rule threshold.
+    assert capture_rule_features({}, stage="b", schema_revision=13) == 0
+
+    # No signal at all -- no build_features, no schema -- means the legacy gate,
+    # reported as None, never a raise.
+    assert capture_rule_features({}, stage="c") is None
 
 
 def test_scored_rest_selection_recomputes_all_suffixes_independently() -> None:

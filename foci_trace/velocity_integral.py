@@ -9,8 +9,6 @@ from .velocity_measurement import (
     _CURRENT_Q4_12_BUILD_REVISION,
     _LEGACY_Q8_8_BUILD_REVISION,
     BUILD_FEATURE_Q4_12_GAINS,
-    STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION,
-    STAGE_C_SUFFIX_WALK_MIN_SCHEMA_REVISION,
     UnsupportedIntegralRepresentationError,
     VelocityObservation,
     _confidence_half_width,
@@ -22,6 +20,7 @@ from .velocity_measurement import (
     audit_rung_origin_recovery,
     audit_scored_rest_grammar,
     capture_build_features,
+    capture_rule_features,
     plan_rung_origin_recovery,
     summarize_recovery_rest_diagnostics,
 )
@@ -682,19 +681,13 @@ def reconstruct_observation(
     rung_index = int(identity["rung_index"])
     slot = int(identity["slot"])
     direction = slot_direction_index(plan_slot_order(plan), slot)
-    # Stage C's wire plan record always carries schema_revision, but callers in
-    # tests sometimes construct a partial plan without it; treat that as
-    # unknown (legacy gate) rather than raising, matching the fail-safe
-    # default in _classify_stationarity. Always compare against Stage C's own
-    # threshold: schema_revision here is a Stage C revision by construction,
-    # never Stage B's.
-    plan_schema_revision = plan.get("schema_revision")
-    stationarity = _stationary_suffix(
-        raw[-256:],
-        schema_revision=int(plan_schema_revision) if plan_schema_revision is not None else None,
-        drift_bound_min_schema_revision=STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION,
-        suffix_walk_min_schema_revision=STAGE_C_SUFFIX_WALK_MIN_SCHEMA_REVISION,
-    )
+    # A newer Stage C plan states build_features directly; a legacy plan
+    # reconstructs its rule bits from schema_revision under Stage C's own
+    # namespace (schema_revision here is a Stage C revision by construction,
+    # never Stage B's). A partial test plan carrying neither resolves to None,
+    # the fail-safe legacy gate, rather than raising.
+    build_features = capture_rule_features(plan, stage="c")
+    stationarity = _stationary_suffix(raw[-256:], build_features=build_features)
     predicted = (
         max(item.peak_torque_target_abs or 0 for item in raw)
         if observed_torque_peak_abs is None

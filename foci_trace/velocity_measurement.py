@@ -96,6 +96,30 @@ _STAGE_RULE_THRESHOLDS: dict[str, tuple[int, int, int]] = {
 }
 
 
+def _rule_features_from_schema(schema_revision: int, stage: str) -> int:
+    """Reconstruct just the analysis rule bits (drift/suffix/rest) a legacy
+    capture ran under, from its per-namespace schema thresholds.
+
+    This ignores the integral-representation bit and never consults
+    `build_revision`: the stationarity gates read only the rule bits, so an
+    archived capture with no representation signal must still resolve its gate
+    contract rather than raise. `stage` selects the namespace: "b" for Stage B,
+    "c" for Stage C.
+    """
+    try:
+        drift, suffix, rest = _STAGE_RULE_THRESHOLDS[stage]
+    except KeyError:
+        raise ValueError(f"unknown schema namespace {stage!r}") from None
+    features = 0
+    if schema_revision >= drift:
+        features |= BUILD_FEATURE_DRIFT_BOUND_GATE
+    if schema_revision >= suffix:
+        features |= BUILD_FEATURE_SUFFIX_WALK_CONTINUES
+    if schema_revision >= rest:
+        features |= BUILD_FEATURE_REST_CHAIN_ON_EVIDENCE
+    return features
+
+
 def reconstruct_build_features(
     build_revision: int | None, schema_revision: int, *, stage: str
 ) -> int:
@@ -107,10 +131,8 @@ def reconstruct_build_features(
     that recorded it. `stage` selects the schema namespace: "b" for Stage B, "c"
     for Stage C.
     """
-    try:
-        drift, suffix, rest = _STAGE_RULE_THRESHOLDS[stage]
-    except KeyError:
-        raise ValueError(f"unknown schema namespace {stage!r}") from None
+    if stage not in _STAGE_RULE_THRESHOLDS:
+        raise ValueError(f"unknown schema namespace {stage!r}")
     if build_revision == _CURRENT_Q4_12_BUILD_REVISION:
         features = BUILD_FEATURE_Q4_12_GAINS
     elif build_revision == _LEGACY_Q8_8_BUILD_REVISION:
@@ -123,13 +145,34 @@ def reconstruct_build_features(
         raise UnsupportedIntegralRepresentationError(
             f"unsupported integral-gain representation for build 0x{build_revision:08x}"
         )
-    if schema_revision >= drift:
-        features |= BUILD_FEATURE_DRIFT_BOUND_GATE
-    if schema_revision >= suffix:
-        features |= BUILD_FEATURE_SUFFIX_WALK_CONTINUES
-    if schema_revision >= rest:
-        features |= BUILD_FEATURE_REST_CHAIN_ON_EVIDENCE
-    return features
+    return features | _rule_features_from_schema(schema_revision, stage)
+
+
+def capture_rule_features(
+    plan: dict[str, object], *, stage: str, schema_revision: int | None = None
+) -> int | None:
+    """Effective analysis rule-bit contract for the stationarity gates.
+
+    A newer capture states `build_features` directly; a legacy capture
+    reconstructs only its rule bits from the stage's schema thresholds. Unlike
+    `capture_build_features` this never consults `build_revision` and never
+    raises on a missing integral-representation signal, because the gates read
+    only the rule bits. Returns `None` when the capture offers no rule signal at
+    all (no `build_features` and no schema revision), which the gates treat as
+    the legacy significance test.
+
+    `schema_revision` overrides the plan's own, for Stage B: its wire plan
+    record carries no schema revision, so the caller derives one from the
+    evidence stream and passes it here. `stage` selects the namespace: "b" for
+    Stage B, "c" for Stage C.
+    """
+    explicit = plan.get("build_features")
+    if explicit is not None:
+        return int(explicit)  # type: ignore[arg-type]
+    effective = schema_revision if schema_revision is not None else plan.get("schema_revision")
+    if effective is None:
+        return None
+    return _rule_features_from_schema(int(effective), stage)  # type: ignore[arg-type]
 
 
 def capture_build_features(plan: dict[str, object], *, stage: str) -> int:
@@ -1255,48 +1298,37 @@ def _classify_stationarity(
     mean_rate_q: int,
     half_width_rate_q: int,
     *,
-    schema_revision: int | None = None,
-    drift_bound_min_schema_revision: int | None = None,
+    build_features: int | None = None,
 ) -> int | None:
     """Apply the mode-specific stationarity gate to an unguarded fit.
 
-    `mode` is `"moving"` or `"rest"`. A moving stroke on a capture at or above
-    `drift_bound_min_schema_revision` is bounded on how far the settled rate
-    drifts across the regression span, not on whether the fitted slope is
-    statistically distinguishable from zero: the significance test tightens as
-    data accumulates, so a longer, better measurement of a real machine
-    rejects where a shorter one passed. Captures below that revision were
-    recorded by firmware that never ran the drift bound at all, so
-    `mode="moving"` there keeps the old significance test instead, matching
-    that firmware exactly rather than a gate it never executed.
+    `mode` is `"moving"` or `"rest"`. A moving stroke recorded by firmware whose
+    `build_features` declares `BUILD_FEATURE_DRIFT_BOUND_GATE` is bounded on how
+    far the settled rate drifts across the regression span, not on whether the
+    fitted slope is statistically distinguishable from zero: the significance
+    test tightens as data accumulates, so a longer, better measurement of a real
+    machine rejects where a shorter one passed. Firmware without that bit never
+    ran the drift bound, so `mode="moving"` there keeps the old significance test
+    instead, matching that firmware exactly rather than a gate it never executed.
 
-    `drift_bound_min_schema_revision` must be the threshold matching the
-    namespace `schema_revision` was drawn from --
-    `STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION` or
-    `STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION` -- since Stage B and Stage C
-    number their schema revisions independently and the same integer means a
-    different thing in each namespace. Passing `schema_revision` without the
-    matching threshold is a caller bug and raises `ValueError` rather than
-    silently assuming one. `schema_revision` of `None` (unknown) is treated as
-    below any threshold: an unidentified capture is far more likely to be an
-    old one, and defaulting toward the legacy gate fails safe toward
-    preserving existing replay behavior.
+    `build_features` is the recording firmware's rule contract, resolved by the
+    caller from the capture (see `capture_rule_features`): the drift-bound rule
+    is read straight off the wire rather than dated by schema revision, so the
+    Stage B / Stage C schema-namespace ambiguity never reaches this gate.
+    `None` means unknown -- an unidentified capture is far more likely to be an
+    old one, so it defaults toward the legacy significance gate, failing safe
+    toward preserving existing replay behavior.
 
     Zero-target rest always keeps the significance test unchanged (it never
-    reads `schema_revision` or `drift_bound_min_schema_revision`), since a
-    drift bound relative to a near-zero mean would collapse with the mean
-    itself.
+    reads `build_features`), since a drift bound relative to a near-zero mean
+    would collapse with the mean itself.
 
     Returns the zero-based `StationarityExclusion` discriminant on rejection,
     or `None` when the fit is usable.
     """
     if mode == "moving":
-        if schema_revision is not None and drift_bound_min_schema_revision is None:
-            raise ValueError(
-                "schema_revision requires a stage-qualified drift_bound_min_schema_revision"
-            )
-        use_drift_bound = (
-            schema_revision is not None and schema_revision >= drift_bound_min_schema_revision
+        use_drift_bound = build_features is not None and bool(
+            build_features & BUILD_FEATURE_DRIFT_BOUND_GATE
         )
         if use_drift_bound:
             # The settled interval containing zero is exactly the Inert
@@ -1320,25 +1352,19 @@ def _classify_stationarity(
 def _stationary_suffix(
     observations: list[VelocityObservation],
     *,
-    schema_revision: int | None = None,
-    drift_bound_min_schema_revision: int | None = None,
-    suffix_walk_min_schema_revision: int | None = None,
+    build_features: int | None = None,
 ) -> dict[str, int]:
     """Reconstruct the longest usable moving-stroke stationary suffix.
 
-    `schema_revision` and `drift_bound_min_schema_revision` select which
-    moving gate `_classify_stationarity` applies (see there); `None` for
-    `schema_revision` means unknown and defaults to the legacy
-    significance-based gate.
-
-    `suffix_walk_min_schema_revision` selects whether a rejected window ends the
-    walk (historical) or the walk continues to the longer windows; `None` or an
-    older capture keeps the historical walk.
+    `build_features` is the recording firmware's rule contract, resolved by the
+    caller from the capture (see `capture_rule_features`). It selects which
+    moving gate `_classify_stationarity` applies, and whether a rejected window
+    ends the walk (firmware without `BUILD_FEATURE_SUFFIX_WALK_CONTINUES`) or the
+    walk continues to the longer windows (firmware with it). `None` means unknown
+    and defaults to the legacy significance gate with the historical walk.
     """
-    walk_past_rejection = (
-        schema_revision is not None
-        and suffix_walk_min_schema_revision is not None
-        and schema_revision >= suffix_walk_min_schema_revision
+    walk_past_rejection = build_features is not None and bool(
+        build_features & BUILD_FEATURE_SUFFIX_WALK_CONTINUES
     )
     selected: dict[str, int] | None = None
     # Reported when the walk runs out of windows without selecting one.
@@ -1396,8 +1422,7 @@ def _stationary_suffix(
             "moving",
             mean_rate_q,
             half_width_rate_q,
-            schema_revision=schema_revision,
-            drift_bound_min_schema_revision=drift_bound_min_schema_revision,
+            build_features=build_features,
         )
         if exclusion is not None:
             if selected is not None:
@@ -1480,30 +1505,21 @@ def _stationary_suffix(
 def analyze_stationary_tail(
     observations: list[VelocityObservation],
     *,
-    schema_revision: int | None = None,
-    drift_bound_min_schema_revision: int | None = None,
-    suffix_walk_min_schema_revision: int | None = None,
+    build_features: int | None = None,
 ) -> dict[str, int]:
     """Reconstruct the firmware's nested-dyadic stationary tail from raw samples.
 
     This entry point takes raw samples only, with no plan or replay context, so
-    it genuinely cannot know which schema recorded them, or which stage's
-    schema namespace that revision belongs to; callers that know both should
-    pass `schema_revision` and the matching
-    `STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION` or
-    `STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION` explicitly. `None` defaults to
-    the legacy significance-based moving gate (see `_classify_stationarity`).
+    it genuinely cannot resolve the recording firmware's rule contract itself;
+    callers that know it should pass `build_features` (see
+    `capture_rule_features`). `None` defaults to the legacy significance-based
+    moving gate with the historical walk (see `_classify_stationarity`).
     """
     if not observations:
         raise ValueError("stationary-tail analysis requires raw observations")
     if any(item.elapsed_us <= 0 for item in observations):
         raise ValueError("elapsed_us must be positive")
-    return _stationary_suffix(
-        observations[-256:],
-        schema_revision=schema_revision,
-        drift_bound_min_schema_revision=drift_bound_min_schema_revision,
-        suffix_walk_min_schema_revision=suffix_walk_min_schema_revision,
-    )
+    return _stationary_suffix(observations[-256:], build_features=build_features)
 
 
 def analyze_scored_rest_selection(
@@ -2173,18 +2189,14 @@ def _reconstruct_observation(
     the oldest replay path that predates the `stage_b_terminal` record kind
     entirely and so has no schema signal of its own to offer.
 
-    This function always compares against
-    `STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION`, never the Stage C threshold:
+    The rule contract is resolved with `stage="b"`, never Stage C's namespace:
     every `schema_revision` reaching this function is a Stage B revision by
-    construction, so the comparison is fixed here rather than left for
-    callers to (mis)supply.
+    construction, so the namespace is fixed here rather than left for callers to
+    (mis)supply. A newer Stage B plan states `build_features` directly and
+    the passed `schema_revision` is then unused.
     """
-    stationarity = _stationary_suffix(
-        raw[-256:],
-        schema_revision=schema_revision,
-        drift_bound_min_schema_revision=STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION,
-        suffix_walk_min_schema_revision=STAGE_B_SUFFIX_WALK_MIN_SCHEMA_REVISION,
-    )
+    build_features = capture_rule_features(plan, stage="b", schema_revision=schema_revision)
+    stationarity = _stationary_suffix(raw[-256:], build_features=build_features)
     p = int(record["velocity_p"])
     target_velocity_rpm = int(record["target_velocity_rpm"])
     predicted = max(
