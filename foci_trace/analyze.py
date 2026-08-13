@@ -55,14 +55,14 @@ from .velocity_integral import (
     audit_velocity_integral,
 )
 from .velocity_measurement import (
-    STAGE_B_REST_WALK_MIN_SCHEMA_REVISION,
-    STAGE_C_REST_WALK_MIN_SCHEMA_REVISION,
+    BUILD_FEATURE_REST_CHAIN_ON_EVIDENCE,
     VelocityMeasurementReport,
     VelocityObservation,
     analyze_velocity_observations,
     audit_breakaway_campaign,
     audit_stage_b_reproduction_pair,
     audit_velocity_sweep,
+    capture_rule_features,
     velocity_report_to_json,
     verify_scored_rest_selection,
 )
@@ -1987,7 +1987,7 @@ def _attach_rest_selection_audit(
     state: _DeviceState,
     evidence: list[_VelocitySweepEvidenceFrame],
     source_index: int,
-    rest_walk_min_schema_revision: int | None = None,
+    stage: str | None = None,
 ) -> None:
     """Compare each raw-verifiable Event 151 with the 256 samples before it.
 
@@ -1997,13 +1997,33 @@ def _attach_rest_selection_audit(
     all, so they are counted separately in
     `rest_selection_raw_unverifiable_count` and never compared against the
     unrelated window that happens to precede them.
+
+    `stage` selects the schema namespace ("b" or "c") for resolving the
+    recording firmware's rule contract from the plan (see
+    `capture_rule_features`); the scored-rest walk grammar is applied when that
+    contract declares `BUILD_FEATURE_REST_CHAIN_ON_EVIDENCE`. `None` (no stage
+    known) falls back to the historical grammar, matching a capture that offers
+    no rule signal.
+
+    A Stage C plan record states build_features on the wire (protocol decodes
+    it there), so a Stage C rest selection reads the bit directly. A Stage B
+    trace plan record carries no rule-contract marker at all -- neither
+    build_features nor a schema_revision -- so a Stage B rest selection always
+    falls back to the historical grammar. That is correct for the combined flow,
+    whose Stage B runs at COMBINED_STAGE_B_SCHEMA_REVISION (14), below the
+    rest-walk floor of 17, so it never walks. Resolving a breakaway Stage B walk
+    would require build_features on the Stage B plan record, which the wire does
+    not carry; that gap is tracked separately and is not what the combined
+    captures this change targets need.
     """
     plan = report.get("plan")
-    schema_revision = plan.get("schema_revision") if isinstance(plan, dict) else None
-    rest_walk_revision = (
-        schema_revision is not None
-        and rest_walk_min_schema_revision is not None
-        and int(schema_revision) >= rest_walk_min_schema_revision
+    build_features = (
+        capture_rule_features(plan, stage=stage)
+        if stage is not None and isinstance(plan, dict)
+        else None
+    )
+    rest_walk_revision = build_features is not None and bool(
+        build_features & BUILD_FEATURE_REST_CHAIN_ON_EVIDENCE
     )
     mismatches: list[str] = []
     verified = 0
@@ -2118,7 +2138,7 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                 state,
                 evidence,
                 source_index,
-                STAGE_B_REST_WALK_MIN_SCHEMA_REVISION,
+                stage="b",
             )
             companion_stage_c = next(
                 (
@@ -2249,7 +2269,7 @@ def _velocity_integral_audits(states: dict[int, _DeviceState]) -> list[dict[str,
                 state,
                 evidence,
                 source_index,
-                STAGE_C_REST_WALK_MIN_SCHEMA_REVISION,
+                stage="c",
             )
             report["device_index"] = device_index
             report["source_index"] = source_index

@@ -2890,6 +2890,135 @@ def test_event_151_is_verified_against_its_causal_raw_suffixes() -> None:
     assert report["matches_firmware"] is True
 
 
+def test_rest_selection_audit_keys_the_walk_on_build_features(monkeypatch) -> None:
+    """The scored-rest walk gate keys on build_features, not schema revision: a
+    plan whose build_features declares the rest-chain-on-evidence rule verifies
+    under the walk grammar even at a schema below the historical REST_WALK
+    threshold, which is what a newer combined capture (schema 13) needs."""
+    from foci_trace import analyze
+    from foci_trace.velocity_measurement import (
+        BUILD_FEATURE_REST_CHAIN_ON_EVIDENCE,
+        VelocityObservation,
+        analyze_scored_rest_selection,
+    )
+
+    seen: list[bool] = []
+    original = analyze.verify_scored_rest_selection
+
+    def spy(observations, payload, *, rest_walk_revision=False):
+        seen.append(rest_walk_revision)
+        return original(observations, payload, rest_walk_revision=rest_walk_revision)
+
+    monkeypatch.setattr(analyze, "verify_scored_rest_selection", spy)
+
+    state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
+    observations = [VelocityObservation(0, 1_000, 1, 0, 0) for _ in range(256)]
+    state.velocity_observations = [
+        analyze._VelocityFrameObservation(index, 0, observation, 0)
+        for index, observation in enumerate(observations, 1)
+    ]
+    payload = {
+        "record_kind": "rest_selection",
+        "owner": 4,
+        **analyze_scored_rest_selection(observations),
+    }
+    evidence = [analyze._VelocitySweepEvidenceFrame(300, 0, b"", payload)]
+
+    report = {
+        "matches_firmware": True,
+        "mismatches": [],
+        "plan": {"build_features": BUILD_FEATURE_REST_CHAIN_ON_EVIDENCE, "schema_revision": 13},
+    }
+    analyze._attach_rest_selection_audit(report, state, evidence, 0, stage="c")
+
+    assert seen == [True]
+    assert report["rest_selection_verified_count"] == 1
+
+
+def test_stage_b_rest_audit_falls_back_to_historical_grammar() -> None:
+    """A Stage B trace plan carries no rule-contract marker: protocol.py decodes
+    neither build_features nor a schema_revision for the kind-1 Stage B plan. So
+    the scored-rest audit cannot resolve the walk and uses the historical
+    grammar. That is correct for the combined flow, whose Stage B runs at
+    COMBINED_STAGE_B_SCHEMA_REVISION (14), below the rest-walk floor of 17.
+
+    This asserts through the real decode surface -- an actual decoded Stage B
+    plan, with no build_features injected -- so it cannot pass on a state the
+    decoder does not produce."""
+    import struct
+
+    from foci_trace import analyze
+    from foci_trace.protocol import _decode_velocity_sweep_evidence
+    from foci_trace.velocity_measurement import (
+        VelocityObservation,
+        analyze_scored_rest_selection,
+    )
+
+    seen: list[bool] = []
+    original = analyze.verify_scored_rest_selection
+
+    def spy(observations, payload, *, rest_walk_revision=False):
+        seen.append(rest_walk_revision)
+        return original(observations, payload, rest_walk_revision=rest_walk_revision)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(analyze, "verify_scored_rest_selection", spy)
+
+        state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
+        observations = [VelocityObservation(0, 1_000, 1, 0, 0) for _ in range(256)]
+        state.velocity_observations = [
+            analyze._VelocityFrameObservation(index, 0, observation, 0)
+            for index, observation in enumerate(observations, 1)
+        ]
+        payload = {
+            "record_kind": "rest_selection",
+            "owner": 4,
+            **analyze_scored_rest_selection(observations),
+        }
+        evidence = [analyze._VelocitySweepEvidenceFrame(300, 0, b"", payload)]
+
+        # A real decoded Stage B plan (kind 1, 78-byte shape): it carries a
+        # plan_digest and velocities but no build_features and no
+        # schema_revision, exactly as the decoder produces from the wire.
+        plan_values = (
+            7,
+            0,
+            0x0105_C518,
+            0x53E2_5AF6,
+            5_000,
+            1,
+            4_800,
+            7_500,
+            1,
+            0,
+            288,
+            8,
+            128,
+            5,
+            2,
+            256_000,
+            200_000,
+            9_120,
+            10_000,
+            1_000,
+            250,
+            1_250,
+            1_250,
+            1_000,
+            900,
+        )
+        plan_payload = bytes([1]) + struct.pack("<IHIIIBIIHBiHHBHIIIIIIIIHH", *plan_values)
+        plan = _decode_velocity_sweep_evidence(plan_payload)
+        assert plan["record_kind"] == "plan"
+        assert "build_features" not in plan
+        assert "schema_revision" not in plan
+
+        report = {"matches_firmware": True, "mismatches": [], "plan": plan}
+        analyze._attach_rest_selection_audit(report, state, evidence, 0, stage="b")
+
+    assert seen == [False]
+
+
 @pytest.mark.parametrize("recovery_owner", (1, 2, 5, 8))
 def test_recovery_event_151_cannot_consume_the_preceding_observations_window(
     recovery_owner: int,
