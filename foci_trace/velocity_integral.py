@@ -2063,9 +2063,9 @@ def audit_velocity_integral(
     if schema_revision >= _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION:
         # `plan.combined_workflow` (integral_plan.rs:508) is exactly
         # `combined_selected_response.is_some()`, and which workflow built the
-        # plan is fixed by the schema revision: 8 through 13 are combined, 14
+        # plan is fixed by the schema revision: 8 through 13 are combined, 16
         # is breakaway. Schema >= 8 alone therefore does *not* mean combined --
-        # a schema-14 breakaway run is a standalone Stage C and must not be
+        # a schema-16 breakaway run is a standalone Stage C and must not be
         # held to combined-terminal semantics -- but neither does the presence
         # of the field decide it. Taking the workflow from the schema, after
         # `_validate_plan` has confirmed the plan's own field agrees, is what

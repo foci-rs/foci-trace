@@ -64,6 +64,19 @@ def _schema_two_plan() -> dict[str, object]:
     return plan
 
 
+def _matrix_plan_fixture(*, acceptance_schema_revision: int) -> dict[str, object]:
+    """`_plan()` with `acceptance_schema_revision` overridden.
+
+    `matrix_plan_digest` hashes `acceptance_schema_revision` value-agnostically
+    (`acceptance_matrix.py:55-60`), so changing it changes the encoded bytes and
+    therefore the digest; callers must supply the digest expected for that
+    schema rather than reuse the schema-10 constant.
+    """
+    plan = _plan()
+    plan["acceptance_schema_revision"] = acceptance_schema_revision
+    return plan
+
+
 def _observations(
     intervals: list[tuple[int, int]],
     means: list[int],
@@ -102,6 +115,29 @@ def test_plan_digest_is_sensitive_to_order_and_exact_targets() -> None:
     descending["order"] = 2
     descending["target_rpm"] = list(reversed(plan["target_rpm"]))
     assert matrix_plan_digest(descending) != matrix_plan_digest(plan)
+
+
+def test_matrix_plan_digest_accepts_breakaway_acceptance_identity() -> None:
+    """A breakaway (`acceptance_schema_revision=16`) matrix plan decodes with
+    no code change: `matrix_plan_digest` hashes the field value-agnostically."""
+    plan = _matrix_plan_fixture(acceptance_schema_revision=16)
+    plan["plan_digest"] = 0x5CAA_1C5A_DEE3_EC99
+
+    assert matrix_plan_digest(plan) == plan["plan_digest"]
+
+
+def test_matrix_plan_digest_still_accepts_legacy_combined_identity() -> None:
+    """Archived combined captures (Stage C spans schema 8-13; the fixture
+    baseline is 10) must keep decoding byte-identically alongside breakaway."""
+    expected_digests = {
+        10: 0x2618_AA16_E7C5_77C3,  # matches the schema-10 baseline fixture
+        13: 0xFBAC_7BDD_0EE2_262E,
+    }
+    for legacy, digest in expected_digests.items():
+        plan = _matrix_plan_fixture(acceptance_schema_revision=legacy)
+        plan["plan_digest"] = digest
+
+        assert matrix_plan_digest(plan) == plan["plan_digest"]
 
 
 def test_schema_two_digest_and_execution_marker_bind_recovery_authority() -> None:
