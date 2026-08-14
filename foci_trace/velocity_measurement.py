@@ -44,8 +44,14 @@ NO_REPORTABLE_DRIFT_RATIO_PPM = 0xFFFFFFFF
 # against the Stage C threshold (or vice versa) would silently apply the
 # wrong gate to real captures. Each call site must pass the threshold that
 # matches the schema namespace its `schema_revision` was drawn from.
-STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION = 14  # tracks firmware's COMBINED_STAGE_B_SCHEMA_REVISION
-STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION = 13  # tracks firmware's COMBINED_STAGE_C_SCHEMA_REVISION
+#
+# Decode-only mirror: firmware renamed both constants off the
+# "combined" name (`COMBINED_STAGE_B_SCHEMA_REVISION` ->
+# `STAGE_B_PLAN_SCHEMA_REVISION`, `COMBINED_STAGE_C_SCHEMA_REVISION` ->
+# `STAGE_C_PLAN_SCHEMA_REVISION`; foci-firmware commit 5fdef92). Firmware no
+# longer defines the old names below; the values (14, 13) are unchanged.
+STAGE_B_DRIFT_BOUND_MIN_SCHEMA_REVISION = 14  # firmware: STAGE_B_PLAN_SCHEMA_REVISION
+STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION = 13  # firmware: STAGE_C_PLAN_SCHEMA_REVISION
 
 # First revision whose walk continues past a rejected window instead of ending
 # there: firmware's BREAKAWAY_STAGE_B/C_SCHEMA_REVISION. Every earlier revision,

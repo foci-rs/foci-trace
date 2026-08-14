@@ -40,6 +40,11 @@ _PLAN_PROBE_CONSTRAINED_TEST_POINT = 1 << 1
 _PLAN_SLOT_ORDER_SHIFT = 2
 _PLAN_SLOT_ORDER_MASK = 0b11 << _PLAN_SLOT_ORDER_SHIFT
 
+# Decode-only mirror of firmware's `IntegralSlotOrder` discriminants.
+# The `ReverseFirst`/`PairedOutAndBack` variants were deleted
+# outright (foci-firmware commit 77a204d proved both unproducible by any
+# surviving plan); firmware no longer defines these two. They stay here only
+# so archived pre-removal captures that recorded them still decode.
 SLOT_ORDER_FORWARD_FIRST = 0
 SLOT_ORDER_REVERSE_FIRST = 1
 SLOT_ORDER_PAIRED_OUT_AND_BACK = 2
@@ -66,9 +71,14 @@ _U128_MAX = (1 << 128) - 1
 #         None`.
 #   _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION through
 #   _COMBINED_STAGE_C_SCHEMA_REVISION
-#         the combined P-then-I workflow (`combined_plan.rs:20,22`).
-#         `plan_combined_velocity_integral_response` is the only builder in
-#         that range and it always supplies `Some(selected)`.
+#         the combined P-then-I workflow. Decode-only mirror: firmware
+#         deleted `plan_combined_velocity_integral_response` and the
+#         `combined_selected_response` field it populated, and deleted
+#         `FIRST_COMBINED_STAGE_C_SCHEMA_REVISION` outright; its sibling
+#         survives renamed to `STAGE_C_PLAN_SCHEMA_REVISION` (value
+#         unchanged, 13). Firmware no longer defines this workflow; these
+#         two constants exist here only so archived schema-8-to-13 captures
+#         keep decoding.
 #   above the combined range, through _BREAKAWAY_STAGE_C_SCHEMA_REVISION
 #         the breakaway-seeded campaign (`combined_plan.rs:40`), planned by
 #         `plan_breakaway_velocity_integral_response` with
@@ -167,13 +177,15 @@ def stage_c_schema_is_known(schema_revision: int) -> bool:
 def stage_c_combined_workflow(schema_revision: int) -> bool:
     """Return whether one Stage-C schema revision is a combined P-then-I run.
 
-    This is the offline equivalent of firmware's
-    `VelocityIntegralExecutionPlan::combined_workflow`
-    (`combined_selected_response.is_some()`, `integral_plan.rs:508`), derived
-    from the schema revision rather than from the capture's own field so a
-    capture cannot declare its own workflow. Schemas 8 through 13 are the
-    combined range; 7 and below are standalone and 14 is the breakaway
-    campaign, neither of which carries a combined selected response.
+    Decode-only mirror: firmware deleted
+    `VelocityIntegralExecutionPlan::combined_workflow` field and the
+    `combined_selected_response` it was derived from, so firmware no longer
+    defines the predicate this function used to equal. It survives here,
+    derived from the schema revision rather than from the capture's own
+    field so a capture cannot declare its own workflow. Schemas 8 through 13
+    are the combined range; 7 and below are standalone and 14 is the
+    breakaway campaign, neither of which carries a combined selected
+    response.
     """
     return (
         _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION
