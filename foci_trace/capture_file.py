@@ -114,7 +114,12 @@ class CaptureReader:
             if header == b"":
                 return
             if len(header) != RECORD_HEADER_LEN:
-                raise ValueError("truncated record header")
+                # A SIGTERM-terminated (or otherwise killed) recorder can cut the
+                # final record mid-header, exactly as it can mid-payload below. A
+                # short header read means the stream ended, so stop cleanly and
+                # keep every complete record before it rather than discarding the
+                # whole capture.
+                return
             (
                 magic,
                 version,
