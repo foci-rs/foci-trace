@@ -581,6 +581,24 @@ def test_new_run_progress_sequence_skips_mechanical_id_phase() -> None:
         arg2=PHASE_VELOCITY_TUNE,
         arg3=1,
     )
+    _observe_event(
+        builder,
+        7,
+        7_000,
+        EVENT_COMMISSION_PHASE_END,
+        engine_kind=ENGINE_OUTER_TUNE,
+        arg2=PHASE_VELOCITY_TUNE,
+        arg3=STATUS_ACCEPTED,
+    )
+    _observe_event(
+        builder,
+        8,
+        8_000,
+        EVENT_COMMISSION_ENGINE_TERMINAL,
+        engine_kind=ENGINE_OUTER_TUNE,
+        arg2=STATUS_ACCEPTED,
+        arg3=2,
+    )
 
     report = builder.finalize({0: CLOCK_HZ})
     data = commissioning_report_to_json(report)
@@ -589,3 +607,7 @@ def test_new_run_progress_sequence_skips_mechanical_id_phase() -> None:
     assert phase_ids == [PHASE_INNER_DONE, PHASE_VELOCITY_TUNE]
     assert PHASE_MECHANICAL_ID not in phase_ids
     assert not any(run["summaries"] for run in data["runs"])
+    assert not report.caveats
+    assert all(not run["caveats"] for run in data["runs"])
+    assert all(not phase["caveats"] for run in data["runs"] for phase in run["phases"])
+    assert all(run["result"] == "accepted" for run in data["runs"])
