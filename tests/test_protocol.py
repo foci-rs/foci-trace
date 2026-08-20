@@ -3,6 +3,11 @@ import struct
 import pytest
 
 from foci_trace.protocol import (
+    COMMISSION_STATUS_NAMES,
+    EVENT_COMMISSION_MECHANICAL_ID_ATTEMPT,
+    EVENT_COMMISSION_MECHANICAL_ID_CLASSIFICATION,
+    EVENT_COMMISSION_MECHANICAL_ID_RESPONSE,
+    EVENT_COMMISSION_MECHANICAL_ID_RESULT,
     FRAME_TYPE_CONTROL_DETAIL,
     FRAME_TYPE_CRITICAL,
     FRAME_TYPE_CURRENT_PATH,
@@ -11,6 +16,7 @@ from foci_trace.protocol import (
     FRAME_TYPE_PHASE_ADVANCE,
     FRAME_TYPE_VELOCITY_OBSERVATION,
     FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
+    PHASE_NAMES,
     PROTOCOL_VERSION,
     SUPPORTED_PROTOCOL_VERSIONS,
     VELOCITY_OBSERVATION_FLAG_PID_VELOCITY_ACTUAL_VALID,
@@ -1953,6 +1959,37 @@ def test_decode_commissioning_event_names() -> None:
     ),
 )
 def test_decode_velocity_integral_response_event_names(event_id: int, event_name: str) -> None:
+    payload = struct.pack("<BBHBxxxiiii", 1, 7, event_id, 2, 15, 4, 0, 0)
+
+    frame = decode_frame(_header(FRAME_TYPE_EVENT, payload) + payload)
+
+    assert frame.payload["event_name"] == event_name
+
+
+def test_historical_mechanical_id_constants_are_reserved_not_reused() -> None:
+    """MechanicalId phase, status, and event ids are retired from production
+    firmware but archived captures still contain them. Pin the
+    exact values so a future id reassignment cannot silently corrupt old
+    captures.
+    """
+    assert PHASE_NAMES[9] == "MechanicalId"
+    assert COMMISSION_STATUS_NAMES[10] == "mechanical_id_failed"
+    assert EVENT_COMMISSION_MECHANICAL_ID_RESULT == 110
+    assert EVENT_COMMISSION_MECHANICAL_ID_ATTEMPT == 111
+    assert EVENT_COMMISSION_MECHANICAL_ID_RESPONSE == 112
+    assert EVENT_COMMISSION_MECHANICAL_ID_CLASSIFICATION == 113
+
+
+@pytest.mark.parametrize(
+    ("event_id", "event_name"),
+    (
+        (110, "commission_mechanical_id_result"),
+        (111, "commission_mechanical_id_attempt"),
+        (112, "commission_mechanical_id_response"),
+        (113, "commission_mechanical_id_classification"),
+    ),
+)
+def test_decode_historical_mechanical_id_event_names(event_id: int, event_name: str) -> None:
     payload = struct.pack("<BBHBxxxiiii", 1, 7, event_id, 2, 15, 4, 0, 0)
 
     frame = decode_frame(_header(FRAME_TYPE_EVENT, payload) + payload)

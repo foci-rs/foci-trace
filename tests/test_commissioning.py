@@ -8,6 +8,10 @@ from foci_trace.commissioning import (
 from foci_trace.protocol import (
     EVENT_COMMISSION_ENGINE_START,
     EVENT_COMMISSION_ENGINE_TERMINAL,
+    EVENT_COMMISSION_MECHANICAL_ID_ATTEMPT,
+    EVENT_COMMISSION_MECHANICAL_ID_CLASSIFICATION,
+    EVENT_COMMISSION_MECHANICAL_ID_RESPONSE,
+    EVENT_COMMISSION_MECHANICAL_ID_RESULT,
     EVENT_COMMISSION_PHASE_END,
     EVENT_COMMISSION_PHASE_START,
     EVENT_COMMISSION_VELOCITY_SWEEP_PLAN,
@@ -29,9 +33,13 @@ SOURCE_KIND_FOCI = 1
 SOURCE_KIND_BOARD = 0
 ENGINE_COMMISSION = 1
 ENGINE_OUTER_TUNE = 4
+PHASE_INNER_DONE = 8
+PHASE_MECHANICAL_ID = 9
+PHASE_VELOCITY_TUNE = 10
 PHASE_CLOSED_LOOP_ENTRY = 17
 PHASE_VELOCITY_VALIDATE = 11
 STATUS_ACCEPTED = 0
+STATUS_MECHANICAL_ID_FAILED = 10
 STATUS_VELOCITY_VALIDATION_FAILED = 11
 
 
@@ -458,3 +466,126 @@ def test_partial_capture_reports_caveat_without_crashing() -> None:
     assert "missing phase_end" in text
     assert data["runs"][0]["caveats"]
     assert data["runs"][0]["phases"][0]["critical_samples"] == 3
+
+
+def test_historical_mechanical_id_events_still_decode_into_summary_fragments() -> None:
+    """MechanicalId events 110-113 are retired from production firmware,
+    but archived captures that contain them must still resolve
+    into mechanical_id_summary fragments.
+    """
+    builder = CommissioningCaptureBuilder()
+    _observe_event(builder, 1, 1_000, EVENT_COMMISSION_ENGINE_START, arg2=1, arg3=1)
+    _observe_event(
+        builder,
+        2,
+        2_000,
+        EVENT_COMMISSION_PHASE_START,
+        arg2=PHASE_MECHANICAL_ID,
+        arg3=1,
+    )
+    for event_id, value in (
+        (EVENT_COMMISSION_MECHANICAL_ID_RESULT, STATUS_MECHANICAL_ID_FAILED),
+        (EVENT_COMMISSION_MECHANICAL_ID_ATTEMPT, 1),
+        (EVENT_COMMISSION_MECHANICAL_ID_RESPONSE, 2),
+        (EVENT_COMMISSION_MECHANICAL_ID_CLASSIFICATION, 3),
+    ):
+        _observe_event(
+            builder,
+            10 + event_id,
+            3_000 + event_id,
+            event_id,
+            arg2=1,
+            arg3=value,
+        )
+    _observe_event(
+        builder,
+        3,
+        80_000,
+        EVENT_COMMISSION_PHASE_END,
+        arg2=PHASE_MECHANICAL_ID,
+        arg3=STATUS_MECHANICAL_ID_FAILED,
+    )
+    _observe_event(
+        builder,
+        4,
+        81_000,
+        EVENT_COMMISSION_ENGINE_TERMINAL,
+        arg2=STATUS_MECHANICAL_ID_FAILED,
+        arg3=1,
+    )
+
+    report = builder.finalize({0: CLOCK_HZ})
+    text = format_commissioning_report(report)
+    data = commissioning_report_to_json(report)
+    run = data["runs"][0]
+
+    assert "phase MechanicalId" in text
+    assert "result=mechanical_id_failed" in text
+    assert run["result"] == "mechanical_id_failed"
+    assert run["summaries"][0]["family"] == "mechanical_id_summary"
+    assert {fragment["fragment"] for fragment in run["summaries"][0]["fragments"]} == {
+        "result",
+        "attempt",
+        "response",
+        "classification",
+    }
+
+
+def test_new_run_progress_sequence_skips_mechanical_id_phase() -> None:
+    """New captures never emit MechanicalId: the inner engine ends
+    at InnerDone (phase 8) and a separate outer engine's next phase is
+    VelocityTune (phase 10), with phase 9 never appearing and no
+    mechanical_id_summary in the report.
+    """
+    builder = CommissioningCaptureBuilder()
+    _observe_event(builder, 1, 1_000, EVENT_COMMISSION_ENGINE_START, arg2=1, arg3=1)
+    _observe_event(
+        builder,
+        2,
+        2_000,
+        EVENT_COMMISSION_PHASE_START,
+        arg2=PHASE_INNER_DONE,
+        arg3=1,
+    )
+    _observe_event(
+        builder,
+        3,
+        3_000,
+        EVENT_COMMISSION_PHASE_END,
+        arg2=PHASE_INNER_DONE,
+        arg3=STATUS_ACCEPTED,
+    )
+    _observe_event(
+        builder,
+        4,
+        4_000,
+        EVENT_COMMISSION_ENGINE_TERMINAL,
+        arg2=STATUS_ACCEPTED,
+        arg3=1,
+    )
+    _observe_event(
+        builder,
+        5,
+        5_000,
+        EVENT_COMMISSION_ENGINE_START,
+        engine_kind=ENGINE_OUTER_TUNE,
+        arg2=1,
+        arg3=2,
+    )
+    _observe_event(
+        builder,
+        6,
+        6_000,
+        EVENT_COMMISSION_PHASE_START,
+        engine_kind=ENGINE_OUTER_TUNE,
+        arg2=PHASE_VELOCITY_TUNE,
+        arg3=1,
+    )
+
+    report = builder.finalize({0: CLOCK_HZ})
+    data = commissioning_report_to_json(report)
+
+    phase_ids = [phase["phase_id"] for run in data["runs"] for phase in run["phases"]]
+    assert phase_ids == [PHASE_INNER_DONE, PHASE_VELOCITY_TUNE]
+    assert PHASE_MECHANICAL_ID not in phase_ids
+    assert not any(run["summaries"] for run in data["runs"])

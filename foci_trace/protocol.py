@@ -59,6 +59,9 @@ EVENT_COMMISSION_ENGINE_START = 100
 EVENT_COMMISSION_PHASE_START = 101
 EVENT_COMMISSION_PHASE_END = 102
 EVENT_COMMISSION_ENGINE_TERMINAL = 103
+# Reserved, historical-only: production firmware no longer emits these events.
+# Keep the ids stable and decodable so archived MechanicalId captures still
+# decode; do not reuse 110-113 for anything else.
 EVENT_COMMISSION_MECHANICAL_ID_RESULT = 110
 EVENT_COMMISSION_MECHANICAL_ID_ATTEMPT = 111
 EVENT_COMMISSION_MECHANICAL_ID_RESPONSE = 112
@@ -147,6 +150,8 @@ _COMMISSIONING_EVENT_NAMES = {
     EVENT_COMMISSION_PHASE_START: "commission_phase_start",
     EVENT_COMMISSION_PHASE_END: "commission_phase_end",
     EVENT_COMMISSION_ENGINE_TERMINAL: "commission_engine_terminal",
+    # Reserved, historical-only: retained so archived MechanicalId captures
+    # still decode; production firmware no longer emits these.
     EVENT_COMMISSION_MECHANICAL_ID_RESULT: "commission_mechanical_id_result",
     EVENT_COMMISSION_MECHANICAL_ID_ATTEMPT: "commission_mechanical_id_attempt",
     EVENT_COMMISSION_MECHANICAL_ID_RESPONSE: "commission_mechanical_id_response",
@@ -210,7 +215,7 @@ PHASE_NAMES = {
     6: "CurrentTune",
     7: "CurrentValidate",
     8: "InnerDone",
-    9: "MechanicalId",
+    9: "MechanicalId",  # Reserved, historical-only; new captures never emit this phase.
     10: "VelocityTune",
     11: "VelocityValidate",
     12: "PositionTune",
@@ -232,7 +237,7 @@ COMMISSION_STATUS_NAMES = {
     7: "encoder_fault",
     8: "electrical_id_failed",
     9: "current_validation_failed",
-    10: "mechanical_id_failed",
+    10: "mechanical_id_failed",  # Reserved, historical-only; new captures never emit this status.
     11: "velocity_validation_failed",
     12: "position_tune_failed",
     13: "encoder_not_aligned",

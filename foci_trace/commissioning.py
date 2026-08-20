@@ -52,6 +52,8 @@ ENGINE_KIND_NAMES = {
 }
 
 SUMMARY_FAMILIES = {
+    # Reserved, historical-only: MechanicalId summary fragments only appear in
+    # archived captures; production firmware no longer emits events 110-113.
     EVENT_COMMISSION_MECHANICAL_ID_RESULT: ("mechanical_id_summary", "result"),
     EVENT_COMMISSION_MECHANICAL_ID_ATTEMPT: ("mechanical_id_summary", "attempt"),
     EVENT_COMMISSION_MECHANICAL_ID_RESPONSE: ("mechanical_id_summary", "response"),
