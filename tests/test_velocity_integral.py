@@ -948,6 +948,7 @@ def _stage_c_rest_selection_record(
         "selected_mask": values["selected_mask"],
         "selected_suffix_len": values["selected_suffix_len"],
         "disposition": values["disposition"],
+        "retained_sample_count": None,
         "intervals_q": [
             [values["interval_0_low"], values["interval_0_high"]],
             [values["interval_1_low"], values["interval_1_high"]],

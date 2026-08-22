@@ -1838,7 +1838,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 )
             )
             decoded["record_kind"] = "reproduction_v3_header"
-    elif kind == 11 and len(payload) == 78:
+    elif kind == 11 and len(payload) in (78, 80):
         decoded = _take_fields(
             cursor,
             (
@@ -1866,6 +1866,9 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ),
             )
         )
+        # Retained-sample-count instrumentation shipped after the original
+        # 78-byte record; older captures carry no such field.
+        decoded["retained_sample_count"] = cursor.take("H") if len(payload) == 80 else None
         decoded["intervals_q"] = [[cursor.take("q"), cursor.take("q")] for _ in range(3)]
 
         stage = int(decoded["stage"])
@@ -1899,7 +1902,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             bit = 1 << index
             if code == 5:
                 raise DecodeError("scored-rest arithmetic result cannot be serialized")
-            if code not in range(5):
+            if code not in (0, 1, 2, 3, 4, 6):
                 raise DecodeError("scored-rest structural code is invalid")
             interval_expected = code in (0, 3, 4)
             if interval_expected:

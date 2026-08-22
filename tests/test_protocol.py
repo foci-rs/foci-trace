@@ -982,6 +982,7 @@ def test_decodes_exact_scored_rest_selection_record() -> None:
         "selected_mask": 0b010,
         "selected_suffix_len": 128,
         "disposition": 0,
+        "retained_sample_count": None,
         "intervals_q": [[-9, 0], [-17, 29], [31, 47]],
         "conditioned_rest_evidence": True,
     }
@@ -1022,6 +1023,78 @@ def test_decodes_noncontiguous_scored_rest_selection_record() -> None:
     assert frame.payload["zero_compatible_mask"] == 0b101
     assert frame.payload["selected_mask"] == 0b100
     assert frame.payload["selected_suffix_len"] == 256
+
+
+def test_decodes_scored_rest_selection_record_with_retained_sample_count() -> None:
+    payload = struct.pack(
+        "<BIHBBBBBQ3B4BHBH6q",
+        11,
+        0x0102_0304,
+        0x0506,
+        1,
+        4,
+        7,
+        1,
+        0xFF,
+        0x1122_3344_5566_7788,
+        0,
+        6,
+        6,
+        0b001,
+        0b001,
+        0b001,
+        0b001,
+        64,
+        0,
+        100,
+        -9,
+        0,
+        0,
+        0,
+        0,
+        0,
+    )
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert len(payload) == 80
+    assert frame.payload["structural_codes"] == [0, 6, 6]
+    assert frame.payload["retained_sample_count"] == 100
+
+
+def test_legacy_scored_rest_selection_record_has_no_retained_sample_count() -> None:
+    payload = struct.pack(
+        "<BIHBBBBBQ3B4BHB6q",
+        11,
+        0x0102_0304,
+        0x0506,
+        1,
+        4,
+        7,
+        1,
+        0xFF,
+        0x1122_3344_5566_7788,
+        0,
+        0,
+        3,
+        0b111,
+        0b011,
+        0b011,
+        0b010,
+        128,
+        0,
+        -9,
+        0,
+        -17,
+        29,
+        31,
+        47,
+    )
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert len(payload) == 78
+    assert frame.payload["retained_sample_count"] is None
 
 
 @pytest.mark.parametrize(
