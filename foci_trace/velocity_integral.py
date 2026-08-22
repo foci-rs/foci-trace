@@ -53,8 +53,24 @@ _TERMINAL_RECOVERY_UNAVAILABLE = 1 << 0
 _TERMINAL_RECOVERED_WITH_CURRENT_HEADROOM = 1 << 1
 _TERMINAL_RECOVERY_QUANTIZATION_EXPOSED = 1 << 2
 _TERMINAL_PROBE_CONSTRAINED_TEST_POINT = 1 << 3
+# Schema 7 only. `_TERMINAL_COMBINED_TARGET_MASK`/`_TERMINAL_COMBINED_WORKFLOW`
+# below reuse these exact same bit positions (4-6 and 7) for the retired
+# combined-workflow schema (>= 8) -- that overlap is deliberate and safe only
+# because firmware's live schema is fixed at 7 today and these two meanings
+# are gated on disjoint, exact schema-revision checks (`== 7` here, `>= 8`
+# below), never both at once for a given capture.
+_TERMINAL_REST_REJECTION_AFTER_SUFFICIENCY = 1 << 4
+_TERMINAL_REST_REJECTION_OWNER_SHIFT = 5
+_TERMINAL_REST_REJECTION_OWNER_MASK = 0b11 << _TERMINAL_REST_REJECTION_OWNER_SHIFT
 _TERMINAL_COMBINED_TARGET_MASK = 0b111 << 4
 _TERMINAL_COMBINED_WORKFLOW = 1 << 7
+
+_REST_REJECTION_OWNER_NAMES = {
+    0b00: "stage_c_anchor",
+    0b01: "stage_c_positive_observation",
+    0b10: "stage_c_recovery",
+    0b11: "stage_c_cleanup",
+}
 _SLOT_TRANSITION_ALLOWANCE_US = 20_000
 _RECOVERY_STABILIZATION_US = 500_000
 _STABILIZED_RECOVERY_SCHEDULE_CODE = 1
@@ -1310,6 +1326,8 @@ def _audit_failed_stage_c_admission(
     decoded_terminal["recovered_with_current_headroom"] = False
     decoded_terminal["recovery_quantization_exposed"] = False
     decoded_terminal["probe_constrained_test_point"] = True
+    decoded_terminal["rest_rejection_after_sufficiency"] = False
+    decoded_terminal["rest_rejection_owner"] = None
     return {
         "run_sequence": int(terminal.get("run_sequence", 0)),
         "plan": None,
@@ -1727,6 +1745,10 @@ def audit_velocity_integral(
         )
         if schema_revision >= 7:
             known_flags |= _TERMINAL_PROBE_CONSTRAINED_TEST_POINT
+        if schema_revision == 7:
+            known_flags |= (
+                _TERMINAL_REST_REJECTION_AFTER_SUFFICIENCY | _TERMINAL_REST_REJECTION_OWNER_MASK
+            )
         if schema_revision >= 8:
             known_flags |= _TERMINAL_COMBINED_TARGET_MASK | _TERMINAL_COMBINED_WORKFLOW
         if recovery_flags < 0 or recovery_flags & ~known_flags:
@@ -1741,6 +1763,21 @@ def audit_velocity_integral(
             terminal["recovery_quantization_exposed"] = bool(
                 recovery_flags & _TERMINAL_RECOVERY_QUANTIZATION_EXPOSED
             )
+            if schema_revision == 7:
+                terminal["rest_rejection_after_sufficiency"] = bool(
+                    recovery_flags & _TERMINAL_REST_REJECTION_AFTER_SUFFICIENCY
+                )
+                terminal["rest_rejection_owner"] = (
+                    _REST_REJECTION_OWNER_NAMES[
+                        (recovery_flags & _TERMINAL_REST_REJECTION_OWNER_MASK)
+                        >> _TERMINAL_REST_REJECTION_OWNER_SHIFT
+                    ]
+                    if terminal["rest_rejection_after_sufficiency"]
+                    else None
+                )
+            else:
+                terminal["rest_rejection_after_sufficiency"] = False
+                terminal["rest_rejection_owner"] = None
             terminal["probe_constrained_test_point"] = bool(
                 recovery_flags & _TERMINAL_PROBE_CONSTRAINED_TEST_POINT
             )

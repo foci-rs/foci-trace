@@ -12,6 +12,9 @@ from foci_trace.capture_file import RECORD_TYPE_FIRMWARE_FRAME, CaptureReader
 from foci_trace.protocol import FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, decode_frame
 from foci_trace.velocity_integral import (
     _PLAN_SLOT_ORDER_SHIFT,
+    _TERMINAL_PROBE_CONSTRAINED_TEST_POINT,
+    _TERMINAL_REST_REJECTION_AFTER_SUFFICIENCY,
+    _TERMINAL_REST_REJECTION_OWNER_SHIFT,
     SLOT_ORDER_FORWARD_FIRST,
     SLOT_ORDER_PAIRED_OUT_AND_BACK,
     SLOT_ORDER_REVERSE_FIRST,
@@ -2254,6 +2257,46 @@ def test_schema_seven_reconstructs_selected_test_point_and_qualifiers() -> None:
     assert response["terminal"]["probe_constrained_test_point"] is True
 
 
+def test_schema_seven_decodes_rest_rejection_after_sufficiency_and_owner() -> None:
+    raw, records = _synthetic_complete_capture(schema_revision=7)
+    terminal_record = records[-1][1]
+    assert terminal_record["record_kind"] == "integral_terminal"
+    terminal_record["recovery_flags"] = (
+        _TERMINAL_PROBE_CONSTRAINED_TEST_POINT
+        | _TERMINAL_REST_REJECTION_AFTER_SUFFICIENCY
+        | (0b10 << _TERMINAL_REST_REJECTION_OWNER_SHIFT)
+    )
+
+    response = audit_velocity_integral(raw, records)
+
+    assert response["matches_firmware"] is True
+    assert response["terminal"]["rest_rejection_after_sufficiency"] is True
+    assert response["terminal"]["rest_rejection_owner"] == "stage_c_recovery"
+
+
+def test_schema_seven_rest_rejection_owner_is_none_when_flag_clear() -> None:
+    raw, records = _synthetic_complete_capture(schema_revision=7)
+    terminal_record = records[-1][1]
+    terminal_record["recovery_flags"] = _TERMINAL_PROBE_CONSTRAINED_TEST_POINT
+
+    response = audit_velocity_integral(raw, records)
+
+    assert response["matches_firmware"] is True
+    assert response["terminal"]["rest_rejection_after_sufficiency"] is False
+    assert response["terminal"]["rest_rejection_owner"] is None
+
+
+def test_schema_seven_flags_bit_seven_as_reserved() -> None:
+    raw, records = _synthetic_complete_capture(schema_revision=7)
+    terminal_record = records[-1][1]
+    terminal_record["recovery_flags"] = _TERMINAL_PROBE_CONSTRAINED_TEST_POINT | (1 << 7)
+
+    response = audit_velocity_integral(raw, records)
+
+    assert response["matches_firmware"] is False
+    assert any("reserved bits" in mismatch for mismatch in response["mismatches"])
+
+
 def test_schema_seven_audits_terminal_only_failed_admission_without_a_plan() -> None:
     terminal = {
         "record_kind": "integral_terminal",
@@ -2282,6 +2325,8 @@ def test_schema_seven_audits_terminal_only_failed_admission_without_a_plan() -> 
     assert response["complete"] is False
     assert response["plan"] is None
     assert response["terminal"]["probe_constrained_test_point"] is True
+    assert response["terminal"]["rest_rejection_after_sufficiency"] is False
+    assert response["terminal"]["rest_rejection_owner"] is None
     assert response["interpretation"] == "firmware-schema-7"
 
 
