@@ -53,6 +53,16 @@ pub enum ReaderStartup {
     Failed,
 }
 
+/// When a trace reader thread should stop reading.
+#[derive(Debug, Clone, Copy)]
+struct StopPolicy {
+    /// Optional hard ceiling, independent of any stop signal.
+    deadline: Option<Instant>,
+    /// Grace period to keep reading past a stop signal, to drain frames
+    /// still in flight over USB when the signal arrives.
+    drain: Duration,
+}
+
 #[derive(Debug, Default)]
 struct ReaderCounters {
     channel_drops: u64,
@@ -132,8 +142,11 @@ pub fn run_record(args: RecordArgs) -> Result<(), RecordError> {
 
     let (tx, rx) = crossbeam_channel::bounded(4096);
     let (startup_tx, startup_rx) = crossbeam_channel::bounded(devices.len());
-    let deadline =
-        (args.duration_s > 0.0).then(|| Instant::now() + Duration::from_secs_f64(args.duration_s));
+    let stop_policy = StopPolicy {
+        deadline: (args.duration_s > 0.0)
+            .then(|| Instant::now() + Duration::from_secs_f64(args.duration_s)),
+        drain: Duration::from_secs_f64(args.drain_s.max(0.0)),
+    };
     let reader_count = devices.len();
     let mut handles = Vec::new();
     for (index, device) in devices.into_iter().enumerate() {
@@ -146,7 +159,7 @@ pub fn run_record(args: RecordArgs) -> Result<(), RecordError> {
                 u16::try_from(index).expect("trace device index fits u16"),
                 device,
                 packet_size,
-                deadline,
+                stop_policy,
                 clock,
                 tx,
                 startup_tx,
@@ -254,11 +267,38 @@ fn warmup(devices: &mut [OpenTraceDevice], packet_size: usize, warmup_s: f64) {
     }
 }
 
+/// Decide whether a trace reader thread should stop this iteration.
+///
+/// A stop signal does not stop reading immediately: the firmware's trace
+/// queue can still have frames in flight over USB at the instant a caller
+/// signals this process (e.g. right when a wrapped command's response
+/// returns), so reading continues for `drain` past the first observed stop
+/// request to catch them, mirroring the pre-roll `warmup` on the other end
+/// of a capture. A duration-based `deadline` stops reading regardless of any
+/// stop signal.
+fn should_stop_reading(
+    stop_requested: bool,
+    stop_observed_at: &mut Option<Instant>,
+    deadline: Option<Instant>,
+    drain: Duration,
+    now: Instant,
+) -> bool {
+    if stop_requested && stop_observed_at.is_none() {
+        *stop_observed_at = Some(now);
+    }
+    if let Some(observed) = *stop_observed_at
+        && now >= observed + drain
+    {
+        return true;
+    }
+    deadline.is_some_and(|deadline| now >= deadline)
+}
+
 fn read_device_loop(
     device_index: u16,
     device: OpenTraceDevice,
     packet_size: usize,
-    deadline: Option<Instant>,
+    stop_policy: StopPolicy,
     clock: CaptureClock,
     tx: Sender<CapturedFrame>,
     startup_tx: Sender<ReaderStartup>,
@@ -278,9 +318,14 @@ fn read_device_loop(
         }
     };
 
-    while !STOP_REQUESTED.load(Ordering::SeqCst)
-        && deadline.is_none_or(|value| Instant::now() < value)
-    {
+    let mut stop_observed_at = None;
+    while !should_stop_reading(
+        STOP_REQUESTED.load(Ordering::SeqCst),
+        &mut stop_observed_at,
+        stop_policy.deadline,
+        stop_policy.drain,
+        Instant::now(),
+    ) {
         let read = match reader.read(&mut scratch) {
             Ok(read) => read,
             Err(err) if err.kind() == io::ErrorKind::TimedOut => continue,
@@ -346,5 +391,70 @@ mod tests {
             libc::raise(libc::SIGINT);
         }
         assert!(STOP_REQUESTED.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn should_stop_reading_drains_past_a_stop_signal_before_stopping() {
+        let start = Instant::now();
+        let drain = Duration::from_millis(300);
+        let mut stop_observed_at = None;
+
+        assert!(
+            !should_stop_reading(false, &mut stop_observed_at, None, drain, start),
+            "no stop requested and no deadline must keep reading"
+        );
+
+        assert!(
+            !should_stop_reading(true, &mut stop_observed_at, None, drain, start),
+            "a fresh stop request must not stop immediately"
+        );
+        assert!(
+            !should_stop_reading(
+                true,
+                &mut stop_observed_at,
+                None,
+                drain,
+                start + Duration::from_millis(299)
+            ),
+            "still inside the drain window"
+        );
+        assert!(
+            should_stop_reading(
+                true,
+                &mut stop_observed_at,
+                None,
+                drain,
+                start + Duration::from_millis(300)
+            ),
+            "drain window elapsed"
+        );
+    }
+
+    #[test]
+    fn should_stop_reading_still_honors_an_earlier_duration_deadline() {
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(50);
+        let mut stop_observed_at = None;
+
+        assert!(
+            !should_stop_reading(
+                false,
+                &mut stop_observed_at,
+                Some(deadline),
+                Duration::from_secs(5),
+                start
+            ),
+            "deadline not yet reached"
+        );
+        assert!(
+            should_stop_reading(
+                false,
+                &mut stop_observed_at,
+                Some(deadline),
+                Duration::from_secs(5),
+                start + Duration::from_millis(50)
+            ),
+            "duration deadline reached, independent of any stop signal"
+        );
     }
 }

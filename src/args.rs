@@ -36,6 +36,14 @@ pub struct RecordArgs {
     #[arg(long, default_value_t = 2.0)]
     pub warmup_s: f64,
 
+    /// Seconds to keep reading past a stop signal (SIGINT/SIGTERM) before
+    /// actually stopping. The firmware's trace queue can still have frames
+    /// in flight over USB at the instant a caller signals this process
+    /// (e.g. right when a wrapped command's response returns); draining a
+    /// short grace period catches them instead of truncating the capture.
+    #[arg(long, default_value_t = 0.5)]
+    pub drain_s: f64,
+
     #[arg(long, default_value_t = 4096, value_parser = parse_nonzero_usize)]
     pub packet_size: usize,
 

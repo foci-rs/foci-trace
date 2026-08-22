@@ -41,6 +41,35 @@ fn record_accepts_ready_file_and_serial_filters() {
 }
 
 #[test]
+fn record_drain_s_defaults_and_is_settable() {
+    let cli = Cli::parse_from([
+        "foci-trace-capture",
+        "record",
+        "--output",
+        "/tmp/capture.bin",
+    ]);
+    let args = match cli.command {
+        Command::Record(args) => args,
+        other => panic!("expected record command, got {other:?}"),
+    };
+    assert_eq!(args.drain_s, 0.5);
+
+    let cli = Cli::parse_from([
+        "foci-trace-capture",
+        "record",
+        "--output",
+        "/tmp/capture.bin",
+        "--drain-s",
+        "1.5",
+    ]);
+    let args = match cli.command {
+        Command::Record(args) => args,
+        other => panic!("expected record command, got {other:?}"),
+    };
+    assert_eq!(args.drain_s, 1.5);
+}
+
+#[test]
 fn record_rejects_zero_packet_size() {
     let err = Cli::try_parse_from([
         "foci-trace-capture",
