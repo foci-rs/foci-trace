@@ -1368,6 +1368,38 @@ def test_decodes_schema_six_velocity_integral_terminal_flags() -> None:
     assert frame.payload["recovery_unavailable"] == 0
 
 
+def test_decodes_integral_terminal_cause_namespace() -> None:
+    payload = bytearray([4])
+    payload.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
+    payload.extend(struct.pack("<II", 0, 0))
+    payload.extend(
+        struct.pack(
+            "<BBBHHHHIIBBB",
+            3,
+            4,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+    )
+    payload.extend(struct.pack("<IIII", 0, 0, 0, 0))
+    payload.extend(struct.pack("<B", 2))
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert len(payload) == 62
+    assert frame.payload["record_kind"] == "integral_terminal"
+    assert frame.payload["cause"] == 4
+    assert frame.payload["cause_namespace"] == 2
+
+
 def test_decodes_schema_seven_zero_motion_failed_terminal() -> None:
     payload = bytearray([4])
     payload.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))

@@ -1373,7 +1373,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             ]
         decoded = _take_fields(cursor, tuple(fields))
         decoded["record_kind"] = "rung"
-    elif kind == 4 and len(payload) in (58, 59, 61, 66):
+    elif kind == 4 and len(payload) in (58, 59, 61, 62, 66):
         fields = [
             ("run_sequence", "I"),
             ("evidence_sequence", "H"),
@@ -1386,7 +1386,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         ]
         if len(payload) == 59:
             fields.append(("recovery_unavailable", "B"))
-        elif len(payload) in (61, 66):
+        elif len(payload) in (61, 62, 66):
             fields.append(("recovery_flags", "B"))
         fields.extend(
             (
@@ -1401,7 +1401,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             tuple(fields),
         )
         decoded["eligible_masks"] = [cursor.take("I") for _ in range(2)]
-        if len(payload) in (61, 66):
+        if len(payload) in (61, 62, 66):
             decoded["opening_available_mask"] = cursor.take("B")
             decoded["bookend_available_mask"] = cursor.take("B")
             decoded["recovery_unavailable"] = decoded["recovery_flags"] & 1
@@ -1413,6 +1413,8 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             decoded["recovery_unavailable"] = 0
         decoded["run_started_us"] = cursor.take("I") | (cursor.take("I") << 32)
         decoded["run_completed_us"] = cursor.take("I") | (cursor.take("I") << 32)
+        if len(payload) == 62:
+            decoded["cause_namespace"] = cursor.take("B")
         if len(payload) == 66:
             if cursor.take("B") != 1:
                 raise DecodeError("combined integral terminal marker is invalid")
