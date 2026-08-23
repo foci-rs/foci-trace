@@ -1969,17 +1969,10 @@ def _velocity_capture_groups(
 # through `audit_scored_rest_grammar` (identity, ordering, disposition, and
 # mask coherence), which reads the record itself rather than raw samples.
 #
-# The set is the one the wire format already recognizes: the decoder requires
-# the 0xFF direction/slot sentinel for exactly these owners
-# (`protocol._decode_velocity_sweep_evidence`, kind 11), and they are
-# `RestSelectionOwner`'s four recovery variants -- StageBRecovery(1),
-# StageBSelectedRecovery(2), StageCRecovery(5), MatrixRecovery(8)
-# (`commissioning/types.rs:547-566`). All four are produced from the single
-# recovery controller above, so all four share the gap.
-#
-# Whether firmware should trace the recovery window at all is a separate
-# question; this only stops the host claiming a verification it cannot perform.
-_RAW_UNVERIFIABLE_REST_SELECTION_OWNERS = frozenset({1, 2, 5, 8})
+# Only owners whose scoring path emits its own raw samples may be verified.
+# Defaulting unknown owners to unverifiable keeps a new untraced path from
+# being compared against an unrelated preceding window.
+_RAW_VERIFIABLE_REST_SELECTION_OWNERS = frozenset({0, 3, 4, 7})
 
 
 def _attach_rest_selection_audit(
@@ -1992,9 +1985,8 @@ def _attach_rest_selection_audit(
     """Compare each raw-verifiable Event 151 with the 256 samples before it.
 
     `rest_selection_verified_count` counts only selections checked against
-    their own traced samples. Recovery selections
-    (`_RAW_UNVERIFIABLE_REST_SELECTION_OWNERS`) have no traced samples at
-    all, so they are counted separately in
+    their own traced samples. Owners outside
+    `_RAW_VERIFIABLE_REST_SELECTION_OWNERS` are counted separately in
     `rest_selection_raw_unverifiable_count` and never compared against the
     unrelated window that happens to precede them.
 
@@ -2031,7 +2023,7 @@ def _attach_rest_selection_audit(
     for event in evidence:
         if event.payload.get("record_kind") != "rest_selection":
             continue
-        if int(event.payload.get("owner", -1)) in _RAW_UNVERIFIABLE_REST_SELECTION_OWNERS:
+        if int(event.payload.get("owner", -1)) not in _RAW_VERIFIABLE_REST_SELECTION_OWNERS:
             raw_unverifiable += 1
             continue
         observations = [

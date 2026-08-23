@@ -3019,7 +3019,7 @@ def test_stage_b_rest_audit_falls_back_to_historical_grammar() -> None:
     assert seen == [False]
 
 
-@pytest.mark.parametrize("recovery_owner", (1, 2, 5, 8))
+@pytest.mark.parametrize("recovery_owner", (1, 2, 5, 6, 8))
 def test_recovery_event_151_cannot_consume_the_preceding_observations_window(
     recovery_owner: int,
 ) -> None:
