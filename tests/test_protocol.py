@@ -213,7 +213,7 @@ def test_decodes_version_nine_pptm_velocity_diagnostic() -> None:
 
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_OBSERVATION, payload) + payload)
 
-    assert PROTOCOL_VERSION == 18
+    assert PROTOCOL_VERSION == 19
     assert 13 in SUPPORTED_PROTOCOL_VERSIONS
     assert 14 in SUPPORTED_PROTOCOL_VERSIONS
     assert frame.payload["pid_velocity_actual"] is None
@@ -224,8 +224,8 @@ def test_decode_frame_rejects_a_version_beyond_the_supported_range() -> None:
     # A version past the supported range is rejected; historical versions stay
     # decodable so committed captures still replay.
     payload = bytes(88)
-    with pytest.raises(DecodeError, match="unsupported protocol version 19"):
-        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=19) + payload)
+    with pytest.raises(DecodeError, match="unsupported protocol version 20"):
+        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=20) + payload)
 
 
 def test_rejects_velocity_observation_with_both_diagnostic_kinds() -> None:
@@ -3286,6 +3286,42 @@ def test_decode_breakaway_campaign_terminal_matches_the_firmware_golden_bytes() 
     assert decoded["terminal_cause"] == 21
     assert decoded["accepted"] == 1
     assert decoded["stage_c_plan_digest"] == _BW_PLAN_DIGEST
+    # A pre-error_code-field (18-byte) payload still decodes at the current
+    # protocol version -- "no error" and "field absent" stay distinct from 0.
+    assert decoded["error_code"] is None
+    assert decoded["error_code_name"] is None
+
+
+def test_breakaway_campaign_terminal_names_the_error_behind_a_confirmed_refusal() -> None:
+    """A confirmed acceptance whose Stage-C plan build was refused must say why,
+    not report a self-contradictory Accepted cause with accepted=0.
+    """
+    from foci_trace.protocol import decode_breakaway_record
+
+    base = bytes([12]) + struct.pack(
+        "<IHBBBQ", _BW_RUN_SEQUENCE, _BW_EVIDENCE_SEQUENCE, 2, 26, 0, 0
+    )
+    payload = base + bytes([11])
+    assert len(payload) == 19
+
+    decoded = decode_breakaway_record(payload, protocol_version=19)
+    assert decoded["record_kind"] == "breakaway_campaign_terminal"
+    assert decoded["terminal_cause_name"] == "confirmation_stage_c_plan_refused"
+    assert decoded["accepted"] == 0
+    assert decoded["error_code"] == 11
+    assert decoded["error_code_name"] == "velocity_validation_failed"
+
+
+def test_breakaway_campaign_terminal_cause_26_rejected_below_protocol_19() -> None:
+    from foci_trace.protocol import decode_breakaway_record
+
+    base = bytes([12]) + struct.pack(
+        "<IHBBBQ", _BW_RUN_SEQUENCE, _BW_EVIDENCE_SEQUENCE, 2, 26, 0, 0
+    )
+    payload = base + bytes([11])
+
+    with pytest.raises(DecodeError, match="cause is invalid"):
+        decode_breakaway_record(payload, protocol_version=18)
 
 
 def test_breakaway_event_ids_match_the_firmware_trace_events_table() -> None:

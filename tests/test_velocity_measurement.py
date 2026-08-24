@@ -5438,6 +5438,24 @@ def test_audit_breakaway_campaign_rejects_stage_c_after_unsuccessful_confirmatio
         audit_breakaway_campaign(ticks)
 
 
+def test_audit_breakaway_campaign_allows_a_confirmed_stage_c_refusal() -> None:
+    """A confirmed acceptance whose Stage-C plan build was refused is a
+    legitimate outcome, not a validator error."""
+    builder = _BreakawayCampaignBuilder()
+    ticks = [
+        builder.probe_plan_tick(),
+        *builder.probe_stream_ticks(),
+        builder.probe_result_tick(),
+        builder.discovery_plan_tick(),
+        *builder.discovery_ticks(),
+        builder.confirmation_plan_tick(),
+        *builder.confirmation_ticks(accepted=1, terminal_cause=21),
+        builder.campaign_terminal_tick(accepted=0, terminal_cause=26, stage_c_plan_digest=0),
+    ]
+    # Must not raise.
+    audit_breakaway_campaign(ticks)
+
+
 def test_audit_breakaway_campaign_flags_a_wrong_reported_digest_as_a_mismatch_not_a_raise() -> None:
     """A single wrong-but-well-formed digest is a firmware-math mismatch, not a refusal."""
     builder = _BreakawayCampaignBuilder()

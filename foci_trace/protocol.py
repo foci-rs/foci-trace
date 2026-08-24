@@ -9,6 +9,10 @@ from typing import Any
 from .scored_rest import select_causal_rest_suffixes
 
 FRAME_MAGIC = 0x43525446
+# Version 19 adds `error_code` to the breakaway campaign terminal and a new
+# ConfirmationStageCPlanRefused (26) terminal cause, so a confirmed
+# acceptance whose Stage-C plan build was refused is attributable instead of
+# reporting a self-contradictory Accepted cause.
 # Version 17 adds `error_code` to the breakaway discovery terminal, so a
 # `*_internal_fault` terminal names the CommissionError behind it instead of
 # leaving the fault unattributable.
@@ -17,7 +21,7 @@ FRAME_MAGIC = 0x43525446
 # the open-loop model term or to measured demand.
 # Version 15 replaced the productive-boundary probe with physical excursion.
 # Historical versions remain readable through their versioned record shapes.
-PROTOCOL_VERSION = 18
+PROTOCOL_VERSION = 19
 SUPPORTED_PROTOCOL_VERSIONS = (
     1,
     2,
@@ -37,6 +41,7 @@ SUPPORTED_PROTOCOL_VERSIONS = (
     16,
     17,
     18,
+    19,
 )
 HEADER_LEN = 32
 
@@ -2157,6 +2162,7 @@ BREAKAWAY_TERMINAL_CAUSE_NAMES = {
     23: "probe_internal_fault",
     24: "discovery_internal_fault",
     25: "confirmation_internal_fault",
+    26: "confirmation_stage_c_plan_refused",
 }
 
 
@@ -2171,6 +2177,9 @@ def _breakaway_terminal_cause_name(cause: int, protocol_version: int) -> str:
 def _breakaway_terminal_cause_is_valid(cause: object, protocol_version: int) -> bool:
     if not isinstance(cause, int):
         return False
+    if protocol_version >= 19:
+        # 26 is the confirmed-but-Stage-C-refused cause.
+        return cause in (0, 1) or 5 <= cause <= 26
     if protocol_version >= 16:
         # 23-25 split the non-safety internal faults out of the `*_safety_fault`
         # causes, which previously reported `has_safety_fault = 0`.
@@ -2187,6 +2196,7 @@ def _breakaway_terminal_cause_is_valid(cause: object, protocol_version: int) -> 
 # `None`, so nothing is lost.
 COMMISSION_ERROR_NAMES = {
     3: "spi",
+    11: "velocity_validation_failed",
     17: "safety_envelope_violation",
     47: "invalid_schedule",
     52: "analysis_overrun",
@@ -2764,7 +2774,7 @@ def decode_breakaway_record(
         if decoded["slot_index"] > 7:
             raise DecodeError("breakaway confirmation observation slot index is invalid")
         decoded["record_kind"] = "breakaway_confirmation_observation"
-    elif tag == BREAKAWAY_TAG_CAMPAIGN_TERMINAL and len(payload) == 18:
+    elif tag == BREAKAWAY_TAG_CAMPAIGN_TERMINAL and len(payload) in (18, 19):
         decoded = _take_fields(
             cursor,
             (
@@ -2785,6 +2795,10 @@ def decode_breakaway_record(
         )
         if decoded["accepted"] not in (0, 1):
             raise DecodeError("breakaway campaign terminal accepted flag is invalid")
+        # Present from protocol 19. Absent records report `None` rather than 0,
+        # so "no error" and "this capture predates the field" stay distinct.
+        decoded["error_code"] = cursor.take("B") if len(payload) == 19 else None
+        decoded["error_code_name"] = COMMISSION_ERROR_NAMES.get(decoded["error_code"])
         decoded["record_kind"] = "breakaway_campaign_terminal"
     elif tag == BREAKAWAY_TAG_PROBE_DECISION and protocol_version >= 14 and len(payload) == 18:
         decoded = _take_fields(

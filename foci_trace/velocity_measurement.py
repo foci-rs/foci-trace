@@ -7448,7 +7448,13 @@ def audit_breakaway_campaign(
 
     campaign_terminal = _bw_single_record(ticks[-1], "breakaway_campaign_terminal")
     campaign_accepted = int(campaign_terminal["accepted"]) == 1
-    if campaign_accepted != confirmation_accepted:
+    # A confirmed acceptance whose Stage-C plan build is later refused
+    # legitimately leaves campaign_accepted=False with confirmation_accepted=
+    # True -- confirmation and Stage-C admission are deliberately
+    # separate, stacked gates. Only the reverse direction (a Stage-C plan
+    # materializing without a confirmed acceptance) is structurally
+    # impossible and remains a genuine validator error.
+    if campaign_accepted and not confirmation_accepted:
         raise ValueError(
             f"breakaway campaign terminal accepted={int(campaign_terminal['accepted'])} does "
             f"not trace back to an accepted confirmation (confirmation accepted="
