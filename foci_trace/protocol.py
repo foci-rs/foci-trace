@@ -1220,7 +1220,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         }.get(decoded["cause"], "Unknown")
         decoded["namespace"] = "acceptance_matrix"
         decoded["record_kind"] = "acceptance_matrix_terminal"
-    elif kind == 3 and len(payload) in (70, 83):
+    elif kind == 3 and len(payload) in (70, 71, 83, 84):
         decoded = _take_fields(
             cursor,
             (
@@ -1232,7 +1232,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ("i_raw", "H"),
             ),
         )
-        if len(payload) == 83:
+        if len(payload) in (83, 84):
             decoded.update(
                 _take_fields(
                     cursor,
@@ -1263,6 +1263,16 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             direction["components"] = components[: direction["component_count"]]
             directions.append(direction)
         decoded["directions"] = directions
+        # Diagnostic trailing byte (schema >= the target-terminus build): the
+        # recorder's one-based target terminus after this rung, zero for none.
+        # Absent on older captures, which decode as None.
+        if cursor.offset < len(payload):
+            target_terminus_plus_one = cursor.take("B")
+            decoded["target_terminus"] = (
+                None if target_terminus_plus_one == 0 else target_terminus_plus_one - 1
+            )
+        else:
+            decoded["target_terminus"] = None
         decoded["plan_digest"] = decoded["plan_digest_low"] | (decoded["plan_digest_high"] << 32)
         decoded["record_kind"] = "integral_rung"
     elif kind == 3:
