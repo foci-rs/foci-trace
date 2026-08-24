@@ -2102,6 +2102,23 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         decoded["moving_clip_absence_proven"] = decoded["capability"] == 1 and moving_clear
         decoded["moving_clip_uncertain"] = decoded["capability"] == 0 and moving_clear
         decoded["record_kind"] = "velocity_primitive_current"
+    elif kind == 40:
+        decoded = _take_fields(
+            cursor,
+            (
+                ("channel", "B"),
+                ("outcome", "B"),
+                ("acceptance_source_code", "B"),
+                ("phase_live", "B"),
+                ("breakaway_acceptance", "B"),
+                ("execution_plan_present", "B"),
+                ("authority_present", "B"),
+                ("rest_boundary_rung_plus_one", "B"),
+                ("rest_boundary_slot_plus_one", "B"),
+                ("installer_result", "B"),
+            ),
+        )
+        decoded["record_kind"] = "stage_c_promotion_diagnostic"
     else:
         raise DecodeError(f"unknown velocity-sweep evidence kind {kind}")
     cursor.finish()
