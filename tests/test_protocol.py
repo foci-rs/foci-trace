@@ -117,6 +117,32 @@ def test_decode_v6_critical_velocity_transient_field() -> None:
     assert frame.payload["cached_velocity_transient_offset"] == -321
 
 
+def test_decode_v20_critical_velocity_clamp_flag_engaged() -> None:
+    payload = bytearray(88)
+    payload[83] = 0x01
+
+    frame = decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=20) + payload)
+
+    assert frame.payload["cached_velocity_clamped"] is True
+
+
+def test_decode_v20_critical_velocity_clamp_flag_not_engaged() -> None:
+    payload = bytearray(88)
+
+    frame = decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=20) + payload)
+
+    assert frame.payload["cached_velocity_clamped"] is False
+
+
+def test_decode_v6_critical_ignores_the_clamp_flag_byte_before_version_20() -> None:
+    payload = bytearray(88)
+    payload[83] = 0x01
+
+    frame = decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=6) + payload)
+
+    assert frame.payload["cached_velocity_clamped"] is False
+
+
 def test_decode_control_detail_velocity_targets_as_signed_values() -> None:
     payload = struct.pack(
         "<IIiiIII",
@@ -213,9 +239,10 @@ def test_decodes_version_nine_pptm_velocity_diagnostic() -> None:
 
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_OBSERVATION, payload) + payload)
 
-    assert PROTOCOL_VERSION == 19
+    assert PROTOCOL_VERSION == 20
     assert 13 in SUPPORTED_PROTOCOL_VERSIONS
     assert 14 in SUPPORTED_PROTOCOL_VERSIONS
+    assert 20 in SUPPORTED_PROTOCOL_VERSIONS
     assert frame.payload["pid_velocity_actual"] is None
     assert frame.payload["actual_velocity_pptm"] == 176
 
@@ -224,8 +251,8 @@ def test_decode_frame_rejects_a_version_beyond_the_supported_range() -> None:
     # A version past the supported range is rejected; historical versions stay
     # decodable so committed captures still replay.
     payload = bytes(88)
-    with pytest.raises(DecodeError, match="unsupported protocol version 20"):
-        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=20) + payload)
+    with pytest.raises(DecodeError, match="unsupported protocol version 21"):
+        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=21) + payload)
 
 
 def test_rejects_velocity_observation_with_both_diagnostic_kinds() -> None:

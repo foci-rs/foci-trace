@@ -9,6 +9,8 @@ from typing import Any
 from .scored_rest import select_causal_rest_suffixes
 
 FRAME_MAGIC = 0x43525446
+# Version 20 adds the velocity feedforward clamp-engaged flag to the critical
+# payload.
 # Version 19 adds `error_code` to the breakaway campaign terminal and a new
 # ConfirmationStageCPlanRefused (26) terminal cause, so a confirmed
 # acceptance whose Stage-C plan build was refused is attributable instead of
@@ -21,7 +23,7 @@ FRAME_MAGIC = 0x43525446
 # the open-loop model term or to measured demand.
 # Version 15 replaced the productive-boundary probe with physical excursion.
 # Historical versions remain readable through their versioned record shapes.
-PROTOCOL_VERSION = 19
+PROTOCOL_VERSION = 20
 SUPPORTED_PROTOCOL_VERSIONS = (
     1,
     2,
@@ -42,6 +44,7 @@ SUPPORTED_PROTOCOL_VERSIONS = (
     17,
     18,
     19,
+    20,
 )
 HEADER_LEN = 32
 
@@ -444,6 +447,7 @@ def _decode_critical(version: int, payload: bytes) -> dict[str, Any]:
         "accel_feedforward_gain_permille": accel_gain,
         "accel_feedforward_flags": accel_flags,
         "cached_velocity_transient_offset": 0,
+        "cached_velocity_clamped": False,
     }
     if version >= 3:
         decoded["interim_pidin_target_torque"] = _i32(values[15])
@@ -459,6 +463,8 @@ def _decode_critical(version: int, payload: bytes) -> dict[str, Any]:
         ) = struct.unpack_from("<III", payload, 84)
     if version >= 6:
         decoded["cached_velocity_transient_offset"] = struct.unpack_from("<i", payload, 84)[0]
+    if version >= 20:
+        decoded["cached_velocity_clamped"] = bool(payload[83] & 0x01)
     return decoded
 
 

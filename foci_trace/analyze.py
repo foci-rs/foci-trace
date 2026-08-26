@@ -253,6 +253,7 @@ class MotionPhaseReport:
     velocity_transient_nonzero_samples: int
     velocity_transient_sign_agreement_samples: int
     velocity_transient_sign_comparable_samples: int
+    velocity_ff_clamp_engaged_samples: int
     target_velocity_range: tuple[int, int]
     velocity_actual_range: tuple[int, int] | None
     velocity_effective_target_range: tuple[int, int] | None
@@ -371,6 +372,7 @@ class _CriticalObservation:
     velocity_error: int
     cached_velocity_offset: int
     cached_velocity_transient_offset: int
+    cached_velocity_clamped: bool
 
 
 @dataclass(frozen=True)
@@ -655,6 +657,7 @@ def _observe_critical(
             cached_velocity_transient_offset=int(
                 payload.get("cached_velocity_transient_offset", 0)
             ),
+            cached_velocity_clamped=bool(payload.get("cached_velocity_clamped", False)),
         )
     )
     if _relative_seconds(state, timestamp_ticks) < steady_after_s:
@@ -1584,6 +1587,9 @@ def _motion_phase_reports(
             )
             for sample in velocity_transient_sign_candidates
         )
+        velocity_ff_clamp_engaged_samples = sum(
+            1 for sample in samples if sample.cached_velocity_clamped
+        )
         velocity_errors = [sample.velocity_error for sample in samples]
         velocity_error_rms, velocity_error_peak = (
             _residual_stats(velocity_errors) if velocity_tracking_available else (None, None)
@@ -1641,6 +1647,7 @@ def _motion_phase_reports(
                 velocity_transient_nonzero_samples=len(nonzero_velocity_transient_offsets),
                 velocity_transient_sign_agreement_samples=velocity_transient_sign_agreement,
                 velocity_transient_sign_comparable_samples=len(velocity_transient_sign_candidates),
+                velocity_ff_clamp_engaged_samples=velocity_ff_clamp_engaged_samples,
                 target_velocity_range=_range([sample.target_velocity for sample in samples]),
                 velocity_actual_range=(
                     _range([sample.velocity_actual for sample in samples])
@@ -3002,6 +3009,7 @@ def format_summary(
                             "velocity_transient={transient_lo}..{transient_hi} "
                             "transient_nonzero={transient_nonzero}/{samples} "
                             "transient_sign={transient_sign}/{transient_sign_total} "
+                            "clamp_engaged={clamp_engaged}/{samples} "
                             "iq/torque={iq_actual} uq_limited={uq_lo}..{uq_hi} "
                             "post_discriminator={discriminator}".format(
                                 accel_lo=phase.accel_feedforward_offset_range[0],
@@ -3022,6 +3030,7 @@ def format_summary(
                                 transient_sign_total=(
                                     phase.velocity_transient_sign_comparable_samples
                                 ),
+                                clamp_engaged=phase.velocity_ff_clamp_engaged_samples,
                                 iq_actual=_optional_ratio_text(phase.iq_to_actual_abs_median),
                                 uq_lo=phase.uq_limited_range[0],
                                 uq_hi=phase.uq_limited_range[1],

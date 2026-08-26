@@ -467,6 +467,7 @@ def _critical_payload_v6(
     accel_offset: int,
     accel_gain: int,
     accel_flags: int,
+    cached_velocity_clamped: bool = False,
 ) -> bytes:
     payload = struct.pack(
         "<iiiiiiiBBHIiQQIIIII",
@@ -490,7 +491,9 @@ def _critical_payload_v6(
         foc_uq_ud,
         foc_uq_ud_limited,
     )
-    payload += struct.pack("<iHBB", accel_offset, accel_gain, accel_flags, 0)
+    payload += struct.pack(
+        "<iHBB", accel_offset, accel_gain, accel_flags, 1 if cached_velocity_clamped else 0
+    )
     payload += struct.pack("<i", cached_velocity_transient_offset)
     return payload
 
@@ -1263,6 +1266,88 @@ def test_feedforward_audit_includes_velocity_transient_offset() -> None:
     assert "velocity_transient=110..120" in text
     assert "transient_nonzero=2/2" in text
     assert "transient_sign=2/2" in text
+
+
+def test_feedforward_audit_includes_velocity_clamp_engaged_samples() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+
+    clock = 84_000_000
+    detail = _control_detail_payload(1200, voltage_limit=29000, torque_limit=2816)
+    writer.write_firmware_frame(
+        0,
+        0,
+        _header(FRAME_TYPE_CONTROL_DETAIL, detail, 1, 0, 1, 0, version=20) + detail,
+    )
+
+    samples = [
+        (2, 0, 0, 0, 400, 800, 600, 660, 120, 18000, 17000, 300, 0x03, True),
+        (
+            3,
+            clock * 20 // 1000,
+            600,
+            580,
+            300,
+            700,
+            500,
+            560,
+            110,
+            15000,
+            14000,
+            280,
+            0x03,
+            False,
+        ),
+    ]
+    for (
+        seq,
+        timestamp,
+        step,
+        actual,
+        torque_actual,
+        torque_target,
+        target_velocity,
+        velocity_ff,
+        velocity_transient,
+        uq,
+        uq_limited,
+        accel,
+        flags,
+        clamped,
+    ) in samples:
+        payload = _critical_payload_v6(
+            step_position=step,
+            tmc_position_actual=actual,
+            torque_actual=torque_actual,
+            torque_target=torque_target,
+            target_velocity=target_velocity,
+            cached_velocity_offset=velocity_ff,
+            cached_velocity_transient_offset=velocity_transient,
+            foc_uq_ud=_pack_i16_pair(0, uq),
+            foc_uq_ud_limited=_pack_i16_pair(0, uq_limited),
+            accel_offset=accel,
+            accel_gain=500 if accel else 0,
+            accel_flags=flags,
+            cached_velocity_clamped=clamped,
+        )
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_CRITICAL, payload, seq, timestamp, 1, 0, version=20) + payload,
+        )
+
+    reports = summarize_capture(
+        io.BytesIO(output.getvalue()),
+        steady_after_s=0,
+        motion_gap_s=0.1,
+        motion_min_steps=100,
+    )
+    text = format_summary(reports, include_phase_split=True, include_feedforward_audit=True)
+
+    phase = reports[0].motion_segments[0].phase_reports[0]
+    assert phase.velocity_ff_clamp_engaged_samples == 1
+    assert "clamp_engaged=1/2" in text
 
 
 def test_phase_advance_audit_uses_phase_critical_timestamp_span() -> None:
