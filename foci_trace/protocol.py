@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from .scored_rest import select_causal_rest_suffixes
+from .velocity_integral import (
+    _COMBINED_STAGE_C_SCHEMA_REVISION,
+    _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION,
+)
 
 FRAME_MAGIC = 0x43525446
 # Version 20 adds the velocity feedforward clamp-engaged flag to the critical
@@ -882,13 +886,21 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             # and its record simply ends here. Presence is therefore signalled
             # by remaining bytes, not by the schema revision alone.
             decoded["combined_selected_response"] = False
-            if decoded["schema_revision"] >= 8 and cursor.offset < len(payload):
+            schema_revision = decoded["schema_revision"]
+            is_combined_schema = (
+                _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION
+                <= schema_revision
+                <= _COMBINED_STAGE_C_SCHEMA_REVISION
+            )
+            if is_combined_schema and cursor.offset < len(payload):
                 if cursor.take("B") != 1:
                     raise DecodeError("combined integral plan core is invalid")
                 decoded["combined_selected_response"] = True
                 decoded["selected_response_intervals_q"] = [
                     [cursor.take("i"), cursor.take("i")] for _ in range(2)
                 ]
+            if schema_revision >= 17:
+                decoded["i_top_cap"] = cursor.take("H")
             decoded["record_kind"] = "integral_plan_core"
         elif fragment == 1:
             decoded["positive_rung_count"] = cursor.take("B")

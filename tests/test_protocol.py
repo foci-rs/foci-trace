@@ -801,6 +801,90 @@ def test_decodes_a_breakaway_stage_c_plan_core_without_a_combined_response() -> 
     assert frame.payload["combined_selected_response"] is False
 
 
+def test_schema_seventeen_core_record_decodes_i_top_cap() -> None:
+    core = bytearray([0])
+    core.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
+    core.append(0)
+    core.extend(struct.pack("<IHBIIH", 0x05E2_1F75, 17, 0, 0x99AA_BBCC, 0xDDEE_FF00, 724))
+    core.extend(
+        struct.pack(
+            "<IIIIBBBiiii",
+            0x001C_0000,  # directional_memberships[0]
+            0x001C_0000,  # directional_memberships[1]
+            0x001C_0000,  # stage_b_joint_membership (schema >= 7)
+            0x0004_0000,  # joint_membership
+            3,  # directional_validity[0] (schema >= 4)
+            3,  # directional_validity[1]
+            1,  # reduced_margin
+            17_000_000,
+            18_000_000,
+            -19_000_000,
+            -18_000_000,
+        )
+    )
+    core.extend(struct.pack("<IiIIBHBHH", 4_394, 264, 25_000, 4_000, 13, 60, 15, 120, 2_816))
+    core.extend(struct.pack("<H", 2_534))
+    core.append(1)  # limit_evidence_capability
+    core.extend(struct.pack("<H", 1_310))  # new: i_top_cap, schema >= 17 only
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, core) + core)
+
+    assert frame.payload["schema_revision"] == 17
+    assert frame.payload["i_top_cap"] == 1_310
+    assert frame.payload["combined_selected_response"] is False
+
+
+def test_schema_sixteen_core_record_has_no_i_top_cap_and_is_unaffected() -> None:
+    # Byte-identical to today: same layout as the schema-17 test above but
+    # schema_revision=16 and no trailing i_top_cap bytes at all.
+    core = bytearray([0])
+    core.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
+    core.append(0)
+    core.extend(struct.pack("<IHBIIH", 0x05E2_1F75, 16, 0, 0x99AA_BBCC, 0xDDEE_FF00, 951))
+    core.extend(struct.pack("<IIIIBBBiiii", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+    core.extend(struct.pack("<IiIIBHBHH", 4_394, 264, 25_000, 4_000, 12, 56, 14, 112, 2_816))
+    core.extend(struct.pack("<H", 2_534))
+    core.append(1)
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, core) + core)
+
+    assert frame.payload["schema_revision"] == 16
+    assert "i_top_cap" not in frame.payload
+    assert frame.payload["combined_selected_response"] is False
+
+
+def test_schema_seventeen_core_record_truncated_before_i_top_cap_raises() -> None:
+    # Same as the schema-17 test above, but the two i_top_cap bytes are cut
+    # off -- must raise, not decode with the field silently absent.
+    core = bytearray([0])
+    core.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
+    core.append(0)
+    core.extend(struct.pack("<IHBIIH", 0x05E2_1F75, 17, 0, 0x99AA_BBCC, 0xDDEE_FF00, 724))
+    core.extend(
+        struct.pack(
+            "<IIIIBBBiiii",
+            0x001C_0000,
+            0x001C_0000,
+            0x001C_0000,
+            0x0004_0000,
+            3,
+            3,
+            1,
+            17_000_000,
+            18_000_000,
+            -19_000_000,
+            -18_000_000,
+        )
+    )
+    core.extend(struct.pack("<IiIIBHBHH", 4_394, 264, 25_000, 4_000, 13, 60, 15, 120, 2_816))
+    core.extend(struct.pack("<H", 2_534))
+    core.append(1)
+    # i_top_cap bytes deliberately omitted.
+
+    with pytest.raises(DecodeError):
+        decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, core) + core)
+
+
 def test_decodes_schema_six_velocity_integral_recovery_flags() -> None:
     payload = bytearray([0])
     payload.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
