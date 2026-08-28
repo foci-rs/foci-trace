@@ -82,9 +82,12 @@ _U128_MAX = (1 << 128) - 1
 # firmware bump widens a range without stranding this comment:
 #
 #   through _STANDALONE_STAGE_C_SCHEMA_REVISION
-#         standalone Stage C (`integral_plan.rs:24`), planned by
-#         `plan_velocity_integral_response` with `combined_selected_response:
-#         None`.
+#         standalone Stage C, planned by `plan_velocity_integral_response`
+#         with `combined_selected_response: None`. Decode-only mirror: this
+#         builder named the `StageCAcquisition::ReproducedStageB` acquisition
+#         kind, removed along with the function once it was left with no
+#         live installer. Firmware no longer defines this workflow;
+#         this constant exists here only so archived captures keep decoding.
 #   _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION through
 #   _COMBINED_STAGE_C_SCHEMA_REVISION
 #         the combined P-then-I workflow. Decode-only mirror: firmware
@@ -100,9 +103,8 @@ _U128_MAX = (1 << 128) - 1
 #         `plan_breakaway_velocity_integral_response` with
 #         `combined_selected_response: None`.
 #   above the breakaway range, through _HALF_OCTAVE_STAGE_C_SCHEMA_REVISION
-#         the standalone Stage C `ReproducedStageB` workflow again
-#         (`integral_plan.rs:24`, `plan_velocity_integral_response`), now with
-#         a half-octave rung inserted below the ladder's top gap. Same
+#         the same now-removed standalone `ReproducedStageB` workflow, now
+#         with a half-octave rung inserted below the ladder's top gap. Same
 #         builder and workflow as the original standalone range; only the
 #         ladder geometry differs, which is why this is a new range rather
 #         than a widening of the first one.
