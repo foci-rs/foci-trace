@@ -343,6 +343,66 @@ def test_complete_matrix_audit_reproduces_masks_counts_and_digest() -> None:
     assert len(audit["amplitudes"]) == 5
 
 
+def _minimal_matrix_evidence(
+    *, nonterminal_sequences: list[int], terminal_evidence_sequence: int
+) -> list[tuple[bytes, dict[str, object]]]:
+    plan = _plan()
+    plan.update({"run_sequence": 7, "plan_digest": 0})
+    plan["plan_digest"] = matrix_plan_digest(plan)
+    plan_fragments = [
+        (
+            bytes([fragment]),
+            {**plan, "fragment": fragment, "record_kind": "acceptance_matrix_plan"},
+        )
+        for fragment in range(3)
+    ]
+    nonterminal = [
+        (
+            bytes((0, sequence)),
+            {
+                "record_kind": "velocity_primitive_current",
+                "run_sequence": 7,
+                "evidence_sequence": sequence,
+                "plan_digest": plan["plan_digest"],
+                "rung_index": 0,
+                "slot": 0,
+            },
+        )
+        for sequence in nonterminal_sequences
+    ]
+    terminal = {
+        "record_kind": "acceptance_matrix_terminal",
+        "run_sequence": 7,
+        "evidence_sequence": terminal_evidence_sequence,
+        "schema_revision": 1,
+        "cause": 0,
+        "outcome": 1,
+        "digest": 0,
+    }
+    return [*plan_fragments, *nonterminal, (b"terminal", terminal)]
+
+
+def test_matrix_audit_flags_a_gap_in_the_evidence_sequence() -> None:
+    evidence = _minimal_matrix_evidence(nonterminal_sequences=[1, 3], terminal_evidence_sequence=4)
+
+    audit = audit_acceptance_matrix(evidence)
+
+    assert any(
+        "evidence sequence is not contiguous" in mismatch for mismatch in audit["mismatches"]
+    )
+
+
+def test_matrix_audit_flags_a_terminal_sequence_that_skips_evidence() -> None:
+    evidence = _minimal_matrix_evidence(nonterminal_sequences=[1, 2], terminal_evidence_sequence=9)
+
+    audit = audit_acceptance_matrix(evidence)
+
+    assert any(
+        "terminal sequence does not follow the final evidence record" in mismatch
+        for mismatch in audit["mismatches"]
+    )
+
+
 _GRAMMAR_MISMATCH_MARKERS = ("scored-rest", "does not precede", "lacks its causal selection")
 
 

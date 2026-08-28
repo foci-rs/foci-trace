@@ -339,6 +339,19 @@ def audit_acceptance_matrix(
         for raw, value in evidence_records
         if value.get("record_kind") not in ("acceptance_matrix_plan", "acceptance_matrix_terminal")
     ]
+    sequences = [
+        int(value["evidence_sequence"]) if "evidence_sequence" in value else None
+        for _raw, value in nonterminal
+    ]
+    if sequences != list(range(1, len(sequences) + 1)):
+        mismatches.append(f"acceptance matrix evidence sequence is not contiguous: {sequences}")
+    if (
+        "evidence_sequence" in terminal
+        and int(terminal["evidence_sequence"]) != len(nonterminal) + 1
+    ):
+        mismatches.append(
+            "acceptance matrix terminal sequence does not follow the final evidence record"
+        )
     mismatches.extend(
         audit_scored_rest_grammar(
             [value for _raw, value in nonterminal],
