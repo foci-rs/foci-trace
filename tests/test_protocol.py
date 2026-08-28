@@ -834,13 +834,53 @@ def test_schema_seventeen_core_record_decodes_i_top_cap() -> None:
     assert frame.payload["combined_selected_response"] is False
 
 
-def test_schema_sixteen_core_record_has_no_i_top_cap_and_is_unaffected() -> None:
-    # Byte-identical to today: same layout as the schema-17 test above but
-    # schema_revision=16 and no trailing i_top_cap bytes at all.
+def test_schema_sixteen_core_record_decodes_i_top_cap() -> None:
+    # Breakaway plans (schema 16) now also carry the trailing i_top_cap u16
+    # -- the rung participates in the live gain search, not only schema 17's
+    # ReproducedStageB/standalone characterization path.
     core = bytearray([0])
     core.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
     core.append(0)
-    core.extend(struct.pack("<IHBIIH", 0x05E2_1F75, 16, 0, 0x99AA_BBCC, 0xDDEE_FF00, 951))
+    core.extend(struct.pack("<IHBIIH", 0x05E2_1F75, 16, 0, 0x99AA_BBCC, 0xDDEE_FF00, 724))
+    core.extend(struct.pack("<IIIIBBBiiii", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+    core.extend(struct.pack("<IiIIBHBHH", 4_394, 264, 25_000, 4_000, 13, 60, 15, 120, 2_816))
+    core.extend(struct.pack("<H", 2_534))
+    core.append(1)
+    core.extend(struct.pack("<H", 1_310))
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, core) + core)
+
+    assert frame.payload["schema_revision"] == 16
+    assert frame.payload["i_top_cap"] == 1_310
+    assert frame.payload["combined_selected_response"] is False
+
+
+def test_schema_sixteen_core_record_truncated_before_i_top_cap_raises() -> None:
+    # Same as the schema-16 test above, but the two i_top_cap bytes are cut
+    # off -- must raise, not decode with the field silently absent.
+    core = bytearray([0])
+    core.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
+    core.append(0)
+    core.extend(struct.pack("<IHBIIH", 0x05E2_1F75, 16, 0, 0x99AA_BBCC, 0xDDEE_FF00, 724))
+    core.extend(struct.pack("<IIIIBBBiiii", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+    core.extend(struct.pack("<IiIIBHBHH", 4_394, 264, 25_000, 4_000, 13, 60, 15, 120, 2_816))
+    core.extend(struct.pack("<H", 2_534))
+    core.append(1)
+    # i_top_cap bytes deliberately omitted.
+
+    with pytest.raises(DecodeError):
+        decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, core) + core)
+
+
+def test_schema_fifteen_core_record_has_no_i_top_cap_and_is_unaffected() -> None:
+    # An unrelated, adjacent schema value (neither 16 nor 17, but still
+    # >= 7 so every other schema-conditional field in this record decodes
+    # the same as the 16/17 fixtures) must stay byte-identical: no trailing
+    # i_top_cap bytes, and no key in the payload.
+    core = bytearray([0])
+    core.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
+    core.append(0)
+    core.extend(struct.pack("<IHBIIH", 0x05E2_1F75, 15, 0, 0x99AA_BBCC, 0xDDEE_FF00, 951))
     core.extend(struct.pack("<IIIIBBBiiii", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
     core.extend(struct.pack("<IiIIBHBHH", 4_394, 264, 25_000, 4_000, 12, 56, 14, 112, 2_816))
     core.extend(struct.pack("<H", 2_534))
@@ -848,7 +888,7 @@ def test_schema_sixteen_core_record_has_no_i_top_cap_and_is_unaffected() -> None
 
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, core) + core)
 
-    assert frame.payload["schema_revision"] == 16
+    assert frame.payload["schema_revision"] == 15
     assert "i_top_cap" not in frame.payload
     assert frame.payload["combined_selected_response"] is False
 

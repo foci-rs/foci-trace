@@ -363,7 +363,10 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     slot_order = plan_slot_order(plan)
     if slot_order:
         _append_integer(encoded, slot_order, 1)
-    if schema_revision >= _HALF_OCTAVE_STAGE_C_SCHEMA_REVISION:
+    if schema_revision in (
+        _BREAKAWAY_STAGE_C_SCHEMA_REVISION,
+        _HALF_OCTAVE_STAGE_C_SCHEMA_REVISION,
+    ):
         _append_integer(encoded, int(plan["i_top_cap"]), 2)
     return _fnv1a64(bytes(encoded))
 
@@ -450,11 +453,15 @@ def derive_integral_ladder(
         rungs.append(candidate)
         candidate <<= 1
     # Mirrors `integral_top_gap_candidate` (`integral_plan.rs`): a
-    # `ReproducedStageB` plan (schema >= 17) inserts one half-octave rung
-    # immediately below the ladder's top native octave rung, but only when
-    # that gap is entirely within the pure-octave region (never inside the
-    # fixed 1, 2, 3 prefix).
-    if schema_revision >= _HALF_OCTAVE_STAGE_C_SCHEMA_REVISION and len(rungs) >= 2:
+    # response-ladder plan (schema 16, Breakaway, or 17, ReproducedStageB)
+    # inserts one half-octave rung immediately below the ladder's top native
+    # octave rung, but only when that gap is entirely within the pure-octave
+    # region (never inside the fixed 1, 2, 3 prefix).
+    is_response_ladder_schema = schema_revision in (
+        _BREAKAWAY_STAGE_C_SCHEMA_REVISION,
+        _HALF_OCTAVE_STAGE_C_SCHEMA_REVISION,
+    )
+    if is_response_ladder_schema and len(rungs) >= 2:
         upper_octave = rungs[-1]
         lower_octave = upper_octave // 2
         if lower_octave >= 4:

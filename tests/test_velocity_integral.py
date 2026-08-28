@@ -114,6 +114,7 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
         "encoder_counts_per_rev": 4_000,
         "positive_rung_count": 5,
         "positive_i": [5, 10, 20, 40, 80],
+        "i_top_cap": 0,
         "family_size": 28,
         "total_rung_count": 7,
         "expected_observations": 56,
@@ -703,13 +704,45 @@ def test_schema_seventeen_derives_the_half_octave_rung():
     ]
 
 
-def test_schema_sixteen_derive_integral_ladder_is_unaugmented():
+def test_schema_sixteen_derive_integral_ladder_also_gets_the_half_octave_rung():
+    # Breakaway plans (schema 16) now also receive the half-octave insertion
+    # -- the rung participates in the live gain search, not only the
+    # ReproducedStageB/standalone (schema 17) characterization path.
     ladder = derive_integral_ladder(
         pwm_hz=25_000,
         moving_stroke_us=512_000,
         shortest_suffix_us=64_000,
         maximum_i=8_192,
         schema_revision=16,
+        build_features=BUILD_FEATURE_Q4_12_GAINS,
+    )
+    assert ladder["i_top_cap"] == 1_310
+    assert ladder["positive_i"] == [
+        1,
+        2,
+        3,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+        724,
+        1_024,
+    ]
+
+
+def test_schema_fifteen_derive_integral_ladder_is_unaugmented():
+    # Confirms the widened gate is exact-match against {16, 17}, not a >= 15
+    # threshold -- an adjacent, unrelated schema value must stay unaugmented.
+    ladder = derive_integral_ladder(
+        pwm_hz=25_000,
+        moving_stroke_us=512_000,
+        shortest_suffix_us=64_000,
+        maximum_i=8_192,
+        schema_revision=15,
         build_features=BUILD_FEATURE_Q4_12_GAINS,
     )
     assert 724 not in ladder["positive_i"]
@@ -722,8 +755,18 @@ def test_schema_seventeen_plan_digest_hashes_i_top_cap() -> None:
     assert integral_plan_digest({**plan, "i_top_cap": plan["i_top_cap"] + 1}) != baseline
 
 
-def test_schema_sixteen_plan_digest_ignores_i_top_cap() -> None:
-    plan = _plan(schema_revision=16)
+def test_schema_sixteen_plan_digest_also_hashes_i_top_cap() -> None:
+    # Reuses the schema-17 fixture's augmented-ladder shape (real i_top_cap,
+    # 13-rung positive_i) with schema_revision overridden to 16 -- the digest
+    # algorithm treats both schemas identically for this field.
+    plan = {**_plan(schema_revision=17), "schema_revision": 16}
+    baseline = integral_plan_digest(plan)
+    assert integral_plan_digest({**plan, "i_top_cap": plan["i_top_cap"] + 1}) != baseline
+
+
+def test_other_schema_revisions_still_ignore_i_top_cap_in_the_digest() -> None:
+    plan = _plan(schema_revision=7)
+    assert plan["schema_revision"] == 7
     baseline = integral_plan_digest(plan)
     assert integral_plan_digest({**plan, "i_top_cap": 99_999}) == baseline
 
@@ -843,6 +886,8 @@ def _plan_records(plan: dict[str, object]) -> list[tuple[bytes, dict[str, object
     ]
     if int(plan["schema_revision"]) >= 7:
         core_names.insert(core_names.index("joint_membership"), "stage_b_joint_membership")
+    if int(plan["schema_revision"]) in (16, 17):
+        core_names.append("i_top_cap")
     schedule_names = [
         "positive_i",
         "moving_stroke_us",
@@ -1358,11 +1403,32 @@ def _rung_record(
     }
 
 
+# Real, measured shape of a Breakaway (schema-16) plan after the ladder gate
+# widened to include it -- 13 positive rungs (the same half-octave insertion
+# ReproducedStageB plans already carried), captured from
+# `build_test_breakaway_plan()` in the Rust suite via a temporary print, not
+# hand-derived. The schema-14 archived-capture tier in `_plan()` stays
+# unaugmented (it pins a real historical capture predating this change), so
+# tests exercising the new shape apply this as an override instead.
+_BREAKAWAY_HALF_OCTAVE_OVERRIDES: dict[str, object] = {
+    "i_top_cap": 1_310,
+    "positive_rung_count": 13,
+    "positive_i": [1, 2, 3, 4, 8, 16, 32, 64, 128, 256, 512, 724, 1_024],
+    "family_size": 60,
+    "total_rung_count": 15,
+    "expected_observations": 120,
+    "nominal_workflow_ms": 177_751,
+    "maximum_workflow_ms": 195_496,
+    "recovery_slot_count": 15,
+}
+
+
 def _synthetic_complete_capture(
     schema_revision: int = 1,
     slot_order: int = SLOT_ORDER_FORWARD_FIRST,
     *,
     forge_standalone: bool = False,
+    overrides: dict[str, object] | None = None,
 ) -> tuple[list[VelocityObservation], list[tuple[bytes, dict[str, object]]]]:
     """Build a complete, internally consistent Stage-C capture.
 
@@ -1373,8 +1439,15 @@ def _synthetic_complete_capture(
     result self-consistent end to end, digests included. That is the capture no
     firmware builder can produce and that the audit used to accept. Never pass
     it to a test that asserts an empty mismatch list.
+
+    `overrides` is applied to the plan dict before the digest and records are
+    built, so every derived field (`plan_digest`, the encoded records) stays
+    self-consistent with the override -- unlike mutating the plan after this
+    function returns.
     """
     plan = _plan(schema_revision)
+    if overrides:
+        plan.update(overrides)
     if slot_order != SLOT_ORDER_FORWARD_FIRST:
         plan["flags"] = int(plan.get("flags", 0)) | (slot_order << _PLAN_SLOT_ORDER_SHIFT)
     if forge_standalone:
@@ -3322,8 +3395,16 @@ def test_breakaway_reproduced_complete_audits_clean() -> None:
     whole >= 8 non-combined range) so this legitimate terminal audits clean
     while a real standalone claim of the same outcome (schema 14, tested
     below) still fails.
+
+    Breakaway plans now also receive the half-octave rung (real values
+    measured from `build_test_breakaway_plan()` in the Rust suite, matching
+    the same 13-rung shape `ReproducedStageB` plans already used), so this
+    fixture overrides the ladder-derived fields the schema-14 tier's
+    unaugmented 12-rung archived-capture values would otherwise leave stale.
     """
-    raw, records = _synthetic_complete_capture(schema_revision=16)
+    raw, records = _synthetic_complete_capture(
+        schema_revision=16, overrides=_BREAKAWAY_HALF_OCTAVE_OVERRIDES
+    )
     terminal_raw, terminal = records[-1]
     terminal = {**terminal, "outcome": 1}
     records[-1] = (terminal_raw, terminal)
@@ -3338,7 +3419,9 @@ def test_breakaway_candidate_first_run_audits_clean() -> None:
     `CompleteCandidate` (outcome 0) exactly like every other non-combined
     schema, and audits clean unmodified.
     """
-    raw, records = _synthetic_complete_capture(schema_revision=16)
+    raw, records = _synthetic_complete_capture(
+        schema_revision=16, overrides=_BREAKAWAY_HALF_OCTAVE_OVERRIDES
+    )
 
     audit = audit_velocity_integral(raw, records)
 
