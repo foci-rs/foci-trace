@@ -85,9 +85,9 @@ _U128_MAX = (1 << 128) - 1
 #         standalone Stage C, planned by `plan_velocity_integral_response`
 #         with `combined_selected_response: None`. Decode-only mirror: this
 #         builder named the `StageCAcquisition::ReproducedStageB` acquisition
-#         kind, removed along with the function once it was left with no
-#         live installer. Firmware no longer defines this workflow;
-#         this constant exists here only so archived captures keep decoding.
+#         kind, removed once it was left with no live installer. Firmware no
+#         longer defines this workflow; this constant exists here only so
+#         archived captures keep decoding.
 #   _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION through
 #   _COMBINED_STAGE_C_SCHEMA_REVISION
 #         the combined P-then-I workflow. Decode-only mirror: firmware
