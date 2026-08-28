@@ -41,6 +41,7 @@ from foci_trace.velocity_integral import (
     slot_direction_index,
     slot_for_observation,
     stage_c_combined_workflow,
+    stage_c_schema_is_known,
     stage_c_slot_transition,
     velocity_i_tau_us,
 )
@@ -287,6 +288,61 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
                 "recovery_nominal_slot_us": 1_816_958,
                 "recovery_slot_count": 14,
                 "flags": 0,
+            }
+        )
+    if schema_revision >= 17:
+        # schema_revision >= 14 (Breakaway) ran first and zeroed Stage-B
+        # authority, set final_p=951, and shrank the ladder back to 12
+        # unaugmented rungs (see that tier's comment). Schema 17 is the
+        # ReproducedStageB/standalone family, not Breakaway, so every field
+        # that tier changed must be restored to the schema-7 tier's values
+        # here, before applying the augmented 13-rung geometry on top.
+        # integral_plan_digest picks its hashed build representation by dict
+        # key presence ("build_features" in plan), not by schema_revision --
+        # a real schema-17 capture can only ever come from current
+        # firmware, which always hashes build_features
+        # (integral_plan.rs's `hash_value!(self.build_features)`, unconditional,
+        # first in the hash chain), never build_revision. Every earlier tier
+        # in this fixture models archived legacy-compatible captures and
+        # correctly keeps build_revision; schema 17 is new and must not.
+        del plan["build_revision"]
+        plan["build_features"] = BUILD_FEATURE_Q4_12_GAINS
+        plan.update(
+            {
+                "combined_selected_response": False,
+                "final_p": 724,
+                "usable_torque_limit": 2_534,
+                "directional_memberships": [0x001C_0000, 0x001C_0000],
+                "stage_b_joint_membership": 0x001C_0000,
+                "joint_membership": 0x0004_0000,
+                "directional_validity": [3, 3],
+                "reduced_margin": True,
+                "directional_pooled_intervals": [
+                    [17_000_000, 18_000_000],
+                    [-19_000_000, -18_000_000],
+                ],
+                "flags": 0b10,
+                "positive_rung_count": 13,
+                "positive_i": [1, 2, 3, 4, 8, 16, 32, 64, 128, 256, 512, 724, 1_024],
+                "family_size": 60,
+                "total_rung_count": 15,
+                "expected_observations": 120,
+                "i_top_cap": 1_310,
+                # `integral_plan.rs` always sets `recovery_slot_count:
+                # total_rung_count` (never independently derived), and the
+                # schema-14 tier above left this at its own 14-rung value; it
+                # must track this tier's 15-rung total_rung_count instead.
+                "recovery_slot_count": 15,
+                # slot_transition_allowance_us and the combined-only duration
+                # reserve do not apply to a non-combined (append_exact_cap:
+                # false) plan, so schema 8's 13-rung combined durations
+                # (177_751/195_496) are NOT reusable here -- this is a new
+                # combination (non-combined, 13 rungs) with no existing
+                # fixture precedent. Step 4 computes and fills these in from
+                # the real firmware duration function, the same
+                # temporary-Rust-print technique Task 10 Step 1 uses.
+                "nominal_workflow_ms": 177_751,
+                "maximum_workflow_ms": 195_496,
             }
         )
     return plan
@@ -614,6 +670,75 @@ def test_schema_seven_transition_boundary_and_overflow_fail_closed() -> None:
             p_start=0x7FFF,
             p_top=0x7FFF,
         )
+
+
+def test_schema_seventeen_is_known():
+    assert stage_c_schema_is_known(17)
+
+
+def test_schema_seventeen_derives_the_half_octave_rung():
+    ladder = derive_integral_ladder(
+        pwm_hz=25_000,
+        moving_stroke_us=512_000,
+        shortest_suffix_us=64_000,
+        maximum_i=8_192,
+        schema_revision=17,
+        build_features=BUILD_FEATURE_Q4_12_GAINS,
+    )
+    assert ladder["i_top_cap"] == 1_310
+    assert ladder["positive_i"] == [
+        1,
+        2,
+        3,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+        724,
+        1_024,
+    ]
+
+
+def test_schema_sixteen_derive_integral_ladder_is_unaugmented():
+    ladder = derive_integral_ladder(
+        pwm_hz=25_000,
+        moving_stroke_us=512_000,
+        shortest_suffix_us=64_000,
+        maximum_i=8_192,
+        schema_revision=16,
+        build_features=BUILD_FEATURE_Q4_12_GAINS,
+    )
+    assert 724 not in ladder["positive_i"]
+    assert ladder["positive_i"][-1] == 1_024
+
+
+def test_schema_seventeen_plan_digest_hashes_i_top_cap() -> None:
+    plan = _plan(schema_revision=17)
+    baseline = integral_plan_digest(plan)
+    assert integral_plan_digest({**plan, "i_top_cap": plan["i_top_cap"] + 1}) != baseline
+
+
+def test_schema_sixteen_plan_digest_ignores_i_top_cap() -> None:
+    plan = _plan(schema_revision=16)
+    baseline = integral_plan_digest(plan)
+    assert integral_plan_digest({**plan, "i_top_cap": 99_999}) == baseline
+
+
+def test_schema_seventeen_selects_transition_capable_prefix_independently() -> None:
+    # Mirrors the schema-7 standalone _validate_plan tests (e.g.
+    # test_schema_four_plan_reconstructs_exact_counts_and_duration above) with
+    # schema_revision=17 -- confirms _validate_plan runs the same independent
+    # Stage-B test-point reconstruction for the new standalone/ReproducedStageB
+    # schema that it already runs for schema 7.
+    plan = _plan(schema_revision=17)
+    plan["plan_digest"] = integral_plan_digest(plan)
+    mismatches: list[str] = []
+    _validate_plan(plan, mismatches)
+    assert mismatches == []
 
 
 def _plan_marker(plan: dict[str, object], sequence: int) -> tuple[bytes, dict[str, object]]:
@@ -2529,12 +2654,12 @@ def test_schema_four_sufficiency_requires_both_closing_bookends() -> None:
     assert _stage_c_run_sufficient(3, opening, [None, None], masks) is True
 
 
-@pytest.mark.parametrize("schema_revision", [0, 17])
+@pytest.mark.parametrize("schema_revision", [0, 18])
 def test_integral_ladder_rejects_unsupported_schema(schema_revision: int) -> None:
-    """Schema 16 -- the breakaway campaign -- is a real firmware schema
-    (`BREAKAWAY_STAGE_C_SCHEMA_REVISION`, combined_plan.rs:40) and builds its
-    ladder without the combined exact-cap append, so the rejected boundary sits
-    one above it. 17 does not exist as a Stage-C revision in firmware.
+    """Schema 17 -- the half-octave `ReproducedStageB` ladder
+    (`STAGE_C_EVIDENCE_SCHEMA_REVISION`, integral_plan.rs:21) -- is a real
+    firmware schema, so the rejected boundary sits one above it. 18 does not
+    exist as a Stage-C revision in firmware.
     """
     with pytest.raises(ValueError, match="unsupported Stage-C evidence schema"):
         derive_integral_ladder(

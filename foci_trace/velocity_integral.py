@@ -99,6 +99,13 @@ _U128_MAX = (1 << 128) - 1
 #         the breakaway-seeded campaign (`combined_plan.rs:40`), planned by
 #         `plan_breakaway_velocity_integral_response` with
 #         `combined_selected_response: None`.
+#   above the breakaway range, through _HALF_OCTAVE_STAGE_C_SCHEMA_REVISION
+#         the standalone Stage C `ReproducedStageB` workflow again
+#         (`integral_plan.rs:24`, `plan_velocity_integral_response`), now with
+#         a half-octave rung inserted below the ladder's top gap. Same
+#         builder and workflow as the original standalone range; only the
+#         ladder geometry differs, which is why this is a new range rather
+#         than a widening of the first one.
 #
 # Revisions inside one range differ only in measurement rules -- which suffix a
 # walk selects, which evidence closes a chain -- never in workflow, builder, or
@@ -114,6 +121,7 @@ _STANDALONE_STAGE_C_SCHEMA_REVISION = 7
 _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION = 8
 _COMBINED_STAGE_C_SCHEMA_REVISION = 13
 _BREAKAWAY_STAGE_C_SCHEMA_REVISION = 16
+_HALF_OCTAVE_STAGE_C_SCHEMA_REVISION = 17
 
 
 def _slot_order_parity_twist(slot_order: int, observation: int) -> int:
@@ -187,7 +195,7 @@ def plan_slot_order(plan: dict[str, object]) -> int:
 
 def stage_c_schema_is_known(schema_revision: int) -> bool:
     """Return whether one Stage-C evidence schema revision exists in firmware."""
-    return 1 <= schema_revision <= _BREAKAWAY_STAGE_C_SCHEMA_REVISION
+    return 1 <= schema_revision <= _HALF_OCTAVE_STAGE_C_SCHEMA_REVISION
 
 
 def stage_c_combined_workflow(schema_revision: int) -> bool:
@@ -355,6 +363,8 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     slot_order = plan_slot_order(plan)
     if slot_order:
         _append_integer(encoded, slot_order, 1)
+    if schema_revision >= _HALF_OCTAVE_STAGE_C_SCHEMA_REVISION:
+        _append_integer(encoded, int(plan["i_top_cap"]), 2)
     return _fnv1a64(bytes(encoded))
 
 
@@ -383,6 +393,19 @@ def _largest_i_for_tau(
     if largest == 0:
         raise ValueError("integral ladder has no representable rung")
     return largest
+
+
+_HALF_OCTAVE_NUM = 181
+_HALF_OCTAVE_DEN_SHIFT = 7
+
+
+def _half_octave_candidate(raw: int) -> int:
+    """Return the ceiling-rounded half-octave rung, mirroring firmware's
+    `half_octave_candidate` (`sweep_plan.rs`) exactly: `raw * sqrt(2)`,
+    approximated as `raw * _HALF_OCTAVE_NUM / 2**_HALF_OCTAVE_DEN_SHIFT`."""
+    numerator = raw * _HALF_OCTAVE_NUM
+    rounding = (1 << _HALF_OCTAVE_DEN_SHIFT) - 1
+    return (numerator + rounding) >> _HALF_OCTAVE_DEN_SHIFT
 
 
 def derive_integral_ladder(
@@ -426,6 +449,18 @@ def derive_integral_ladder(
     while candidate <= i_top_cap:
         rungs.append(candidate)
         candidate <<= 1
+    # Mirrors `integral_top_gap_candidate` (`integral_plan.rs`): a
+    # `ReproducedStageB` plan (schema >= 17) inserts one half-octave rung
+    # immediately below the ladder's top native octave rung, but only when
+    # that gap is entirely within the pure-octave region (never inside the
+    # fixed 1, 2, 3 prefix).
+    if schema_revision >= _HALF_OCTAVE_STAGE_C_SCHEMA_REVISION and len(rungs) >= 2:
+        upper_octave = rungs[-1]
+        lower_octave = upper_octave // 2
+        if lower_octave >= 4:
+            candidate = _half_octave_candidate(lower_octave)
+            if lower_octave < candidate < upper_octave:
+                rungs.insert(len(rungs) - 1, candidate)
     # Only the combined workflow appends the exact cap:
     # `plan_velocity_integral_response_from_source` picks
     # `build_combined_integral_ladder` when `append_exact_cap` is set, and only
@@ -1137,7 +1172,10 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
                     mismatches.append(
                         "plan recovery quantization exposure differs from exact reconstruction"
                     )
-    if schema_revision == _STANDALONE_STAGE_C_SCHEMA_REVISION:
+    if schema_revision in (
+        _STANDALONE_STAGE_C_SCHEMA_REVISION,
+        _HALF_OCTAVE_STAGE_C_SCHEMA_REVISION,
+    ):
         try:
             selection = select_transition_capable_test_point(
                 stage_b_joint_membership=int(plan["stage_b_joint_membership"]),
