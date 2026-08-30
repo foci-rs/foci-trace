@@ -4078,7 +4078,7 @@ class _BreakawayCampaignBuilder:
         emits no wire record for it at all -- so `collected_count` (passed
         separately here; defaults to `len(margins)` when every collected
         rung was nominatable) can legitimately exceed the number of emitted
-        margin records. `adjacent_rate_step_permille` mirrors firmware's own
+        margin records. `adjacent_rate_step_percent_milli` mirrors firmware's own
         rule exactly (breakaway_reporting.rs:426-439): nonzero only when this
         record's `collected_index` is the IMMEDIATE successor of the
         previous *emitted* record's `collected_index`; a gap resets it to 0
@@ -4921,7 +4921,7 @@ def test_audit_breakaway_campaign_accepts_a_non_nominatable_rung_leaving_a_colle
     ]
     by_collected_index = {int(record["collected_index"]): record for record in margin_records}
     assert set(by_collected_index) == {0, 1, 3}
-    assert by_collected_index[3]["adjacent_rate_step_permille"] == 0
+    assert by_collected_index[3]["adjacent_rate_step_percent_milli"] == 0
 
 
 def _bw_raw_observation_tick(

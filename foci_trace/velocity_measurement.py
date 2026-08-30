@@ -7173,11 +7173,12 @@ def audit_breakaway_campaign(
                 and collected_index == previous_collected_index + 1
                 else 0
             )
-            if expected_step != int(record["adjacent_rate_step_permille"]):
+            firmware_step = int(record["adjacent_rate_step_percent_milli"])
+            if expected_step != firmware_step:
                 mismatches.append(
-                    f"discovery adjacent_rate_step_permille (collected_index="
+                    f"discovery adjacent_rate_step_percent_milli (collected_index="
                     f"{int(record['collected_index'])}): firmware="
-                    f"{int(record['adjacent_rate_step_permille'])} offline={int(expected_step)}"
+                    f"{firmware_step} offline={int(expected_step)}"
                 )
             previous_mid = mid
             previous_collected_index = collected_index

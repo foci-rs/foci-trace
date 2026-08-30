@@ -3358,7 +3358,7 @@ def test_decode_breakaway_discovery_rung_margin_matches_the_firmware_golden_byte
     assert decoded["upper_percent_milli"] == 79_500
     assert decoded["margin_percent_milli"] == 500
     assert decoded["half_width_percent_milli"] == 4_500
-    assert decoded["adjacent_rate_step_permille"] == -1_200
+    assert decoded["adjacent_rate_step_percent_milli"] == -1_200
 
 
 def test_decode_breakaway_rung_zero_diagnostic_matches_the_firmware_golden_bytes() -> None:

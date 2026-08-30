@@ -2700,7 +2700,7 @@ def decode_breakaway_record(
                 ("upper_percent_milli", "i"),
                 ("margin_percent_milli", "i"),
                 ("half_width_percent_milli", "i"),
-                ("adjacent_rate_step_permille", "i"),
+                ("adjacent_rate_step_percent_milli", "i"),
             ),
         )
         decoded["record_kind"] = "breakaway_discovery_rung_margin"
