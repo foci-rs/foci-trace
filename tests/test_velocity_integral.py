@@ -1457,14 +1457,13 @@ def _synthetic_complete_capture(
     # rest_selection/recovery_rest records are emitted, so the schedule below
     # is inert and every existing schema-1-through-11 fixture is unaffected.
     stage_c_scored = schema_revision >= 12
-    # `integral_recovery_rest_schedule` (`integral_sweep.rs:779-785`) picks
-    # `Stabilized` for a combined workflow and `ImmediateScored` otherwise, and
-    # which workflow built the plan is fixed by the schema revision. This was
-    # once a caller-supplied flag, which let a caller ask for a schema-12
-    # immediate-scored capture -- a plan firmware cannot build, since every
-    # schema in 8..13 comes from `plan_combined_velocity_integral_response`.
-    # Immediate-scored Stage C is reached by asking for schema 14.
-    stabilized = bool(plan.get("combined_selected_response", False))
+    # Firmware unified rung-origin recovery onto the stabilized rest schedule
+    # (`RecoveryRestSchedule`/`integral_recovery_rest_schedule` are gone), so
+    # every Stage-C recovery -- combined, breakaway, or standalone -- now runs
+    # it unconditionally. This mirrors that: it is no longer a workflow-
+    # dependent choice, only whether `stage_c_scored` gates recovery-rest
+    # evidence into existence at all.
+    stabilized = True
     plan["plan_digest"] = integral_plan_digest(plan)
     records = _plan_records(plan)
     sequence = 1
@@ -3067,18 +3066,16 @@ def test_renumber_stage_c_nonterminal_sequence_keeps_raw_and_decoded_in_sync() -
     assert checked > 0
 
 
-def test_immediate_scored_stage_c_recovery_passes_with_no_event_150() -> None:
-    """Under `ImmediateScored` the firmware emits the owner-5 selection and no
-    `recovery_rest` at all. Before this task both the rest-presence rule and
-    the causal-order builder demanded one, rejecting every such run. Assert an
-    empty mismatch list, not the absence of the two specific messages: that is
-    what proves the whole capture -- plan, marker, and terminal -- is
-    schedule-consistent, not just that the two targeted checks were silenced.
-
-    The capture is schema 14, the breakaway campaign, because that is the only
-    Stage-C schema whose plan carries no combined selected response and so
-    reaches `ImmediateScored`. This fixture previously claimed schema 12 with
-    the response omitted, which no firmware builder can produce.
+def test_breakaway_stage_c_recovery_passes_with_event_150() -> None:
+    """`RecoveryRestSchedule` (`Stabilized` vs `ImmediateScored`) is gone from
+    firmware: every rung-origin recovery now runs the stabilized schedule --
+    owner-5 selection, then Event 150, then the recovery -- regardless of
+    workflow. This pins that for the breakaway campaign specifically, the one
+    Stage-C workflow with no combined selected response, mirroring the
+    schema-12 combined case below. Assert an empty mismatch list, not the
+    absence of any one message: that is what proves the whole capture --
+    plan, marker, and terminal -- is schedule-consistent, not just that a
+    targeted check was silenced.
     """
     raw, records = _synthetic_complete_capture(schema_revision=14)
 
@@ -3090,15 +3087,18 @@ def test_immediate_scored_stage_c_recovery_passes_with_no_event_150() -> None:
 
 def test_schema_twelve_capture_without_its_combined_response_is_rejected() -> None:
     """The forgery this fix exists to stop: a schema-12 capture that omits its
-    combined selected response and every consequence of it -- Event 150, the
-    combined recovery flag, the combined terminal tail, the combined outcome --
-    while staying self-consistent, digests included. No firmware builder can
-    produce it: `plan_combined_velocity_integral_response` is the only builder
-    for schemas 8 through 13 and it always supplies `Some(selected)`
+    combined selected response and every consequence of it -- the combined
+    recovery flag, the combined terminal tail, the combined outcome -- while
+    staying self-consistent, digests included. No firmware builder can produce
+    it: `plan_combined_velocity_integral_response` is the only builder for
+    schemas 8 through 13 and it always supplies `Some(selected)`
     (integral_plan.rs:1214). Deriving the workflow from the plan's own field
     let this capture elect standalone semantics for itself and reach an empty
-    mismatch list; deriving it from the schema revision rejects it on nine
-    independent counts, starting with the schema/workflow contradiction.
+    mismatch list; deriving it from the schema revision rejects it on seven
+    independent counts, starting with the schema/workflow contradiction. Event
+    150 and its recovery rest are no longer among those counts: firmware now
+    runs the stabilized rest schedule unconditionally, so this forgery still
+    carries both.
     """
     raw, records = _synthetic_complete_capture(schema_revision=12, forge_standalone=True)
 
@@ -3108,8 +3108,6 @@ def test_schema_twelve_capture_without_its_combined_response_is_rejected() -> No
         "plan combined selected response contradicts its schema workflow: "
         "schema=12 expects a combined selected response",
         "combined plan selected response intervals are invalid",
-        "Stage C recovery selection does not precede Event 150",
-        "moving Stage C recovery lacks recovery rest evidence",
         "terminal combined-workflow flag differs from the plan",
         "terminal combined tail differs from the plan",
         "combined target status differs from causal ladder evidence",
@@ -3201,10 +3199,10 @@ def test_breakaway_rung_carrying_a_response_horizon_is_rejected() -> None:
 
 
 def test_stabilized_stage_c_recovery_passes_with_event_150() -> None:
-    """Under `Stabilized` the firmware emits the owner-5 selection, then Event
-    150, then the recovery. Mirrors the immediate-scored test above under the
-    other schedule; both must reach an empty mismatch list for the rule to be
-    schedule-derived rather than hardcoded either way.
+    """The combined-workflow counterpart to the breakaway case above: schema
+    12 also emits the owner-5 selection, then Event 150, then the recovery.
+    Both must reach an empty mismatch list, pinning that the grammar holds
+    across schema revisions now that the schedule itself no longer varies.
     """
     raw, records = _synthetic_complete_capture(schema_revision=12)
 

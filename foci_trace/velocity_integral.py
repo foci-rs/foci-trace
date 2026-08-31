@@ -1554,17 +1554,16 @@ def audit_velocity_integral(
             "velocity_primitive_current",
         )
     ]
-    # `integral_recovery_rest_schedule` (`integral_sweep.rs:779-785`) returns
-    # `Stabilized` for `plan.combined_workflow || is_acceptance_matrix(plan)`
-    # and `ImmediateScored` otherwise. Acceptance-matrix runs cannot reach this
-    # caller: `_velocity_integral_audits` (analyze.py) collects `matrix_runs`
-    # first and filters every candidate with
-    # `int(item.payload["run_sequence"]) not in matrix_runs`. So the schedule
-    # is the combined-workflow identity alone -- taken from the schema
-    # revision, which `_validate_plan` has already confirmed agrees with the
-    # plan's own field, rather than from that field directly. A capture that
-    # simply omitted the field would otherwise choose its own schedule.
-    stabilized_recovery_rest = stage_c_combined_workflow(schema_revision)
+    # Decode-only mirror: firmware unified rung-origin recovery onto the
+    # stabilized rest schedule, deleting `RecoveryRestSchedule` and the
+    # `integral_recovery_rest_schedule` selector that used to pick between it
+    # and `ImmediateScored`. Every Stage-C recovery now runs the stabilized
+    # schedule unconditionally -- combined, breakaway, and acceptance-matrix
+    # alike -- so this is no longer a workflow-dependent choice. The
+    # `audit_scored_rest_grammar` call below still gates on `schema_floor=12`
+    # -- the revision recovery-rest evidence first exists at all -- so below
+    # that floor this value is inert.
+    stabilized_recovery_rest = True
     mismatches.extend(
         audit_scored_rest_grammar(
             [value for _raw, value in nonterminal],
