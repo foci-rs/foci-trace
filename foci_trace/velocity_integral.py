@@ -108,6 +108,18 @@ _U128_MAX = (1 << 128) - 1
 #         builder and workflow as the original standalone range; only the
 #         ladder geometry differs, which is why this is a new range rather
 #         than a widening of the first one.
+#   above the half-octave range, through
+#   _UNIFIED_REST_STAGE_C_SCHEMA_REVISION
+#         the breakaway-seeded campaign again, now with rung-origin recovery
+#         unified onto the stabilized rest schedule. Same builder and workflow
+#         as the breakaway range, so the breakaway predicates below admit both;
+#         what differs is the evidence grammar, since every recovery that
+#         completes a scored rest now emits its rest record where the earlier
+#         range emitted one only for acceptance-matrix runs. A grammar change
+#         cannot widen a range -- that is exactly the distinction a range is
+#         supposed to preserve -- so this is a new one, and it is not
+#         contiguous with the breakaway range it continues because the
+#         half-octave range was numbered in between.
 #
 # Revisions inside one range differ only in measurement rules -- which suffix a
 # walk selects, which evidence closes a chain -- never in workflow, builder, or
@@ -124,6 +136,16 @@ _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION = 8
 _COMBINED_STAGE_C_SCHEMA_REVISION = 13
 _BREAKAWAY_STAGE_C_SCHEMA_REVISION = 16
 _HALF_OCTAVE_STAGE_C_SCHEMA_REVISION = 17
+_UNIFIED_REST_STAGE_C_SCHEMA_REVISION = 18
+
+# Every schema whose ladder carries the half-octave insertion and hashes
+# `i_top_cap`. All three are response-ladder plans; they are listed rather than
+# ranged because the breakaway workflow's two ranges are not contiguous.
+_RESPONSE_LADDER_STAGE_C_SCHEMA_REVISIONS = (
+    _BREAKAWAY_STAGE_C_SCHEMA_REVISION,
+    _HALF_OCTAVE_STAGE_C_SCHEMA_REVISION,
+    _UNIFIED_REST_STAGE_C_SCHEMA_REVISION,
+)
 
 
 def _slot_order_parity_twist(slot_order: int, observation: int) -> int:
@@ -197,7 +219,22 @@ def plan_slot_order(plan: dict[str, object]) -> int:
 
 def stage_c_schema_is_known(schema_revision: int) -> bool:
     """Return whether one Stage-C evidence schema revision exists in firmware."""
-    return 1 <= schema_revision <= _HALF_OCTAVE_STAGE_C_SCHEMA_REVISION
+    return 1 <= schema_revision <= _UNIFIED_REST_STAGE_C_SCHEMA_REVISION
+
+
+def stage_c_stabilized_recovery_rest(schema_revision: int) -> bool:
+    """Return whether one Stage-C schema emits a rest record per recovery.
+
+    Firmware picked the schedule per plan until it unified rung-origin recovery
+    onto the stabilized one. Before that, `integral_recovery_rest_schedule`
+    returned `Stabilized` for a combined workflow (and for acceptance-matrix
+    runs, which never reach this caller) and `ImmediateScored` otherwise, so a
+    breakaway or standalone capture carries no rest record at all. From the
+    unified-rest revision on, every completed scored rest emits one.
+    """
+    return stage_c_combined_workflow(schema_revision) or (
+        schema_revision >= _UNIFIED_REST_STAGE_C_SCHEMA_REVISION
+    )
 
 
 def stage_c_combined_workflow(schema_revision: int) -> bool:
@@ -365,10 +402,7 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     slot_order = plan_slot_order(plan)
     if slot_order:
         _append_integer(encoded, slot_order, 1)
-    if schema_revision in (
-        _BREAKAWAY_STAGE_C_SCHEMA_REVISION,
-        _HALF_OCTAVE_STAGE_C_SCHEMA_REVISION,
-    ):
+    if schema_revision in _RESPONSE_LADDER_STAGE_C_SCHEMA_REVISIONS:
         _append_integer(encoded, int(plan["i_top_cap"]), 2)
     return _fnv1a64(bytes(encoded))
 
@@ -455,14 +489,11 @@ def derive_integral_ladder(
         rungs.append(candidate)
         candidate <<= 1
     # Mirrors `integral_top_gap_candidate` (`integral_plan.rs`): a
-    # response-ladder plan (schema 16, Breakaway, or 17, ReproducedStageB)
-    # inserts one half-octave rung immediately below the ladder's top native
-    # octave rung, but only when that gap is entirely within the pure-octave
-    # region (never inside the fixed 1, 2, 3 prefix).
-    is_response_ladder_schema = schema_revision in (
-        _BREAKAWAY_STAGE_C_SCHEMA_REVISION,
-        _HALF_OCTAVE_STAGE_C_SCHEMA_REVISION,
-    )
+    # response-ladder plan (Breakaway or ReproducedStageB) inserts one
+    # half-octave rung immediately below the ladder's top native octave rung,
+    # but only when that gap is entirely within the pure-octave region (never
+    # inside the fixed 1, 2, 3 prefix).
+    is_response_ladder_schema = schema_revision in _RESPONSE_LADDER_STAGE_C_SCHEMA_REVISIONS
     if is_response_ladder_schema and len(rungs) >= 2:
         upper_octave = rungs[-1]
         lower_octave = upper_octave // 2
@@ -1557,13 +1588,14 @@ def audit_velocity_integral(
     # Decode-only mirror: firmware unified rung-origin recovery onto the
     # stabilized rest schedule, deleting `RecoveryRestSchedule` and the
     # `integral_recovery_rest_schedule` selector that used to pick between it
-    # and `ImmediateScored`. Every Stage-C recovery now runs the stabilized
-    # schedule unconditionally -- combined, breakaway, and acceptance-matrix
-    # alike -- so this is no longer a workflow-dependent choice. The
-    # `audit_scored_rest_grammar` call below still gates on `schema_floor=12`
-    # -- the revision recovery-rest evidence first exists at all -- so below
-    # that floor this value is inert.
-    stabilized_recovery_rest = True
+    # and `ImmediateScored`. That changed the grammar rather than a measurement
+    # rule, so it came with a schema bump: captures at and above the
+    # unified-rest revision carry a rest record for every completed scored
+    # rest, and archived captures below it keep the schedule their firmware
+    # actually ran. The `audit_scored_rest_grammar` call below still gates on
+    # `schema_floor=12` -- the revision recovery-rest evidence first exists at
+    # all -- so below that floor this value is inert.
+    stabilized_recovery_rest = stage_c_stabilized_recovery_rest(schema_revision)
     mismatches.extend(
         audit_scored_rest_grammar(
             [value for _raw, value in nonterminal],
@@ -2212,7 +2244,11 @@ def audit_velocity_integral(
             not faulted
             and sufficient
             and not plan_combined_workflow
-            and schema_revision != _BREAKAWAY_STAGE_C_SCHEMA_REVISION
+            and schema_revision
+            not in (
+                _BREAKAWAY_STAGE_C_SCHEMA_REVISION,
+                _UNIFIED_REST_STAGE_C_SCHEMA_REVISION,
+            )
             and outcome != 0
         ):
             mismatches.append("standalone sufficient run falsely reports the combined outcome")

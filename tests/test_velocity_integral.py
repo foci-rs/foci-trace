@@ -43,6 +43,7 @@ from foci_trace.velocity_integral import (
     stage_c_combined_workflow,
     stage_c_schema_is_known,
     stage_c_slot_transition,
+    stage_c_stabilized_recovery_rest,
     velocity_i_tau_us,
 )
 from foci_trace.velocity_measurement import (
@@ -344,6 +345,28 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
                 # temporary-Rust-print technique Task 10 Step 1 uses.
                 "nominal_workflow_ms": 177_751,
                 "maximum_workflow_ms": 195_496,
+            }
+        )
+    if schema_revision >= 18:
+        # Back to the breakaway-seeded campaign: same builder as the schema-14
+        # tier, so every Stage-B authority field that tier zeroed is zeroed
+        # again here, undoing the ReproducedStageB restoration the schema-17
+        # tier applied. What schema 18 keeps from that tier is the half-octave
+        # geometry (it is a response-ladder schema) and `build_features`, since
+        # only current firmware can emit this revision at all. What
+        # separates it from schema 14 on the wire is neither of those: it is
+        # the recovery-rest grammar, which `_synthetic_complete_capture` reads
+        # from `stage_c_stabilized_recovery_rest`.
+        plan.update(
+            {
+                "final_p": 951,
+                "directional_memberships": [0, 0],
+                "stage_b_joint_membership": 0,
+                "joint_membership": 0,
+                "directional_validity": [0, 0],
+                "reduced_margin": False,
+                "directional_pooled_intervals": [[0, 0], [0, 0]],
+                "flags": 0,
             }
         )
     return plan
@@ -866,7 +889,9 @@ def _plan_records(plan: dict[str, object]) -> list[tuple[bytes, dict[str, object
         "positive_rung_count": plan["positive_rung_count"],
     }
     core_names = [
-        "build_revision",
+        # A newer capture states build_features where an archived one
+        # states build_revision, exactly as `integral_plan_digest` selects it.
+        "build_features" if "build_features" in plan else "build_revision",
         "schema_revision",
         "channel",
         "stage_b_plan_digest",
@@ -886,7 +911,7 @@ def _plan_records(plan: dict[str, object]) -> list[tuple[bytes, dict[str, object
     ]
     if int(plan["schema_revision"]) >= 7:
         core_names.insert(core_names.index("joint_membership"), "stage_b_joint_membership")
-    if int(plan["schema_revision"]) in (16, 17):
+    if int(plan["schema_revision"]) in (16, 17, 18):
         core_names.append("i_top_cap")
     schedule_names = [
         "positive_i",
@@ -1458,12 +1483,12 @@ def _synthetic_complete_capture(
     # is inert and every existing schema-1-through-11 fixture is unaffected.
     stage_c_scored = schema_revision >= 12
     # Firmware unified rung-origin recovery onto the stabilized rest schedule
-    # (`RecoveryRestSchedule`/`integral_recovery_rest_schedule` are gone), so
-    # every Stage-C recovery -- combined, breakaway, or standalone -- now runs
-    # it unconditionally. This mirrors that: it is no longer a workflow-
-    # dependent choice, only whether `stage_c_scored` gates recovery-rest
-    # evidence into existence at all.
-    stabilized = True
+    # (`RecoveryRestSchedule`/`integral_recovery_rest_schedule` are gone), but
+    # that changed the evidence grammar, so it came with a schema bump. A
+    # fixture therefore emits the schedule its declared revision's firmware
+    # actually ran: the combined range and the unified-rest range carry a rest
+    # record per recovery, the breakaway and standalone ranges below do not.
+    stabilized = stage_c_stabilized_recovery_rest(schema_revision)
     plan["plan_digest"] = integral_plan_digest(plan)
     records = _plan_records(plan)
     sequence = 1
@@ -2726,7 +2751,7 @@ def test_schema_four_sufficiency_requires_both_closing_bookends() -> None:
     assert _stage_c_run_sufficient(3, opening, [None, None], masks) is True
 
 
-@pytest.mark.parametrize("schema_revision", [0, 18])
+@pytest.mark.parametrize("schema_revision", [0, 19])
 def test_integral_ladder_rejects_unsupported_schema(schema_revision: int) -> None:
     """Schema 17 -- the half-octave `ReproducedStageB` ladder
     (`STAGE_C_EVIDENCE_SCHEMA_REVISION`, integral_plan.rs:21) -- is a real
@@ -3066,23 +3091,110 @@ def test_renumber_stage_c_nonterminal_sequence_keeps_raw_and_decoded_in_sync() -
     assert checked > 0
 
 
-def test_breakaway_stage_c_recovery_passes_with_event_150() -> None:
-    """`RecoveryRestSchedule` (`Stabilized` vs `ImmediateScored`) is gone from
-    firmware: every rung-origin recovery now runs the stabilized schedule --
-    owner-5 selection, then Event 150, then the recovery -- regardless of
-    workflow. This pins that for the breakaway campaign specifically, the one
-    Stage-C workflow with no combined selected response, mirroring the
-    schema-12 combined case below. Assert an empty mismatch list, not the
-    absence of any one message: that is what proves the whole capture --
-    plan, marker, and terminal -- is schedule-consistent, not just that a
-    targeted check was silenced.
+def test_immediate_scored_stage_c_recovery_passes_with_no_event_150() -> None:
+    """Firmware unified rung-origin recovery onto the stabilized rest schedule,
+    but bumped the schema when it did, so an archived capture keeps decoding
+    under the schedule its own firmware ran. Schema 14 is that archived shape:
+    the owner-5 selection is followed straight by the recovery, with no Event
+    150 anywhere. Assert an empty mismatch list, not the absence of the two
+    specific messages: that is what proves the whole capture -- plan, marker,
+    and terminal -- is schedule-consistent, not just that the targeted checks
+    were silenced.
     """
     raw, records = _synthetic_complete_capture(schema_revision=14)
+
+    assert not any(value["record_kind"] == "recovery_rest" for _raw, value in records)
 
     audit = audit_velocity_integral(raw, records)
 
     assert audit["mismatches"] == []
     assert audit["matches_firmware"] is True
+
+
+def test_unified_rest_stage_c_recovery_passes_with_event_150() -> None:
+    """The post-bump counterpart of the archived schema-14 shape above, and the
+    reason the bump exists: the same breakaway workflow, planned by the same
+    builder, but with every recovery that completes a scored rest emitting its
+    rest record. Both revisions must reach an empty mismatch list under their
+    own grammar, which is what makes the schema number -- not a guess about
+    firmware vintage -- the thing that selects the grammar.
+    """
+    raw, records = _synthetic_complete_capture(schema_revision=18)
+
+    assert any(value["record_kind"] == "recovery_rest" for _raw, value in records)
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["mismatches"] == []
+    assert audit["matches_firmware"] is True
+
+
+def test_archived_schema_fourteen_capture_carrying_event_150_is_rejected() -> None:
+    """The archived grammar has teeth in both directions. A schema-14 capture
+    that carries the post-unification rest record is not a valid capture of
+    either firmware: schema-14 firmware never emitted one, and firmware that
+    does emit one declares the bumped revision. Without the bump this forgery
+    would audit clean, because both grammars would be admissible under one
+    number -- which is exactly the ambiguity the new revision removes.
+    """
+    plan = _plan(14)
+    plan["plan_digest"] = integral_plan_digest(plan)
+    raw, records = _synthetic_complete_capture(schema_revision=14)
+    donor_raw, donor = next(
+        (item_raw, dict(item))
+        for item_raw, item in _synthetic_complete_capture(schema_revision=18)[1]
+        if item["record_kind"] == "recovery_rest"
+    )
+    donor["plan_digest"] = plan["plan_digest"]
+    terminal_raw, terminal = records.pop()
+    # Insert it exactly where the stabilized grammar puts it -- directly after
+    # the owner-5 selection -- so the stream is a perfectly formed schema-18
+    # capture wearing a schema-14 revision. Nothing but the revision gate can
+    # reject it, which is what makes this a test of the bump itself.
+    selection_index = next(
+        index
+        for index, (_raw, value) in enumerate(records)
+        if value["record_kind"] == "rest_selection" and int(value["owner"]) == 5
+    )
+    records.insert(selection_index + 1, (donor_raw, donor))
+    next_sequence = _renumber_stage_c_nonterminal_sequence(records)
+    terminal["evidence_sequence"] = next_sequence
+    terminal["digest"] = _rebuild_stage_c_digest(plan, records)
+    records.append((terminal_raw, terminal))
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["mismatches"] == ["Stage C recovery selection does not precede its recovery"]
+
+
+def test_unified_rest_capture_without_event_150_is_rejected() -> None:
+    """The mirror of the archived case: removing Event 150 from a schema-18
+    capture must be rejected, proving the presence rule is actually gated on
+    the new revision rather than left permanently on or permanently off. Two
+    validators fire on the same real stream -- the presence check and the
+    grammar, whose owner-5 successor is no longer `recovery_rest`.
+    """
+    plan = _plan(18)
+    plan["plan_digest"] = integral_plan_digest(plan)
+    raw, records = _synthetic_complete_capture(schema_revision=18)
+    terminal_raw, terminal = records.pop()
+    removed_index = next(
+        index
+        for index, (_raw, value) in enumerate(records)
+        if value["record_kind"] == "recovery_rest"
+    )
+    del records[removed_index]
+    next_sequence = _renumber_stage_c_nonterminal_sequence(records)
+    terminal["evidence_sequence"] = next_sequence
+    terminal["digest"] = _rebuild_stage_c_digest(plan, records)
+    records.append((terminal_raw, terminal))
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["mismatches"] == [
+        "Stage C recovery selection does not precede Event 150",
+        "moving Stage C recovery lacks recovery rest evidence",
+    ]
 
 
 def test_schema_twelve_capture_without_its_combined_response_is_rejected() -> None:

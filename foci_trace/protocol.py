@@ -8,10 +8,9 @@ from typing import Any
 
 from .scored_rest import select_causal_rest_suffixes
 from .velocity_integral import (
-    _BREAKAWAY_STAGE_C_SCHEMA_REVISION,
     _COMBINED_STAGE_C_SCHEMA_REVISION,
     _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION,
-    _HALF_OCTAVE_STAGE_C_SCHEMA_REVISION,
+    _RESPONSE_LADDER_STAGE_C_SCHEMA_REVISIONS,
 )
 
 FRAME_MAGIC = 0x43525446
@@ -901,10 +900,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 decoded["selected_response_intervals_q"] = [
                     [cursor.take("i"), cursor.take("i")] for _ in range(2)
                 ]
-            if schema_revision in (
-                _BREAKAWAY_STAGE_C_SCHEMA_REVISION,
-                _HALF_OCTAVE_STAGE_C_SCHEMA_REVISION,
-            ):
+            if schema_revision in _RESPONSE_LADDER_STAGE_C_SCHEMA_REVISIONS:
                 decoded["i_top_cap"] = cursor.take("H")
             decoded["record_kind"] = "integral_plan_core"
         elif fragment == 1:
