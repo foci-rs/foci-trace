@@ -233,15 +233,16 @@ PHASE_NAMES = {
     6: "CurrentTune",
     7: "CurrentValidate",
     8: "InnerDone",
-    9: "MechanicalId",  # Reserved, historical-only; new captures never emit this phase.
-    10: "VelocityTune",
-    11: "VelocityValidate",
-    12: "PositionTune",
-    13: "FilterTune",
-    14: "Commit",
-    15: "OuterDone",
     16: "EncoderAlign",
     17: "ClosedLoopEntry",
+    18: "BreakawayProportionalAcquisition",
+    19: "IntegralGainResponseCharacterization",
+    20: "FixedGainAmplitudeValidation",
+    21: "ReversalStandstillRobustnessGate",
+    22: "PositionTune",
+    23: "FilterTune",
+    24: "Commit",
+    25: "OuterDone",
 }
 
 COMMISSION_STATUS_NAMES = {

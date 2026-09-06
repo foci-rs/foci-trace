@@ -2241,17 +2241,37 @@ def test_decode_velocity_integral_response_event_names(event_id: int, event_name
 
 
 def test_historical_mechanical_id_constants_are_reserved_not_reused() -> None:
-    """MechanicalId phase, status, and event ids are retired from production
-    firmware but archived captures still contain them. Pin the
-    exact values so a future id reassignment cannot silently corrupt old
-    captures.
+    """MechanicalId status and event ids are retired from production firmware
+    but archived captures still contain them. Pin the exact values
+    so a future id reassignment cannot silently corrupt old captures.
+
+    The `CommissionPhase` wire code (9) is a separate hard break:
+    the phase decoder carries no historical-code table, so `MechanicalId` is
+    absent from `PHASE_NAMES` entirely, not aliased.
     """
-    assert PHASE_NAMES[9] == "MechanicalId"
+    assert 9 not in PHASE_NAMES
     assert COMMISSION_STATUS_NAMES[10] == "mechanical_id_failed"
     assert EVENT_COMMISSION_MECHANICAL_ID_RESULT == 110
     assert EVENT_COMMISSION_MECHANICAL_ID_ATTEMPT == 111
     assert EVENT_COMMISSION_MECHANICAL_ID_RESPONSE == 112
     assert EVENT_COMMISSION_MECHANICAL_ID_CLASSIFICATION == 113
+
+
+def test_commission_phase_names_cover_live_wire_codes_only() -> None:
+    """The outer block is a contiguous run of workflow-specific codes; codes
+    9-15 (the retired `MechanicalId`/`VelocityTune`/`VelocityValidate` and the
+    pre-renumber outer block) are never reused.
+    """
+    live_codes = {1, 2, 3, 4, 5, 6, 7, 8, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25}
+    assert set(PHASE_NAMES) == live_codes
+    assert PHASE_NAMES[18] == "BreakawayProportionalAcquisition"
+    assert PHASE_NAMES[19] == "IntegralGainResponseCharacterization"
+    assert PHASE_NAMES[20] == "FixedGainAmplitudeValidation"
+    assert PHASE_NAMES[21] == "ReversalStandstillRobustnessGate"
+    assert PHASE_NAMES[22] == "PositionTune"
+    assert PHASE_NAMES[23] == "FilterTune"
+    assert PHASE_NAMES[24] == "Commit"
+    assert PHASE_NAMES[25] == "OuterDone"
 
 
 @pytest.mark.parametrize(

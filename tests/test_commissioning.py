@@ -472,6 +472,11 @@ def test_historical_mechanical_id_events_still_decode_into_summary_fragments() -
     """MechanicalId events 110-113 are retired from production firmware,
     but archived captures that contain them must still resolve
     into mechanical_id_summary fragments.
+
+    The `CommissionPhase` wire code (9) is a separate hard break:
+    `PHASE_NAMES` carries no historical-code entry for it, so the phase itself
+    falls back to the generic `Phase9` label; only the mechanical_id_summary
+    event decoding survives.
     """
     builder = CommissioningCaptureBuilder()
     _observe_event(builder, 1, 1_000, EVENT_COMMISSION_ENGINE_START, arg2=1, arg3=1)
@@ -519,7 +524,7 @@ def test_historical_mechanical_id_events_still_decode_into_summary_fragments() -
     data = commissioning_report_to_json(report)
     run = data["runs"][0]
 
-    assert "phase MechanicalId" in text
+    assert "phase Phase9" in text
     assert "result=mechanical_id_failed" in text
     assert run["result"] == "mechanical_id_failed"
     assert run["summaries"][0]["family"] == "mechanical_id_summary"
