@@ -2251,9 +2251,9 @@ COMMISSION_ERROR_NAMES = {
 # `BreakawayPhase` (breakaway_reporting.rs): which of the three campaign
 # drivers owns a `BreakawayCampaignTerminal` closure record.
 BREAKAWAY_PHASE_NAMES = {
-    0: "probe",
-    1: "discovery",
-    2: "confirmation",
+    0: "breakaway_probe",
+    1: "proportional_response_discovery",
+    2: "proportional_band_confirmation",
 }
 
 # Persistent `BreakawayCheckpoint` codes. Values are append-only because they
