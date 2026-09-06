@@ -35,7 +35,7 @@ ENGINE_COMMISSION = 1
 ENGINE_OUTER_TUNE = 4
 PHASE_INNER_DONE = 8
 PHASE_MECHANICAL_ID = 9
-PHASE_VELOCITY_TUNE = 10
+PHASE_BREAKAWAY_PROPORTIONAL_ACQUISITION = 18
 PHASE_CLOSED_LOOP_ENTRY = 17
 PHASE_VELOCITY_VALIDATE = 11
 STATUS_ACCEPTED = 0
@@ -538,9 +538,9 @@ def test_historical_mechanical_id_events_still_decode_into_summary_fragments() -
 
 def test_new_run_progress_sequence_skips_mechanical_id_phase() -> None:
     """New captures never emit MechanicalId: the inner engine ends
-    at InnerDone (phase 8) and a separate outer engine's next phase is
-    VelocityTune (phase 10), with phase 9 never appearing and no
-    mechanical_id_summary in the report.
+    at InnerDone (phase 8) and a separate outer engine opens its own velocity
+    workflow, BreakawayProportionalAcquisition (phase 18), with phase 9 never
+    appearing and no mechanical_id_summary in the report.
     """
     builder = CommissioningCaptureBuilder()
     _observe_event(builder, 1, 1_000, EVENT_COMMISSION_ENGINE_START, arg2=1, arg3=1)
@@ -583,7 +583,7 @@ def test_new_run_progress_sequence_skips_mechanical_id_phase() -> None:
         6_000,
         EVENT_COMMISSION_PHASE_START,
         engine_kind=ENGINE_OUTER_TUNE,
-        arg2=PHASE_VELOCITY_TUNE,
+        arg2=PHASE_BREAKAWAY_PROPORTIONAL_ACQUISITION,
         arg3=1,
     )
     _observe_event(
@@ -592,7 +592,7 @@ def test_new_run_progress_sequence_skips_mechanical_id_phase() -> None:
         7_000,
         EVENT_COMMISSION_PHASE_END,
         engine_kind=ENGINE_OUTER_TUNE,
-        arg2=PHASE_VELOCITY_TUNE,
+        arg2=PHASE_BREAKAWAY_PROPORTIONAL_ACQUISITION,
         arg3=STATUS_ACCEPTED,
     )
     _observe_event(
@@ -609,7 +609,7 @@ def test_new_run_progress_sequence_skips_mechanical_id_phase() -> None:
     data = commissioning_report_to_json(report)
 
     phase_ids = [phase["phase_id"] for run in data["runs"] for phase in run["phases"]]
-    assert phase_ids == [PHASE_INNER_DONE, PHASE_VELOCITY_TUNE]
+    assert phase_ids == [PHASE_INNER_DONE, PHASE_BREAKAWAY_PROPORTIONAL_ACQUISITION]
     assert PHASE_MECHANICAL_ID not in phase_ids
     assert not any(run["summaries"] for run in data["runs"])
     assert not report.caveats
