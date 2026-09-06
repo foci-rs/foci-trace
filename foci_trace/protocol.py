@@ -14,6 +14,10 @@ from .velocity_integral import (
 )
 
 FRAME_MAGIC = 0x43525446
+# Version 21 adds `stop_rung_index` to the breakaway discovery terminal: the
+# rung the discovery walk had reached when it stopped, distinct from the
+# breakaway probe's rung (constant per ladder, decoded elsewhere in the
+# record).
 # Version 20 adds the velocity feedforward clamp-engaged flag to the critical
 # payload.
 # Version 19 adds `error_code` to the breakaway campaign terminal and a new
@@ -28,7 +32,7 @@ FRAME_MAGIC = 0x43525446
 # the open-loop model term or to measured demand.
 # Version 15 replaced the productive-boundary probe with physical excursion.
 # Historical versions remain readable through their versioned record shapes.
-PROTOCOL_VERSION = 20
+PROTOCOL_VERSION = 21
 SUPPORTED_PROTOCOL_VERSIONS = (
     1,
     2,
@@ -50,6 +54,7 @@ SUPPORTED_PROTOCOL_VERSIONS = (
     18,
     19,
     20,
+    21,
 )
 HEADER_LEN = 32
 
@@ -2660,7 +2665,7 @@ def decode_breakaway_record(
         else:
             decoded["moving_pid_output_peak"] = None
         decoded["record_kind"] = "breakaway_raw_observation"
-    elif tag == BREAKAWAY_TAG_DISCOVERY_TERMINAL and len(payload) in (28, 29):
+    elif tag == BREAKAWAY_TAG_DISCOVERY_TERMINAL and len(payload) in (28, 29, 30):
         decoded = _take_fields(
             cursor,
             (
@@ -2681,8 +2686,12 @@ def decode_breakaway_record(
         )
         # Present from protocol 17. Absent records report `None` rather than 0,
         # so "no error" and "this capture predates the field" stay distinct.
-        decoded["error_code"] = cursor.take("B") if len(payload) == 29 else None
+        decoded["error_code"] = cursor.take("B") if len(payload) >= 29 else None
         decoded["error_code_name"] = COMMISSION_ERROR_NAMES.get(decoded["error_code"])
+        # Present from protocol 21. Absent records report `None` rather than 0,
+        # so "stopped at rung zero" and "this capture predates the field"
+        # stay distinct.
+        decoded["stop_rung_index"] = cursor.take("B") if len(payload) == 30 else None
         decoded["record_kind"] = "breakaway_discovery_terminal"
     elif tag == BREAKAWAY_TAG_DISCOVERY_RUNG_MARGIN and len(payload) == 38:
         decoded = _take_fields(

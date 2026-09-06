@@ -239,7 +239,7 @@ def test_decodes_version_nine_pptm_velocity_diagnostic() -> None:
 
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_OBSERVATION, payload) + payload)
 
-    assert PROTOCOL_VERSION == 20
+    assert PROTOCOL_VERSION == 21
     assert 13 in SUPPORTED_PROTOCOL_VERSIONS
     assert 14 in SUPPORTED_PROTOCOL_VERSIONS
     assert 20 in SUPPORTED_PROTOCOL_VERSIONS
@@ -251,8 +251,8 @@ def test_decode_frame_rejects_a_version_beyond_the_supported_range() -> None:
     # A version past the supported range is rejected; historical versions stay
     # decodable so committed captures still replay.
     payload = bytes(88)
-    with pytest.raises(DecodeError, match="unsupported protocol version 21"):
-        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=21) + payload)
+    with pytest.raises(DecodeError, match="unsupported protocol version 22"):
+        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=22) + payload)
 
 
 def test_rejects_velocity_observation_with_both_diagnostic_kinds() -> None:
@@ -774,6 +774,24 @@ def test_breakaway_discovery_terminal_names_the_error_behind_an_internal_fault()
     assert new["terminal_cause_name"] == "discovery_internal_fault"
     assert new["error_code"] == 66
     assert new["error_code_name"] == "discovery_band_not_selected"
+
+
+def test_breakaway_discovery_terminal_reports_the_discovery_stop_rung() -> None:
+    """The stop rung is where the discovery walk actually stopped, distinct
+    from the breakaway probe's rung (constant per ladder, decoded elsewhere
+    in the record). A capture predating the field reports `None` rather than
+    0, so "rung zero" and "field absent" stay distinct.
+    """
+    from foci_trace.protocol import decode_breakaway_record
+
+    with_error = bytes([6]) + struct.pack("<IHQQHBBBB", 7, 3, 0x1122, 0x3344, 128, 0, 2, 0, 0)
+    assert len(with_error) == 29
+
+    old = decode_breakaway_record(with_error, protocol_version=20)
+    assert old["stop_rung_index"] is None
+
+    new = decode_breakaway_record(with_error + bytes([17]), protocol_version=21)
+    assert new["stop_rung_index"] == 17
 
 
 def test_decodes_a_breakaway_stage_c_plan_core_without_a_combined_response() -> None:
