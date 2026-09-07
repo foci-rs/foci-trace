@@ -2260,18 +2260,15 @@ def test_historical_mechanical_id_constants_are_reserved_not_reused() -> None:
 def test_commission_phase_names_cover_live_wire_codes_only() -> None:
     """The outer block is a contiguous run of workflow-specific codes; codes
     9-15 (the retired `MechanicalId`/`VelocityTune`/`VelocityValidate` and the
-    pre-renumber outer block) are never reused.
+    pre-renumber outer block) and 22-25 (the retired `PositionTune`/
+    `FilterTune`/`Commit`/`OuterDone`) are never reused.
     """
-    live_codes = {1, 2, 3, 4, 5, 6, 7, 8, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25}
+    live_codes = {1, 2, 3, 4, 5, 6, 7, 8, 16, 17, 18, 19, 20, 21}
     assert set(PHASE_NAMES) == live_codes
     assert PHASE_NAMES[18] == "BreakawayProportionalAcquisition"
     assert PHASE_NAMES[19] == "IntegralGainResponseCharacterization"
     assert PHASE_NAMES[20] == "FixedGainAmplitudeValidation"
     assert PHASE_NAMES[21] == "ReversalStandstillRobustnessGate"
-    assert PHASE_NAMES[22] == "PositionTune"
-    assert PHASE_NAMES[23] == "FilterTune"
-    assert PHASE_NAMES[24] == "Commit"
-    assert PHASE_NAMES[25] == "OuterDone"
 
 
 @pytest.mark.parametrize(
