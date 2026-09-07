@@ -2208,7 +2208,7 @@ def audit_velocity_integral(
         # what the recovery_flags byte says), and, for a sufficient run,
         # the outcome itself: `integral_sweep.rs:1174-1177` reports
         # `Complete` (1) only when `plan.combined_workflow`, and
-        # `CompleteCandidate` (0) otherwise. A terminal can lie about any
+        # `FirstRunRetained` (0) otherwise. A terminal can lie about any
         # one of these independently of the others, so each gets its own
         # check and its own message. The outcome rule is `not faulted`-gated
         # (like every other sibling check in this function that reads
@@ -2228,7 +2228,7 @@ def audit_velocity_integral(
         # non-combined (`plan_combined_workflow` is False for it) but, unlike
         # the immediate-scored range below it, can be legitimately
         # *reproduced* via `integral_resume` -- and a reproduced breakaway run
-        # genuinely reports `Complete` (1), not `CompleteCandidate` (0).
+        # genuinely reports `Complete` (1), not `FirstRunRetained` (0).
         # Breakaway sets no combined recovery-flags bit and emits no combined
         # tail (both checked above and unaffected by this carve-out), so the
         # outcome check is the only one that needs to know about it.

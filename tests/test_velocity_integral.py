@@ -1645,7 +1645,7 @@ def _synthetic_complete_capture(
     # derives from `combined_workflow` must follow it too, not just the
     # combined-only tail: `outcome` itself is one of them --
     # `integral_sweep.rs:1174-1177` reports `Complete` (1) for a sufficient
-    # combined run and `CompleteCandidate` (0) for a sufficient standalone
+    # combined run and `FirstRunRetained` (0) for a sufficient standalone
     # one, so hardcoding 1 for every schema >= 8 run (as this fixture used
     # to) claims a combined completion an immediate-scored run never
     # reaches. The combined-only terminal encoding (`combined_workflow`/
@@ -3460,7 +3460,7 @@ def test_stabilized_terminal_missing_the_combined_tail_is_rejected() -> None:
 
 def test_standalone_sufficient_terminal_claiming_the_combined_outcome_is_rejected() -> None:
     """A sufficient, genuinely standalone (immediate-scored) run must report
-    outcome 0 (`CompleteCandidate`), never outcome 1 (`Complete`):
+    outcome 0 (`FirstRunRetained`), never outcome 1 (`Complete`):
     `integral_sweep.rs:1174-1177` reports `Complete` only when
     `plan.combined_workflow`. Before this round the fixture hardcoded
     outcome 1 for every schema >= 8 run regardless of schedule, and
@@ -3482,7 +3482,7 @@ def test_standalone_sufficient_terminal_claiming_the_combined_outcome_is_rejecte
 def test_combined_sufficient_terminal_claiming_the_standalone_outcome_is_rejected() -> None:
     """Opposite direction: a sufficient, genuinely combined (`Stabilized`)
     run must report outcome 1 (`Complete`), never outcome 0
-    (`CompleteCandidate`). This check predates this fix round -- it is not
+    (`FirstRunRetained`). This check predates this fix round -- it is not
     new production behavior -- but had no direct test coverage; added here
     to close that gap alongside the new standalone-direction test above.
     """
@@ -3504,7 +3504,7 @@ def test_breakaway_reproduced_complete_audits_clean() -> None:
     schema 16 exactly as it is for the pre-existing schema-14 immediate-scored
     range -- but unlike that range, a breakaway run that is reproduced via
     `integral_resume` genuinely reaches `Complete`, not just
-    `CompleteCandidate`. The guard must carve out schema 16 alone (not the
+    `FirstRunRetained`. The guard must carve out schema 16 alone (not the
     whole >= 8 non-combined range) so this legitimate terminal audits clean
     while a real standalone claim of the same outcome (schema 14, tested
     below) still fails.
@@ -3529,7 +3529,7 @@ def test_breakaway_reproduced_complete_audits_clean() -> None:
 
 def test_breakaway_candidate_first_run_audits_clean() -> None:
     """A breakaway (schema-16) run's first pass, before reproduction, reports
-    `CompleteCandidate` (outcome 0) exactly like every other non-combined
+    `FirstRunRetained` (outcome 0) exactly like every other non-combined
     schema, and audits clean unmodified.
     """
     raw, records = _synthetic_complete_capture(
