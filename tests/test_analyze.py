@@ -2712,7 +2712,7 @@ def test_fixed_gain_amplitude_audit_keeps_its_namespace_in_output() -> None:
 
     assert "fixed_gain_amplitude_runs" not in empty
     assert encoded["fixed_gain_amplitude_runs"] == [audit]
-    assert "namespace=amplitude" in rendered
+    assert "namespace=fixed_gain_amplitude" in rendered
     assert "outcome=Complete cause=None" in rendered
     assert "observed_bound_q=35" in rendered
 

@@ -3175,7 +3175,8 @@ def format_analysis(
         terminal = amplitude.get("terminal", {})
         comparison = amplitude.get("cross_run_comparison", {})
         stage_b_lines.append(
-            "fixed_gain_amplitude dev={device} source={source} run={run} namespace=amplitude "
+            "fixed_gain_amplitude dev={device} source={source} run={run} "
+            "namespace=fixed_gain_amplitude "
             "order={order} outcome={outcome} cause={cause} p={p} i={i} "
             "matches_firmware={matches} observed_bound_q={bound}".format(
                 device=amplitude.get("device_index", "?"),
