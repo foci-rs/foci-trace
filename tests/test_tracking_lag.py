@@ -16,7 +16,7 @@ class Stream:
         self.seq = 0
 
     def _push(self, frame_type, ms, payload, *, kind, index, boot=1, hflags=0, version=22, skip=0):
-        self.seq += 1 + skip
+        self.seq = (self.seq + 1 + skip) & 0xFFFF_FFFF
         header = FrameHeader(
             version, 32, frame_type, hflags, 0, kind, index, self.seq, int(ms * TICKS_PER_MS), boot
         )
@@ -43,9 +43,20 @@ class Stream:
             version=version,
         )
 
-    def status(self, ms, *, pressure=0, max_cycles=1000, kind=0, index=255, skip=0, hflags=0):
+    def status(
+        self, ms, *, pressure=0, max_cycles=1000, kind=0, index=255, skip=0, hflags=0, boot=1
+    ):
         payload = {"trace_deadline_pressure_count": pressure, "max_spi_sample_cycles": max_cycles}
-        self._push(FRAME_TYPE_STATUS, ms, payload, kind=kind, index=index, skip=skip, hflags=hflags)
+        self._push(
+            FRAME_TYPE_STATUS,
+            ms,
+            payload,
+            kind=kind,
+            index=index,
+            skip=skip,
+            hflags=hflags,
+            boot=boot,
+        )
 
     def cruise(self, start_ms, n, v, err, *, step_ms=1, index=0, offset=0, boot=1):
         for i in range(n):
@@ -308,3 +319,31 @@ def test_budget_without_board_source_has_no_verdict():
     b = s.run().budgets[0]
     assert not b.bracketed
     assert b.reason == "no board status source"
+
+
+def test_boundaries_do_not_leak_across_a_timestamp_reset():
+    s = Stream()
+    s.cruise(0, 450, 75, -144)
+    s.crit(450, v=75, err=-144, hflags=tl.FLAG_DROP_GAP_BEFORE_THIS_FRAME)
+    s.cruise(451, 449, 75, -144)
+    s.cruise(0, 900, 75, -144, boot=2)  # the MCU clock restarts at zero after the reboot
+    report = s.run()
+    assert sum(1 for seg in report.segments if seg.channel.boot_id == 1) == 2
+    assert sum(1 for seg in report.segments if seg.channel.boot_id == 2) == 1
+
+
+def test_sequence_rollover_is_not_a_discontinuity():
+    s = Stream()
+    s.seq = 0xFFFF_FFFF - 450  # the 32-bit counter wraps 450 frames into the cruise
+    s.cruise(0, 900, 75, -144)
+    assert len(s.run().segments) == 1
+
+
+def test_reboot_before_the_post_motion_status_is_not_bracketed():
+    s = Stream()
+    s.status(0)
+    s.cruise(100, 450, 75, -144)
+    s.status(800, pressure=0, max_cycles=90_000, boot=2)  # counters reset with the reboot
+    b = s.run().budgets[0]
+    assert not b.bracketed
+    assert b.reason == "reboot during capture"

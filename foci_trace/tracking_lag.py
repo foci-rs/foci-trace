@@ -28,6 +28,7 @@ GAP_MULTIPLIER = 5.0
 BRACKET_MS = 200.0
 UNITS_PER_REV = 65536
 MIN_PROTOCOL_VERSION = 22
+SEQUENCE_MASK = 0xFFFF_FFFF
 
 SOURCE_KIND_BOARD = 0
 SOURCE_INDEX_NA = 255
@@ -173,20 +174,29 @@ def _refuse_if_old(frames: list[tuple[int, Frame]]) -> str | None:
     return None
 
 
-def _device_boundaries(frames: list[tuple[int, Frame]]) -> dict[int, list[int]]:
-    """Return per-device tick values where stream continuity broke."""
-    boundaries: dict[int, list[int]] = {}
+def _device_boundaries(frames: list[tuple[int, Frame]]) -> dict[tuple[int, int], list[int]]:
+    """Return tick values where stream continuity broke, per device and boot.
+
+    Boundaries are keyed by boot as well as device because the MCU clock
+    restarts at zero on every boot: a tick recorded in one boot is meaningless
+    against another boot's timeline and must never be tested there. Each
+    boundary is filed under the boot of the frame that carries it, which is the
+    timeline its tick belongs to.
+    """
+    boundaries: dict[tuple[int, int], list[int]] = {}
     previous: dict[int, tuple[int, int]] = {}
     for device, frame in frames:
         header = frame.header
-        boundaries.setdefault(device, [])
+        key = (device, header.boot_id)
+        boundaries.setdefault(key, [])
         broke = bool(header.flags & FLAG_DROP_GAP_BEFORE_THIS_FRAME)
         prior = previous.get(device)
         if prior is not None:
             prior_sequence, prior_boot = prior
-            broke = broke or header.boot_id != prior_boot or header.sequence != prior_sequence + 1
+            expected = (prior_sequence + 1) & SEQUENCE_MASK
+            broke = broke or header.boot_id != prior_boot or header.sequence != expected
         if broke:
-            boundaries[device].append(header.timestamp_ticks)
+            boundaries[key].append(header.timestamp_ticks)
         previous[device] = (header.sequence, header.boot_id)
     for ticks in boundaries.values():
         ticks.sort()
@@ -376,7 +386,13 @@ def _run_outcome(channel: ChannelKey, run: _Run, ticks_per_ms: float) -> CruiseS
 def _sampler_budget(
     device_index: int, device_frames: list[Frame], ticks_per_ms: float, product: str
 ) -> SamplerBudget:
-    """Read the sampler-overrun budget from board status frames bracketing motion."""
+    """Read the sampler-overrun budget from board status frames bracketing motion.
+
+    The motion and both bracketing status frames must share one boot. The
+    deadline-pressure and cycle counters reset on reboot, so a bracket that
+    spans one subtracts counters from different epochs and can report a clean
+    budget for a capture that actually overran.
+    """
     status = [
         frame
         for frame in device_frames
@@ -388,7 +404,7 @@ def _sampler_budget(
         return SamplerBudget(device_index, False, "no board status source", None, None, None)
 
     motion = [
-        frame.header.timestamp_ticks
+        frame
         for frame in device_frames
         if frame.header.frame_type == FRAME_TYPE_CRITICAL
         and _is_valid(frame)
@@ -397,14 +413,26 @@ def _sampler_budget(
     if not motion:
         return SamplerBudget(device_index, False, "no motion", None, None, None)
 
-    before = [frame for frame in status if frame.header.timestamp_ticks < min(motion)]
-    if not before:
-        return SamplerBudget(device_index, False, "no status before motion", None, None, None)
+    motion_boots = {frame.header.boot_id for frame in motion}
+    if len(motion_boots) > 1:
+        return SamplerBudget(device_index, False, "reboot during capture", None, None, None)
 
-    settled = max(motion) + BRACKET_MS * ticks_per_ms
-    after = [frame for frame in status if frame.header.timestamp_ticks >= settled]
+    boot = motion_boots.pop()
+    rebooted = len({frame.header.boot_id for frame in device_frames}) > 1
+    ticks = [frame.header.timestamp_ticks for frame in motion]
+    in_boot = [frame for frame in status if frame.header.boot_id == boot]
+
+    before = [frame for frame in in_boot if frame.header.timestamp_ticks < min(ticks)]
+    if not before:
+        reason = "reboot during capture" if rebooted else "no status before motion"
+        return SamplerBudget(device_index, False, reason, None, None, None)
+
+    settled = max(ticks) + BRACKET_MS * ticks_per_ms
+    after = [frame for frame in in_boot if frame.header.timestamp_ticks >= settled]
     if not after:
-        reason = f"no status {BRACKET_MS:.0f} ms after motion"
+        reason = (
+            "reboot during capture" if rebooted else f"no status {BRACKET_MS:.0f} ms after motion"
+        )
         return SamplerBudget(device_index, False, reason, None, None, None)
 
     return SamplerBudget(
@@ -446,7 +474,8 @@ def analyze_tracking_lag(
     skipped: list[SkippedRun] = []
     for channel, stream in _channel_streams(frames).items():
         ticks_per_ms = clock_hz_by_device[channel.device_index] / 1000.0
-        for run in _motion_runs(stream, boundaries[channel.device_index], ticks_per_ms):
+        own = boundaries[(channel.device_index, channel.boot_id)]
+        for run in _motion_runs(stream, own, ticks_per_ms):
             outcome = _run_outcome(channel, run, ticks_per_ms)
             if isinstance(outcome, CruiseSegment):
                 segments.append(outcome)
@@ -460,7 +489,7 @@ def analyze_tracking_lag(
             clock_hz_by_device[device] / 1000.0,
             product_by_device.get(device, ""),
         )
-        for device in sorted(boundaries)
+        for device in sorted({device for device, _frame in frames})
     ]
     return TrackingLagReport(None, segments, skipped, budgets)
 
