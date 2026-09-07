@@ -659,10 +659,10 @@ def _try_decode_fixed_gain_amplitude(payload: bytes) -> dict[str, Any] | None:
 # ratio field existed. These must keep decoding: replacing this set instead of
 # extending it would silently stop decoding every capture taken before the
 # field was added, including the six exported as design evidence.
-_STAGE_C_OBSERVATION_LEGACY_LENGTHS = (46, 47, 77, 80, 96)
+_INTEGRAL_OBSERVATION_LEGACY_LENGTHS = (46, 47, 77, 80, 96)
 
 # Each legacy length plus the four bytes of the inserted `drift_ratio_ppm` u32.
-_STAGE_C_OBSERVATION_LENGTHS_WITH_DRIFT = (50, 51, 81, 84, 100)
+_INTEGRAL_OBSERVATION_LENGTHS_WITH_DRIFT = (50, 51, 81, 84, 100)
 
 
 def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
@@ -834,8 +834,8 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                     (
                         ("schema_revision", "H"),
                         ("channel", "B"),
-                        ("stage_b_plan_digest_low", "I"),
-                        ("stage_b_plan_digest_high", "I"),
+                        ("proportional_plan_digest_low", "I"),
+                        ("proportional_plan_digest_high", "I"),
                         ("fixed_p", "H"),
                     ),
                 )
@@ -867,8 +867,8 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                     ),
                 )
             )
-            decoded["proportional_plan_digest"] = decoded["stage_b_plan_digest_low"] | (
-                decoded["stage_b_plan_digest_high"] << 32
+            decoded["proportional_plan_digest"] = decoded["proportional_plan_digest_low"] | (
+                decoded["proportional_plan_digest_high"] << 32
             )
             if decoded["schema_revision"] >= 3 or len(payload) == 88:
                 decoded["limit_evidence_capability"] = cursor.take("B")
@@ -970,7 +970,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         decoded["record_kind"] = "integral_plan_marker"
     elif kind == 1:
         proportional = len(payload) in (78, 91)
-        stage_b_recovery = len(payload) == 91
+        proportional_recovery = len(payload) == 91
         plan_fields = [
             ("run_sequence", "I"),
             ("evidence_sequence", "H"),
@@ -996,7 +996,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ("maximum_workflow_ms", "I"),
             )
         )
-        if stage_b_recovery:
+        if proportional_recovery:
             plan_fields.extend(
                 (
                     ("recovery_origin_band_counts", "I"),
@@ -1027,8 +1027,8 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
     elif kind == 2 and (amplitude := _try_decode_fixed_gain_amplitude(payload)) is not None:
         return amplitude
     elif kind == 2 and len(payload) in (
-        *_STAGE_C_OBSERVATION_LEGACY_LENGTHS,
-        *_STAGE_C_OBSERVATION_LENGTHS_WITH_DRIFT,
+        *_INTEGRAL_OBSERVATION_LEGACY_LENGTHS,
+        *_INTEGRAL_OBSERVATION_LENGTHS_WITH_DRIFT,
     ):
         decoded = _take_fields(
             cursor,
@@ -1056,7 +1056,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         # and stationarity_code. Captures from before the field existed have no
         # such value, and that absence must decode as None, not as the u32::MAX
         # "no finite reportable ratio" sentinel the firmware also emits.
-        if len(payload) in _STAGE_C_OBSERVATION_LENGTHS_WITH_DRIFT:
+        if len(payload) in _INTEGRAL_OBSERVATION_LENGTHS_WITH_DRIFT:
             decoded["drift_ratio_ppm"] = cursor.take("I")
         else:
             decoded["drift_ratio_ppm"] = None
@@ -1350,7 +1350,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             decoded["record_kind"] = "rung"
             cursor.finish()
             return decoded
-        compact_stage_b_rung = len(payload) == 33
+        compact_proportional_rung = len(payload) == 33
         fields = [
             ("run_sequence", "I"),
             ("evidence_sequence", "H"),
@@ -1361,7 +1361,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             ("reverse_low_q16", "i"),
             ("reverse_high_q16", "i"),
         ]
-        if not compact_stage_b_rung:
+        if not compact_proportional_rung:
             fields.extend(
                 (
                     ("forward_p_low", "H"),
@@ -1376,7 +1376,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ("reverse_class", "B"),
             )
         )
-        if not compact_stage_b_rung:
+        if not compact_proportional_rung:
             fields.extend(
                 (
                     ("forward_closure", "B"),
@@ -1390,7 +1390,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ("reverse_eligible_observations", "H"),
             )
         )
-        if not compact_stage_b_rung:
+        if not compact_proportional_rung:
             fields[-2:-2] = [
                 ("forward_eligible_rungs", "B"),
                 ("reverse_eligible_rungs", "B"),
@@ -2132,7 +2132,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ("installer_result", "B"),
             ),
         )
-        decoded["record_kind"] = "stage_c_promotion_diagnostic"
+        decoded["record_kind"] = "integral_promotion_diagnostic"
     else:
         raise DecodeError(f"unknown velocity-sweep evidence kind {kind}")
     cursor.finish()
@@ -2222,7 +2222,7 @@ COMMISSION_ERROR_NAMES = {
     62: "target_rate_invalid",
     63: "zero_elapsed_sample",
     64: "campaign_plan_invalid",
-    65: "stage_c_authority_denied",
+    65: "integral_authority_denied",
     66: "discovery_band_not_selected",
     67: "schedule_period_zero",
     68: "schedule_early_invocation",
@@ -2243,7 +2243,7 @@ BREAKAWAY_CHECKPOINT_NAMES = {
     5: "capture",
     6: "event_routing",
     7: "campaign_terminal_handled",
-    8: "stage_c_handed_off",
+    8: "integral_handed_off",
     9: "probe_safety_encoder_read",
     10: "probe_gain_write",
     11: "probe_ramp_mode_write",
