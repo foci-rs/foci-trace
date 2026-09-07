@@ -4,7 +4,7 @@ from foci_trace import tracking_lag as tl
 from foci_trace.protocol import FRAME_TYPE_CRITICAL, FRAME_TYPE_STATUS, Frame, FrameHeader
 
 CLOCK = 84_000_000
-TPM = CLOCK // 1000  # ticks per ms
+TICKS_PER_MS = CLOCK // 1000
 PRODUCT = {0: "FOCI OpenFFBoard (trace)"}
 
 
@@ -18,7 +18,7 @@ class Stream:
     def _push(self, frame_type, ms, payload, *, kind, index, boot=1, hflags=0, version=22, skip=0):
         self.seq += 1 + skip
         header = FrameHeader(
-            version, 32, frame_type, hflags, 0, kind, index, self.seq, int(ms * TPM), boot
+            version, 32, frame_type, hflags, 0, kind, index, self.seq, int(ms * TICKS_PER_MS), boot
         )
         self.frames.append((0, Frame(header, payload, b"")))
 
