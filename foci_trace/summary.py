@@ -33,13 +33,13 @@ class DeviceSummary:
     max_spi_cycles: int = 0
     proportional_regions: int = 0
     proportional_fragments: int = 0
-    stage_b_nominated_p: int = 0
+    proportional_nominated_p: int = 0
     proportional_outcome: int | None = None
     proportional_cause: int | None = None
     proportional_recovery_unavailable: bool = False
     selected_recovery_rest: tuple[int, int, int, int, int, int] | None = None
-    stage_b_directional_validity: tuple[int, int] | None = None
-    stage_b_reduced_margin: bool = False
+    proportional_directional_validity: tuple[int, int] | None = None
+    proportional_reduced_margin: bool = False
     velocity_integral_test_p: int = 0
     velocity_integral_rungs: int = 0
     velocity_integral_outcome: int | None = None
@@ -107,7 +107,7 @@ class LiveSummary:
                 else:
                     device.proportional_fragments += 1
             elif kind == "handoff":
-                device.stage_b_nominated_p = int(frame.payload["nominated_p"])
+                device.proportional_nominated_p = int(frame.payload["nominated_p"])
             elif kind == "proportional_terminal":
                 device.proportional_outcome = int(frame.payload["outcome"])
                 device.proportional_cause = int(frame.payload["cause"])
@@ -124,21 +124,21 @@ class LiveSummary:
                     int(frame.payload["scored_max_displacement_counts"]),
                 )
             elif kind == "reproduction_v4_header":
-                device.stage_b_nominated_p = int(frame.payload["fixed_p"])
-                device.stage_b_directional_validity = (
+                device.proportional_nominated_p = int(frame.payload["fixed_p"])
+                device.proportional_directional_validity = (
                     int(frame.payload["forward_validity"]),
                     int(frame.payload["reverse_validity"]),
                 )
-                device.stage_b_reduced_margin = bool(frame.payload["reduced_margin"])
+                device.proportional_reduced_margin = bool(frame.payload["reduced_margin"])
             elif kind == "integral_plan_core":
                 device.velocity_integral_test_p = int(frame.payload["fixed_p"])
                 if "directional_validity" in frame.payload:
                     validity = frame.payload["directional_validity"]
-                    device.stage_b_directional_validity = (
+                    device.proportional_directional_validity = (
                         int(validity[0]),
                         int(validity[1]),
                     )
-                    device.stage_b_reduced_margin = bool(frame.payload["reduced_margin"])
+                    device.proportional_reduced_margin = bool(frame.payload["reduced_margin"])
             elif kind == "integral_plan_recovery" and "flags" in frame.payload:
                 device.velocity_integral_probe_constrained_test_point = bool(
                     int(frame.payload["flags"]) & 2
@@ -203,7 +203,7 @@ class LiveSummary:
                 "proportional_recovery_unavailable={proportional_recovery_unavailable} "
                 "selected_recovery_rest={selected_recovery_rest} "
                 "proportional_validity={proportional_validity} "
-                "stage_b_reduced_margin={stage_b_reduced_margin} "
+                "proportional_reduced_margin={proportional_reduced_margin} "
                 "velocity_integral_p={integral_p} "
                 "velocity_integral_rungs={integral_rungs} "
                 "velocity_integral_outcome={integral_outcome} "
@@ -234,7 +234,7 @@ class LiveSummary:
                     max_spi=item.max_spi_cycles,
                     regions=item.proportional_regions,
                     fragments=item.proportional_fragments,
-                    proportional_p=item.stage_b_nominated_p,
+                    proportional_p=item.proportional_nominated_p,
                     proportional_outcome=(
                         "none" if item.proportional_outcome is None else item.proportional_outcome
                     ),
@@ -251,10 +251,12 @@ class LiveSummary:
                     ),
                     proportional_validity=(
                         "none"
-                        if item.stage_b_directional_validity is None
-                        else ",".join(str(value) for value in item.stage_b_directional_validity)
+                        if item.proportional_directional_validity is None
+                        else ",".join(
+                            str(value) for value in item.proportional_directional_validity
+                        )
                     ),
-                    stage_b_reduced_margin=str(item.stage_b_reduced_margin).lower(),
+                    proportional_reduced_margin=str(item.proportional_reduced_margin).lower(),
                     integral_p=item.velocity_integral_test_p,
                     integral_rungs=item.velocity_integral_rungs,
                     integral_outcome=(
