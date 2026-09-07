@@ -66,10 +66,10 @@ _TERMINAL_COMBINED_TARGET_MASK = 0b111 << 4
 _TERMINAL_COMBINED_WORKFLOW = 1 << 7
 
 _REST_REJECTION_OWNER_NAMES = {
-    0b00: "stage_c_anchor",
-    0b01: "stage_c_positive_observation",
+    0b00: "integral_anchor",
+    0b01: "integral_positive_observation",
     0b10: "integral_recovery",
-    0b11: "stage_c_cleanup",
+    0b11: "integral_cleanup",
 }
 _SLOT_TRANSITION_ALLOWANCE_US = 20_000
 _RECOVERY_STABILIZATION_US = 500_000
@@ -81,7 +81,7 @@ _U128_MAX = (1 << 128) - 1
 # The ranges are named by the constants below rather than by literals, so a
 # firmware bump widens a range without stranding this comment:
 #
-#   through _STANDALONE_STAGE_C_SCHEMA_REVISION
+#   through _STANDALONE_INTEGRAL_SCHEMA_REVISION
 #         standalone Stage C, planned by `plan_velocity_integral_response`
 #         with `combined_selected_response: None`. Decode-only mirror: this
 #         builder named the `IntegralAcquisition::ReproducedProportional` acquisition
@@ -98,18 +98,18 @@ _U128_MAX = (1 << 128) - 1
 #         unchanged, 13). Firmware no longer defines this workflow; these
 #         two constants exist here only so archived schema-8-to-13 captures
 #         keep decoding.
-#   above the combined range, through _BREAKAWAY_STAGE_C_SCHEMA_REVISION
+#   above the combined range, through _BREAKAWAY_INTEGRAL_SCHEMA_REVISION
 #         the breakaway-seeded campaign (`combined_plan.rs:40`), planned by
 #         `plan_breakaway_velocity_integral_response` with
 #         `combined_selected_response: None`.
-#   above the breakaway range, through _HALF_OCTAVE_STAGE_C_SCHEMA_REVISION
-#         the same now-removed standalone `ReproducedStageB` workflow, now
+#   above the breakaway range, through _HALF_OCTAVE_INTEGRAL_SCHEMA_REVISION
+#         the same now-removed standalone `ReproducedProportional` workflow, now
 #         with a half-octave rung inserted below the ladder's top gap. Same
 #         builder and workflow as the original standalone range; only the
 #         ladder geometry differs, which is why this is a new range rather
 #         than a widening of the first one.
 #   above the half-octave range, through
-#   _UNIFIED_REST_STAGE_C_SCHEMA_REVISION
+#   _UNIFIED_REST_INTEGRAL_SCHEMA_REVISION
 #         the breakaway-seeded campaign again, now with rung-origin recovery
 #         unified onto the stabilized rest schedule. Same builder and workflow
 #         as the breakaway range, so the breakaway predicates below admit both;
@@ -131,20 +131,20 @@ _U128_MAX = (1 << 128) - 1
 # self-consistent schema-8-to-13 capture that simply omits the selected
 # response -- a shape firmware cannot emit -- claim the standalone workflow and
 # escape every combined-terminal rule.
-_STANDALONE_STAGE_C_SCHEMA_REVISION = 7
+_STANDALONE_INTEGRAL_SCHEMA_REVISION = 7
 _FIRST_COMBINED_INTEGRAL_SCHEMA_REVISION = 8
 _COMBINED_INTEGRAL_SCHEMA_REVISION = 13
-_BREAKAWAY_STAGE_C_SCHEMA_REVISION = 16
-_HALF_OCTAVE_STAGE_C_SCHEMA_REVISION = 17
-_UNIFIED_REST_STAGE_C_SCHEMA_REVISION = 18
+_BREAKAWAY_INTEGRAL_SCHEMA_REVISION = 16
+_HALF_OCTAVE_INTEGRAL_SCHEMA_REVISION = 17
+_UNIFIED_REST_INTEGRAL_SCHEMA_REVISION = 18
 
 # Every schema whose ladder carries the half-octave insertion and hashes
 # `i_top_cap`. All three are response-ladder plans; they are listed rather than
 # ranged because the breakaway workflow's two ranges are not contiguous.
 _RESPONSE_LADDER_INTEGRAL_SCHEMA_REVISIONS = (
-    _BREAKAWAY_STAGE_C_SCHEMA_REVISION,
-    _HALF_OCTAVE_STAGE_C_SCHEMA_REVISION,
-    _UNIFIED_REST_STAGE_C_SCHEMA_REVISION,
+    _BREAKAWAY_INTEGRAL_SCHEMA_REVISION,
+    _HALF_OCTAVE_INTEGRAL_SCHEMA_REVISION,
+    _UNIFIED_REST_INTEGRAL_SCHEMA_REVISION,
 )
 
 
@@ -219,7 +219,7 @@ def plan_slot_order(plan: dict[str, object]) -> int:
 
 def integral_schema_is_known(schema_revision: int) -> bool:
     """Return whether one Stage-C evidence schema revision exists in firmware."""
-    return 1 <= schema_revision <= _UNIFIED_REST_STAGE_C_SCHEMA_REVISION
+    return 1 <= schema_revision <= _UNIFIED_REST_INTEGRAL_SCHEMA_REVISION
 
 
 def integral_stabilized_recovery_rest(schema_revision: int) -> bool:
@@ -233,7 +233,7 @@ def integral_stabilized_recovery_rest(schema_revision: int) -> bool:
     unified-rest revision on, every completed scored rest emits one.
     """
     return integral_combined_workflow(schema_revision) or (
-        schema_revision >= _UNIFIED_REST_STAGE_C_SCHEMA_REVISION
+        schema_revision >= _UNIFIED_REST_INTEGRAL_SCHEMA_REVISION
     )
 
 
@@ -489,7 +489,7 @@ def derive_integral_ladder(
         rungs.append(candidate)
         candidate <<= 1
     # Mirrors `integral_top_gap_candidate` (`integral_plan.rs`): a
-    # response-ladder plan (Breakaway or ReproducedStageB) inserts one
+    # response-ladder plan (Breakaway or ReproducedProportional) inserts one
     # half-octave rung immediately below the ladder's top native octave rung,
     # but only when that gap is entirely within the pure-octave region (never
     # inside the fixed 1, 2, 3 prefix).
@@ -561,7 +561,7 @@ def _checked_u128(value: int) -> int:
     return value
 
 
-def _stage_b_ladder(p_start: int, p_top: int) -> list[int]:
+def _proportional_ladder(p_start: int, p_top: int) -> list[int]:
     if not 0 < p_start <= p_top <= 0x7FFF:
         raise ValueError("invalid Stage-B ladder geometry")
     gains: list[int] = []
@@ -609,7 +609,7 @@ def select_transition_capable_test_point(
         p_start = (256 + target_magnitude - 1) // target_magnitude
     if p_top is None:
         p_top = min(0x7FFF, (256 * probe_limit) // target_magnitude)
-    ladder = _stage_b_ladder(p_start, p_top)
+    ladder = _proportional_ladder(p_start, p_top)
     valid_bits = (1 << len(ladder)) - 1
     if proportional_joint_membership & ~valid_bits:
         raise ValueError("Stage-B joint membership exceeds its ladder")
@@ -1213,8 +1213,8 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
                         "plan recovery quantization exposure differs from exact reconstruction"
                     )
     if schema_revision in (
-        _STANDALONE_STAGE_C_SCHEMA_REVISION,
-        _HALF_OCTAVE_STAGE_C_SCHEMA_REVISION,
+        _STANDALONE_INTEGRAL_SCHEMA_REVISION,
+        _HALF_OCTAVE_INTEGRAL_SCHEMA_REVISION,
     ):
         try:
             selection = select_transition_capable_test_point(
@@ -1364,7 +1364,7 @@ def _integral_run_sufficient(
     return anchors_available and positive_floor and bookends_available
 
 
-def _audit_failed_stage_c_admission(
+def _audit_failed_integral_admission(
     raw_observations: list[Any],
     terminal: dict[str, object],
     evidence_count: int,
@@ -1489,7 +1489,7 @@ def audit_velocity_integral(
         and len(terminals) == 1
         and int(terminals[0].get("outcome", -1)) == 5
     ):
-        return _audit_failed_stage_c_admission(
+        return _audit_failed_integral_admission(
             raw_observations,
             terminals[0],
             len(evidence_records),
@@ -2246,8 +2246,8 @@ def audit_velocity_integral(
             and not plan_combined_workflow
             and schema_revision
             not in (
-                _BREAKAWAY_STAGE_C_SCHEMA_REVISION,
-                _UNIFIED_REST_STAGE_C_SCHEMA_REVISION,
+                _BREAKAWAY_INTEGRAL_SCHEMA_REVISION,
+                _UNIFIED_REST_INTEGRAL_SCHEMA_REVISION,
             )
             and outcome != 0
         ):
