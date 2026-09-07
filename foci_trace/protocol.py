@@ -17,6 +17,10 @@ from .velocity_integral import (
 __all__ = ["BREAKAWAY_PHASE_NAMES", "PHASE_NAMES"]
 
 FRAME_MAGIC = 0x43525446
+# Version 22 appends `trace_deadline_pressure_count` and `max_spi_sample_cycles`
+# to the status payload, and repurposes the critical payload's `position_error`
+# to the TMC4671 chip's own PID_POSITION_ERROR register read (byte layout
+# unchanged).
 # Version 21 adds `stop_rung_index` to the breakaway discovery terminal: the
 # rung the discovery walk had reached when it stopped, distinct from the
 # breakaway probe's rung (constant per ladder, decoded elsewhere in the
@@ -35,7 +39,7 @@ FRAME_MAGIC = 0x43525446
 # the open-loop model term or to measured demand.
 # Version 15 replaced the productive-boundary probe with physical excursion.
 # Historical versions remain readable through their versioned record shapes.
-PROTOCOL_VERSION = 21
+PROTOCOL_VERSION = 22
 SUPPORTED_PROTOCOL_VERSIONS = (
     1,
     2,
@@ -58,6 +62,7 @@ SUPPORTED_PROTOCOL_VERSIONS = (
     19,
     20,
     21,
+    22,
 )
 HEADER_LEN = 32
 
@@ -364,7 +369,7 @@ def _decode_payload(version: int, frame_type: int, payload: bytes) -> dict[str, 
     if frame_type == FRAME_TYPE_CONTROL_DETAIL:
         return _decode_control_detail(payload)
     if frame_type == FRAME_TYPE_STATUS:
-        return _decode_status(payload)
+        return _decode_status(version, payload)
     if frame_type == FRAME_TYPE_EVENT:
         return _decode_event(payload)
     if frame_type == FRAME_TYPE_METADATA:
@@ -3078,7 +3083,7 @@ def _decode_control_detail(payload: bytes) -> dict[str, Any]:
     return dict(zip(names, fields, strict=True))
 
 
-def _decode_status(payload: bytes) -> dict[str, Any]:
+def _decode_status(version: int, payload: bytes) -> dict[str, Any]:
     _require(payload, 40, "status")
     fields = struct.unpack_from("<IIIIIHHIIII", payload, 0)
     names = (
@@ -3094,7 +3099,13 @@ def _decode_status(payload: bytes) -> dict[str, Any]:
         "endpoint_not_ready_count",
         "suppressed_status_change_count",
     )
-    return dict(zip(names, fields, strict=True))
+    decoded = dict(zip(names, fields, strict=True))
+    if version >= 22:
+        _require(payload, 48, "status")
+        pressure, max_cycles = struct.unpack_from("<II", payload, 40)
+        decoded["trace_deadline_pressure_count"] = pressure
+        decoded["max_spi_sample_cycles"] = max_cycles
+    return decoded
 
 
 def _decode_event(payload: bytes) -> dict[str, Any]:

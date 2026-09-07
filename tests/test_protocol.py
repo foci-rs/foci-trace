@@ -239,10 +239,11 @@ def test_decodes_version_nine_pptm_velocity_diagnostic() -> None:
 
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_OBSERVATION, payload) + payload)
 
-    assert PROTOCOL_VERSION == 21
+    assert PROTOCOL_VERSION == 22
     assert 13 in SUPPORTED_PROTOCOL_VERSIONS
     assert 14 in SUPPORTED_PROTOCOL_VERSIONS
     assert 20 in SUPPORTED_PROTOCOL_VERSIONS
+    assert 22 in SUPPORTED_PROTOCOL_VERSIONS
     assert frame.payload["pid_velocity_actual"] is None
     assert frame.payload["actual_velocity_pptm"] == 176
 
@@ -251,8 +252,8 @@ def test_decode_frame_rejects_a_version_beyond_the_supported_range() -> None:
     # A version past the supported range is rejected; historical versions stay
     # decodable so committed captures still replay.
     payload = bytes(88)
-    with pytest.raises(DecodeError, match="unsupported protocol version 22"):
-        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=22) + payload)
+    with pytest.raises(DecodeError, match="unsupported protocol version 23"):
+        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=23) + payload)
 
 
 def test_rejects_velocity_observation_with_both_diagnostic_kinds() -> None:
@@ -3974,3 +3975,45 @@ def test_take_build_identity_reads_legacy_and_new_layouts() -> None:
         "build_identity": 0xABCD1234,
     }
     assert cursor.offset == 6
+
+
+def test_decode_v22_status_appends_sampler_budget_fields() -> None:
+    from foci_trace import protocol
+
+    payload = struct.pack("<IIIIIHHIIII", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+    payload += struct.pack("<II", 12, 13)
+
+    decoded = protocol._decode_status(22, payload)
+
+    assert decoded["endpoint_not_ready_count"] == 10
+    assert decoded["trace_deadline_pressure_count"] == 12
+    assert decoded["max_spi_sample_cycles"] == 13
+
+
+def test_decode_v21_status_is_unchanged() -> None:
+    from foci_trace import protocol
+
+    payload = struct.pack("<IIIIIHHIIII", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+
+    decoded = protocol._decode_status(21, payload)
+
+    assert "trace_deadline_pressure_count" not in decoded
+    assert decoded["suppressed_status_change_count"] == 11
+
+
+def test_decode_v22_critical_position_error_is_the_chip_read_verbatim() -> None:
+    payload = bytearray(88)
+    payload[8:12] = struct.pack("<i", -1234)
+
+    frame = decode_frame(_header(FRAME_TYPE_CRITICAL, bytes(payload), version=22) + bytes(payload))
+
+    assert frame.payload["position_error"] == -1234
+
+
+def test_decode_v21_critical_position_error_is_unchanged() -> None:
+    payload = bytearray(88)
+    payload[8:12] = struct.pack("<i", 4321)
+
+    frame = decode_frame(_header(FRAME_TYPE_CRITICAL, bytes(payload), version=21) + bytes(payload))
+
+    assert frame.payload["position_error"] == 4321

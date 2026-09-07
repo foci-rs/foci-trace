@@ -530,7 +530,7 @@ def test_summarize_capture_reports_mapping_gaps_status_and_steady_ranges() -> No
     writer.write_firmware_frame(
         0,
         120,
-        _header(FRAME_TYPE_STATUS, _status_payload(10, 20), 2, 84_000_000, 2, 255)
+        _header(FRAME_TYPE_STATUS, _status_payload(10, 20), 2, 84_000_000, 2, 255, version=21)
         + _status_payload(10, 20),
     )
     writer.write_firmware_frame(
@@ -543,6 +543,7 @@ def test_summarize_capture_reports_mapping_gaps_status_and_steady_ranges() -> No
             84_000_000,
             3,
             255,
+            version=21,
         )
         + _klipper_status_payload(9),
     )
@@ -575,7 +576,7 @@ def test_summarize_capture_reports_mapping_gaps_status_and_steady_ranges() -> No
     writer.write_firmware_frame(
         0,
         150,
-        _header(FRAME_TYPE_STATUS, _status_payload(13, 27), 7, 84_000_000 * 4, 2, 255)
+        _header(FRAME_TYPE_STATUS, _status_payload(13, 27), 7, 84_000_000 * 4, 2, 255, version=21)
         + _status_payload(13, 27),
     )
     writer.write_firmware_frame(
@@ -588,6 +589,7 @@ def test_summarize_capture_reports_mapping_gaps_status_and_steady_ranges() -> No
             84_000_000 * 4,
             3,
             255,
+            version=21,
         )
         + _klipper_status_payload(12),
     )
