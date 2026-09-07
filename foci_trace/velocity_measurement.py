@@ -47,23 +47,23 @@ NO_REPORTABLE_DRIFT_RATIO_PPM = 0xFFFFFFFF
 #
 # Decode-only mirror: firmware renamed both constants off the
 # "combined" name (`COMBINED_PROPORTIONAL_SCHEMA_REVISION` ->
-# `STAGE_B_PLAN_SCHEMA_REVISION`, `COMBINED_INTEGRAL_SCHEMA_REVISION` ->
+# `PROPORTIONAL_PLAN_SCHEMA_REVISION`, `COMBINED_INTEGRAL_SCHEMA_REVISION` ->
 # `INTEGRAL_PLAN_SCHEMA_REVISION`; foci-firmware commit 5fdef92). Firmware no
 # longer defines the old names below; the values (14, 13) are unchanged.
-PROPORTIONAL_DRIFT_BOUND_MIN_SCHEMA_REVISION = 14  # firmware: STAGE_B_PLAN_SCHEMA_REVISION
+PROPORTIONAL_DRIFT_BOUND_MIN_SCHEMA_REVISION = 14  # firmware: PROPORTIONAL_PLAN_SCHEMA_REVISION
 INTEGRAL_DRIFT_BOUND_MIN_SCHEMA_REVISION = 13  # firmware: INTEGRAL_PLAN_SCHEMA_REVISION
 
 # First revision whose walk continues past a rejected window instead of ending
-# there: firmware's BREAKAWAY_STAGE_B/C_SCHEMA_REVISION. Every earlier revision,
+# there: firmware's BREAKAWAY_PROPORTIONAL/C_SCHEMA_REVISION. Every earlier revision,
 # including the breakaway 15/14 and combined 14/13 that precede them, replays
 # under the historical walk.
-STAGE_B_SUFFIX_WALK_MIN_SCHEMA_REVISION = 16
+PROPORTIONAL_SUFFIX_WALK_MIN_SCHEMA_REVISION = 16
 INTEGRAL_SUFFIX_WALK_MIN_SCHEMA_REVISION = 15
 
 # First revision whose scored-rest chain closes only on evidence against rest,
 # rather than on any suffix that is not zero-compatible.
-STAGE_B_REST_WALK_MIN_SCHEMA_REVISION = 17
-STAGE_C_REST_WALK_MIN_SCHEMA_REVISION = 16
+PROPORTIONAL_REST_WALK_MIN_SCHEMA_REVISION = 17
+INTEGRAL_REST_WALK_MIN_SCHEMA_REVISION = 16
 
 # Firmware build_features bitset, mirrored from foci-firmware's BuildFeatures.
 # Each bit names one analysis rule the recording firmware compiled in, stated
@@ -91,13 +91,13 @@ class UnsupportedIntegralRepresentationError(ValueError):
 _STAGE_RULE_THRESHOLDS: dict[str, tuple[int, int, int]] = {
     "b": (
         PROPORTIONAL_DRIFT_BOUND_MIN_SCHEMA_REVISION,
-        STAGE_B_SUFFIX_WALK_MIN_SCHEMA_REVISION,
-        STAGE_B_REST_WALK_MIN_SCHEMA_REVISION,
+        PROPORTIONAL_SUFFIX_WALK_MIN_SCHEMA_REVISION,
+        PROPORTIONAL_REST_WALK_MIN_SCHEMA_REVISION,
     ),
     "c": (
         INTEGRAL_DRIFT_BOUND_MIN_SCHEMA_REVISION,
         INTEGRAL_SUFFIX_WALK_MIN_SCHEMA_REVISION,
-        STAGE_C_REST_WALK_MIN_SCHEMA_REVISION,
+        INTEGRAL_REST_WALK_MIN_SCHEMA_REVISION,
     ),
 }
 
@@ -736,8 +736,8 @@ def audit_selected_recovery_rest(
         mismatches.append("unconfirmed selected recovery rest emitted an ordinary recovery")
     if disposition == 1:
         selected_terminal = (
-            int(terminal["outcome"]) == STAGE_B_OUTCOME_INCONCLUSIVE
-            and int(terminal["cause"]) == STAGE_B_CAUSE_RECOVERY_UNAVAILABLE
+            int(terminal["outcome"]) == PROPORTIONAL_OUTCOME_INCONCLUSIVE
+            and int(terminal["cause"]) == PROPORTIONAL_CAUSE_RECOVERY_UNAVAILABLE
             and int(terminal.get("recovery_unavailable", 0)) == 1
         )
         if not selected_terminal and not (recovery_wide and int(terminal["cause"]) == 53):
@@ -809,23 +809,23 @@ def _f32(value: float | int) -> float:
 
 FNV1A64_OFFSET = 0xCBF29CE484222325
 FNV1A64_PRIME = 0x100000001B3
-STAGE_B_OUTCOME_COMPLETE_CANDIDATE = 0
-STAGE_B_OUTCOME_COMPLETE = 1
-STAGE_B_OUTCOME_INCONCLUSIVE = 2
-STAGE_B_OUTCOME_FAULT = 3
-STAGE_B_CAUSE_NO_DIRECTIONAL_MODEL = 1
-STAGE_B_CAUSE_NO_JOINT_OPERABLE_REGION = 2
-STAGE_B_CAUSE_CURRENT_HEADROOM = 4
-STAGE_B_CAUSE_REPRODUCTION_MISMATCH = 5
-STAGE_B_CAUSE_RECOVERY_UNAVAILABLE = 7
+PROPORTIONAL_OUTCOME_COMPLETE_CANDIDATE = 0
+PROPORTIONAL_OUTCOME_COMPLETE = 1
+PROPORTIONAL_OUTCOME_INCONCLUSIVE = 2
+PROPORTIONAL_OUTCOME_FAULT = 3
+PROPORTIONAL_CAUSE_NO_DIRECTIONAL_MODEL = 1
+PROPORTIONAL_CAUSE_NO_JOINT_OPERABLE_REGION = 2
+PROPORTIONAL_CAUSE_CURRENT_HEADROOM = 4
+PROPORTIONAL_CAUSE_REPRODUCTION_MISMATCH = 5
+PROPORTIONAL_CAUSE_RECOVERY_UNAVAILABLE = 7
 
 
 def _proportional_inconclusive_cause(model_direction_mask: int, *, recovery_failure: bool) -> int:
     if recovery_failure:
-        return STAGE_B_CAUSE_RECOVERY_UNAVAILABLE
+        return PROPORTIONAL_CAUSE_RECOVERY_UNAVAILABLE
     if model_direction_mask != 3:
-        return STAGE_B_CAUSE_NO_DIRECTIONAL_MODEL
-    return STAGE_B_CAUSE_NO_JOINT_OPERABLE_REGION
+        return PROPORTIONAL_CAUSE_NO_DIRECTIONAL_MODEL
+    return PROPORTIONAL_CAUSE_NO_JOINT_OPERABLE_REGION
 
 
 class AccuracyDecision(StrEnum):
@@ -2152,14 +2152,14 @@ def _compare_optional_drift_ratio(
 # ExcessiveDrift (discriminant 5) exists: `4 + 5 == 9`, which is
 # WrongDirectionFault. Mirrors the explicit map firmware's
 # observation_class_report_code uses after hitting the identical collision.
-_STAGE_B_CLASS_CODE = {0: 4, 1: 5, 2: 6, 3: 7, 4: 8, 5: 12}
+_PROPORTIONAL_CLASS_CODE = {0: 4, 1: 5, 2: 6, 3: 7, 4: 8, 5: 12}
 
 # Every code firmware assigns to StationarityExcluded(_), derived from the map
 # above so appending an exclusion extends the numeric bands with it. The old
 # literal `4 <= code <= 8` band silently sorted ExcessiveDrift (code 12) into
 # the fault arm, where firmware matches StationarityExcluded(_) and yields
 # EXCLUDED.
-_STAGE_B_EXCLUSION_CODES = frozenset(_STAGE_B_CLASS_CODE.values())
+_PROPORTIONAL_EXCLUSION_CODES = frozenset(_PROPORTIONAL_CLASS_CODE.values())
 
 # Every code outside the four moving classes (0-3) and the stationarity
 # exclusions is a fault. Firmware's own default for a classification byte it
@@ -2173,7 +2173,7 @@ _STAGE_B_EXCLUSION_CODES = frozenset(_STAGE_B_CLASS_CODE.values())
 # firmware's fault default. Unreachable today since firmware never emits
 # above 12, but the derivation keeps it that way instead of leaving the trap
 # armed for the next exclusion or fault variant added above this line.
-_STAGE_B_FAULT_CODES = frozenset(range(16)) - {0, 1, 2, 3} - _STAGE_B_EXCLUSION_CODES
+_PROPORTIONAL_FAULT_CODES = frozenset(range(16)) - {0, 1, 2, 3} - _PROPORTIONAL_EXCLUSION_CODES
 
 
 def _reconstruct_observation(
@@ -2211,7 +2211,7 @@ def _reconstruct_observation(
         int(current_record["moving_pid_output_peak"]) if current_record is not None else 0,
     )
     if not stationarity["usable"]:
-        classification = _STAGE_B_CLASS_CODE[stationarity["exclusion"]]
+        classification = _PROPORTIONAL_CLASS_CODE[stationarity["exclusion"]]
         return {
             "classification": classification,
             "target_velocity_rpm": target_velocity_rpm,
@@ -2379,9 +2379,12 @@ def _rung_class(first: dict[str, int], second: dict[str, int]) -> tuple[int, int
         return 2, 0, 0, reproduced
     if first_class == second_class == 3:
         return 3, 0, 0, reproduced
-    if first_class in _STAGE_B_FAULT_CODES or second_class in _STAGE_B_FAULT_CODES:
+    if first_class in _PROPORTIONAL_FAULT_CODES or second_class in _PROPORTIONAL_FAULT_CODES:
         return 7, 0, 0, reproduced
-    if first_class in _STAGE_B_EXCLUSION_CODES and second_class in _STAGE_B_EXCLUSION_CODES:
+    if (
+        first_class in _PROPORTIONAL_EXCLUSION_CODES
+        and second_class in _PROPORTIONAL_EXCLUSION_CODES
+    ):
         return 6, 0, 0, reproduced
     return 5, 0, 0, reproduced
 
@@ -2566,7 +2569,7 @@ def _compact_signed_rate(value: int, *, upper: bool) -> int:
     return mantissa << shift
 
 
-def _project_stage_b_recovery_authorities(
+def _project_proportional_recovery_authorities(
     plan: dict[str, object],
     terminal: dict[str, object],
     gains: list[int],
@@ -2605,7 +2608,7 @@ def _project_stage_b_recovery_authorities(
                 )
             boundary = boundaries.get(key)
             if (
-                int(observation["classification"]) in _STAGE_B_EXCLUSION_CODES
+                int(observation["classification"]) in _PROPORTIONAL_EXCLUSION_CODES
                 and boundary is not None
             ):
                 structured.append(list(boundary["common_rate_interval_q"]))
@@ -3210,13 +3213,13 @@ def project_proportional_schema8_pair(
     previous_report: dict[str, object], current_report: dict[str, object]
 ) -> dict[str, object]:
     """Project the schema-8 comparator over preserved per-run Stage-B evidence."""
-    return _project_stage_b_schema8_candidates(
+    return _project_proportional_schema8_candidates(
         _schema8_run_candidate(previous_report),
         _schema8_run_candidate(current_report),
     )
 
 
-def _project_stage_b_schema8_candidates(
+def _project_proportional_schema8_candidates(
     previous: dict[str, object], current: dict[str, object]
 ) -> dict[str, object]:
     from .proportional_reproduction import project_schema8_candidates
@@ -3323,7 +3326,7 @@ def project_proportional_core_pair(
     return projection
 
 
-_STAGE_B_REPRODUCTION_FRAGMENT_KINDS = (
+_PROPORTIONAL_REPRODUCTION_FRAGMENT_KINDS = (
     "reproduction_v3_header",
     "reproduction_v4_header",
     "reproduction_v3_membership",
@@ -3349,7 +3352,9 @@ def _assemble_proportional_reproduction(
 ) -> dict[str, object] | None:
     """Validate and assemble one ordered Stage-B reproduction record group."""
     fragments = [
-        value for value in records if value["record_kind"] in _STAGE_B_REPRODUCTION_FRAGMENT_KINDS
+        value
+        for value in records
+        if value["record_kind"] in _PROPORTIONAL_REPRODUCTION_FRAGMENT_KINDS
     ]
     if not fragments:
         return None
@@ -3437,7 +3442,7 @@ def _assemble_proportional_reproduction_v3(
     return assembled
 
 
-def _stage_b_record_identity(value: dict[str, object]) -> tuple[object, ...]:
+def _proportional_record_identity(value: dict[str, object]) -> tuple[object, ...]:
     """Return the causal identity of one canonical Stage B record."""
     kind = str(value["record_kind"])
     if kind in ("observation", "structured_boundary"):
@@ -3461,7 +3466,7 @@ def _stage_b_record_identity(value: dict[str, object]) -> tuple[object, ...]:
     return (kind,)
 
 
-def _stage_b_replay_expects_handoff(replay: dict[str, object]) -> bool:
+def _proportional_replay_expects_handoff(replay: dict[str, object]) -> bool:
     """Return whether the schema emits the full directional handoff record."""
     if bool(replay.get("combined_response_selected", False)):
         return False
@@ -3576,7 +3581,7 @@ def _compare_proportional_causal_order(
         expected.extend(joint_after_rung.get(rung_index, ()))
     expected.extend(directional_at_end)
     expected.extend(joint_at_end)
-    if _stage_b_replay_expects_handoff(replay):
+    if _proportional_replay_expects_handoff(replay):
         expected.append(("handoff",))
     if any(
         value["record_kind"] in ("reproduction", "reproduction_v3", "reproduction_v4")
@@ -3584,12 +3589,12 @@ def _compare_proportional_causal_order(
     ):
         expected.append(("reproduction",))
     for value in records:
-        token = _stage_b_record_identity(value)
+        token = _proportional_record_identity(value)
         if value["record_kind"] == "rest_selection" and token not in expected:
             expected.append(token)
     expected.append(("proportional_terminal",))
 
-    observed = [_stage_b_record_identity(value) for value in records]
+    observed = [_proportional_record_identity(value) for value in records]
     if observed == expected:
         return ""
     return f"Stage B causal order differs: firmware={observed} offline={expected}"
@@ -3657,7 +3662,7 @@ def _project_schema6_current_headroom(
     }
 
 
-def _stage_b_candidate_from_terminal(
+def _proportional_candidate_from_terminal(
     audit: dict[str, object], *, plan_digest: int
 ) -> dict[str, object]:
     terminal = audit["terminal"]
@@ -3669,7 +3674,7 @@ def _stage_b_candidate_from_terminal(
     }
 
 
-def _stage_b_candidates_from_reproduction(
+def _proportional_candidates_from_reproduction(
     reproduction: dict[str, object],
     plan: dict[str, object],
     provisional_names: tuple[str, str],
@@ -3702,28 +3707,30 @@ def _stage_b_candidates_from_reproduction(
     )
 
 
-def _stage_b_candidates_from_v3(
+def _proportional_candidates_from_v3(
     reproduction: dict[str, object], plan: dict[str, object]
 ) -> tuple[dict[str, object], dict[str, object]]:
-    return _stage_b_candidates_from_reproduction(
+    return _proportional_candidates_from_reproduction(
         reproduction,
         plan,
         ("previous_nominated_p", "current_nominated_p"),
     )
 
 
-def _stage_b_candidates_from_v4(
+def _proportional_candidates_from_v4(
     reproduction: dict[str, object], plan: dict[str, object]
 ) -> tuple[dict[str, object], dict[str, object]]:
     """Reconstruct both schema-8 retained summaries from canonical fragments."""
-    return _stage_b_candidates_from_reproduction(
+    return _proportional_candidates_from_reproduction(
         reproduction,
         plan,
         ("previous_provisional_p", "current_provisional_p"),
     )
 
 
-def _stage_b_per_rung_intervals(report: dict[str, object]) -> list[dict[int, list[int]]] | None:
+def _proportional_per_rung_intervals(
+    report: dict[str, object],
+) -> list[dict[int, list[int]]] | None:
     replay = report.get("proportional_replay")
     if not isinstance(replay, dict):
         return None
@@ -3742,7 +3749,7 @@ def _stage_b_per_rung_intervals(report: dict[str, object]) -> list[dict[int, lis
     return result
 
 
-def _stage_b_candidate_from_replay(report: dict[str, object]) -> dict[str, object] | None:
+def _proportional_candidate_from_replay(report: dict[str, object]) -> dict[str, object] | None:
     replay = report.get("proportional_replay")
     plan = report.get("plan")
     if not isinstance(replay, dict) or not isinstance(plan, dict):
@@ -3771,7 +3778,7 @@ def _stage_b_candidate_from_replay(report: dict[str, object]) -> dict[str, objec
     }
 
 
-def _compare_stage_b_reproduction_fragments(
+def _compare_proportional_reproduction_fragments(
     reproduction: dict[str, object],
     projection: dict[str, object],
     schema_label: str,
@@ -3811,10 +3818,10 @@ def _compare_stage_b_reproduction_fragments(
     return mismatches
 
 
-def _compare_stage_b_v3_record(
+def _compare_proportional_v3_record(
     reproduction: dict[str, object], projection: dict[str, object]
 ) -> list[str]:
-    mismatches = _compare_stage_b_reproduction_fragments(reproduction, projection, "schema-3")
+    mismatches = _compare_proportional_reproduction_fragments(reproduction, projection, "schema-3")
     expected_outcome = 1 if projection["outcome"] == "complete" else 2
     if int(reproduction["outcome"]) != expected_outcome:
         mismatches.append("schema-3 reproduction outcome differs from core projection")
@@ -3826,11 +3833,11 @@ def _compare_stage_b_v3_record(
     return mismatches
 
 
-def _compare_stage_b_v4_record(
+def _compare_proportional_v4_record(
     reproduction: dict[str, object], projection: dict[str, object]
 ) -> list[str]:
     """Compare one schema-8 canonical group with the independent projection."""
-    mismatches = _compare_stage_b_reproduction_fragments(reproduction, projection, "schema-8")
+    mismatches = _compare_proportional_reproduction_fragments(reproduction, projection, "schema-8")
     expected_outcome = 1 if projection["outcome"] == "complete" else 2
     scalar_fields = (
         "reason_mask",
@@ -3868,9 +3875,9 @@ def audit_proportional_reproduction_pair(
         plan = current.get("plan")
         if not isinstance(plan, dict):
             return {"matches_firmware": False, "mismatches": ["current capture lacks plan"]}
-        prior, active = _stage_b_candidates_from_v4(reproduction, plan)
-        projection = _project_stage_b_schema8_candidates(prior, active)
-        mismatches.extend(_compare_stage_b_v4_record(reproduction, projection))
+        prior, active = _proportional_candidates_from_v4(reproduction, plan)
+        projection = _project_proportional_schema8_candidates(prior, active)
+        mismatches.extend(_compare_proportional_v4_record(reproduction, projection))
         previous_digest = int(reproduction["previous_digest_low"]) | (
             int(reproduction["previous_digest_high"]) << 32
         )
@@ -3890,20 +3897,20 @@ def audit_proportional_reproduction_pair(
         plan = current.get("plan")
         if not isinstance(plan, dict):
             return {"matches_firmware": False, "mismatches": ["current capture lacks plan"]}
-        prior, active = _stage_b_candidates_from_v3(reproduction, plan)
-        replay_previous = _stage_b_candidate_from_replay(previous)
-        replay_current = _stage_b_candidate_from_replay(current)
+        prior, active = _proportional_candidates_from_v3(reproduction, plan)
+        replay_previous = _proportional_candidate_from_replay(previous)
+        replay_current = _proportional_candidate_from_replay(current)
         if replay_previous is not None and replay_previous != prior:
             mismatches.append("schema-3 retained summary differs from prior capture replay")
         if replay_current is not None and replay_current != active:
             mismatches.append("schema-3 current summary differs from current capture replay")
-        previous_rungs = _stage_b_per_rung_intervals(previous)
-        current_rungs = _stage_b_per_rung_intervals(current)
+        previous_rungs = _proportional_per_rung_intervals(previous)
+        current_rungs = _proportional_per_rung_intervals(current)
         if previous_rungs is not None and current_rungs is not None:
             prior["per_rung_common_intervals"] = previous_rungs
             active["per_rung_common_intervals"] = current_rungs
         projection = project_proportional_core_pair(prior, active)
-        mismatches.extend(_compare_stage_b_v3_record(reproduction, projection))
+        mismatches.extend(_compare_proportional_v3_record(reproduction, projection))
         previous_digest = int(reproduction["previous_digest_low"]) | (
             int(reproduction["previous_digest_high"]) << 32
         )
@@ -3923,8 +3930,8 @@ def audit_proportional_reproduction_pair(
         return {"matches_firmware": False, "mismatches": ["unsupported schema"]}
     previous_plan = int(previous["plan_identity"])
     current_plan = int(current["plan_identity"])
-    previous_candidate = _stage_b_candidate_from_terminal(previous, plan_digest=previous_plan)
-    current_candidate = _stage_b_candidate_from_terminal(current, plan_digest=current_plan)
+    previous_candidate = _proportional_candidate_from_terminal(previous, plan_digest=previous_plan)
+    current_candidate = _proportional_candidate_from_terminal(current, plan_digest=current_plan)
     reported_previous_digest = int(reproduction["previous_digest_low"]) | (
         int(reproduction["previous_digest_high"]) << 32
     )
@@ -3975,11 +3982,13 @@ def audit_proportional_reproduction_pair(
         mismatches.append("reproduction outcome differs from independent comparison")
     terminal_outcome = int(current["terminal"]["outcome"])
     expected_terminal_outcome = (
-        STAGE_B_OUTCOME_COMPLETE if expected_outcome == 1 else STAGE_B_OUTCOME_INCONCLUSIVE
+        PROPORTIONAL_OUTCOME_COMPLETE
+        if expected_outcome == 1
+        else PROPORTIONAL_OUTCOME_INCONCLUSIVE
     )
     if terminal_outcome != expected_terminal_outcome:
         mismatches.append("terminal outcome differs from reproduction comparison")
-    expected_cause = 0 if expected_outcome == 1 else STAGE_B_CAUSE_REPRODUCTION_MISMATCH
+    expected_cause = 0 if expected_outcome == 1 else PROPORTIONAL_CAUSE_REPRODUCTION_MISMATCH
     if int(current["terminal"].get("cause", 0)) != expected_cause:
         mismatches.append("terminal cause differs from reproduction comparison")
     return {"matches_firmware": not mismatches, "mismatches": mismatches}
@@ -3992,7 +4001,7 @@ def _proportional_terminal_boundary(
     completed_rungs: int,
 ) -> tuple[str, int | None, list[int]]:
     """Recover the terminal fold boundary from primitive-wide current evidence."""
-    if int(terminal.get("cause", 0)) != STAGE_B_CAUSE_CURRENT_HEADROOM and not bool(
+    if int(terminal.get("cause", 0)) != PROPORTIONAL_CAUSE_CURRENT_HEADROOM and not bool(
         terminal.get("recovery_unavailable", 0)
     ):
         return "end_of_ladder", None, []
@@ -4032,7 +4041,8 @@ def replay_proportional_regions(
         int(plan.get("maximum_workflow_ms", -1)),
     ) == (282_923, 298_632)
     combined_response_selected = recovery_rest_present or (
-        int(terminal.get("outcome", STAGE_B_OUTCOME_INCONCLUSIVE)) == STAGE_B_OUTCOME_COMPLETE
+        int(terminal.get("outcome", PROPORTIONAL_OUTCOME_INCONCLUSIVE))
+        == PROPORTIONAL_OUTCOME_COMPLETE
         and any(
             value["record_kind"] == "directional_region" and int(value["closure"]) == 5
             for _raw, value in evidence_records
@@ -4043,7 +4053,7 @@ def replay_proportional_regions(
         )
     )
     # Stage B's wire "plan" record carries no schema revision and firmware
-    # publishes STAGE_B_EVIDENCE_SCHEMA_REVISION only in the Klipper constant
+    # publishes PROPORTIONAL_EVIDENCE_SCHEMA_REVISION only in the Klipper constant
     # block, which trace captures do not contain -- so the revision has to be
     # derived from what the evidence stream itself shows, one wire marker per
     # rung. Each rung below only proves a floor: "this capture is schema N or
@@ -4092,8 +4102,8 @@ def replay_proportional_regions(
             and "joint_union_mask" in value
             for _raw, value in evidence_records
         )
-        or int(terminal.get("outcome", STAGE_B_OUTCOME_INCONCLUSIVE))
-        in (STAGE_B_OUTCOME_COMPLETE_CANDIDATE, STAGE_B_OUTCOME_COMPLETE)
+        or int(terminal.get("outcome", PROPORTIONAL_OUTCOME_INCONCLUSIVE))
+        in (PROPORTIONAL_OUTCOME_COMPLETE_CANDIDATE, PROPORTIONAL_OUTCOME_COMPLETE)
         and int(terminal.get("model_direction_mask", 3)) != 3
         else 7
     )
@@ -4290,7 +4300,7 @@ def replay_proportional_regions(
     )
     structured_boundaries = {}
     for key, observation in reconstructed.items():
-        if int(observation["classification"]) not in _STAGE_B_EXCLUSION_CODES:
+        if int(observation["classification"]) not in _PROPORTIONAL_EXCLUSION_CODES:
             continue
         boundary = analyze_structured_boundary(by_stroke.get(key[0] * slot_count + key[1], []))
         if boundary is not None:
@@ -4399,7 +4409,7 @@ def _audit_proportional_velocity_sweep(
     logical_nonterminal: list[tuple[bytes, dict[str, object]]] = []
     inserted_reproduction = False
     for raw, value in nonterminal:
-        if value["record_kind"] in _STAGE_B_REPRODUCTION_FRAGMENT_KINDS:
+        if value["record_kind"] in _PROPORTIONAL_REPRODUCTION_FRAGMENT_KINDS:
             if reproduction_group is not None and not inserted_reproduction:
                 logical_nonterminal.append((b"", reproduction_group))
                 inserted_reproduction = True
@@ -4457,7 +4467,7 @@ def _audit_proportional_velocity_sweep(
             mismatches.append("Stage B current evidence carries the wrong stage")
         if int(record["clamp_readback"]) != int(record["clamp_limit"]):
             mismatches.append("Stage B current evidence clamp readback differs")
-    if current_records and int(terminal["outcome"]) != STAGE_B_OUTCOME_FAULT:
+    if current_records and int(terminal["outcome"]) != PROPORTIONAL_OUTCOME_FAULT:
         observation_keys = {
             (int(value["rung_index"]), int(value["slot"]))
             for _raw, value in nonterminal
@@ -4513,7 +4523,7 @@ def _audit_proportional_velocity_sweep(
         )
         fault_prefix = (
             missing_final_recovery
-            and int(terminal["outcome"]) == STAGE_B_OUTCOME_FAULT
+            and int(terminal["outcome"]) == PROPORTIONAL_OUTCOME_FAULT
             and terminal_follows_rung
         )
         historical_current_headroom_fault = fault_prefix and int(terminal["cause"]) == 17
@@ -4701,7 +4711,7 @@ def _audit_proportional_velocity_sweep(
         mismatches.append(f"missing structured boundaries {sorted(expected_boundaries)}")
 
     if recovery_schema:
-        recovery_projections = _project_stage_b_recovery_authorities(
+        recovery_projections = _project_proportional_recovery_authorities(
             plan,
             terminal,
             list(replay["gains"]),
@@ -4929,7 +4939,7 @@ def _audit_proportional_velocity_sweep(
         mismatches.append(f"missing joint regions {sorted(expected_joint)}")
 
     handoffs = [value for _raw, value in evidence_records if value["record_kind"] == "handoff"]
-    expects_handoff = _stage_b_replay_expects_handoff(replay)
+    expects_handoff = _proportional_replay_expects_handoff(replay)
     if expects_handoff and len(handoffs) != 1:
         mismatches.append(f"expected one Stage B handoff, found {len(handoffs)}")
     elif not expects_handoff and handoffs:
@@ -5030,7 +5040,7 @@ def _audit_proportional_velocity_sweep(
         expected_coverage_mask = 0
     reproduction_projection: dict[str, object] | None = None
     if reproduction_group is not None and reproduction_group["record_kind"] == "reproduction_v3":
-        prior_v3, current_v3 = _stage_b_candidates_from_v3(reproduction_group, plan)
+        prior_v3, current_v3 = _proportional_candidates_from_v3(reproduction_group, plan)
         v3_projection = project_proportional_core_pair(prior_v3, current_v3)
         reproduction_projection = v3_projection
         if int(reproduction_group["outcome"]) == 1:
@@ -5043,8 +5053,8 @@ def _audit_proportional_velocity_sweep(
                 if value["coverage"] == "full"
             )
     elif reproduction_group is not None and reproduction_group["record_kind"] == "reproduction_v4":
-        prior_v4, current_v4 = _stage_b_candidates_from_v4(reproduction_group, plan)
-        v4_projection = _project_stage_b_schema8_candidates(prior_v4, current_v4)
+        prior_v4, current_v4 = _proportional_candidates_from_v4(reproduction_group, plan)
+        v4_projection = _project_proportional_schema8_candidates(prior_v4, current_v4)
         reproduction_projection = v4_projection
         model_direction_mask = _proportional_model_mask_from_validity(
             [int(value) for value in v4_projection["directional_validity"]]
@@ -5083,14 +5093,16 @@ def _audit_proportional_velocity_sweep(
             selected_rest_records and int(selected_rest_records[0]["disposition"]) == 1
         )
         expected_outcome = (
-            STAGE_B_OUTCOME_INCONCLUSIVE if selected_unconfirmed else STAGE_B_OUTCOME_COMPLETE
+            PROPORTIONAL_OUTCOME_INCONCLUSIVE
+            if selected_unconfirmed
+            else PROPORTIONAL_OUTCOME_COMPLETE
         )
-        expected_cause = STAGE_B_CAUSE_RECOVERY_UNAVAILABLE if selected_unconfirmed else 0
+        expected_cause = PROPORTIONAL_CAUSE_RECOVERY_UNAVAILABLE if selected_unconfirmed else 0
         if int(terminal["outcome"]) != expected_outcome or int(terminal["cause"]) != expected_cause:
             mismatches.append("Stage B selected-response terminal differs from recovery rest")
         if int(terminal.get("recovery_unavailable", 0)) != int(selected_unconfirmed):
             mismatches.append("Stage B selected-response recovery flag differs")
-    if not replay["sufficient"] and int(terminal["outcome"]) == STAGE_B_OUTCOME_INCONCLUSIVE:
+    if not replay["sufficient"] and int(terminal["outcome"]) == PROPORTIONAL_OUTCOME_INCONCLUSIVE:
         recovery_failure = any(
             int(record["outcome"]) in (2, 3)
             and int(record["rung_index"]) + 1 < int(plan["rung_count"])
@@ -5121,7 +5133,7 @@ def _audit_proportional_velocity_sweep(
         if value["record_kind"] in ("reproduction", "reproduction_v3", "reproduction_v4")
     ]
     if (
-        int(terminal["outcome"]) == STAGE_B_OUTCOME_COMPLETE
+        int(terminal["outcome"]) == PROPORTIONAL_OUTCOME_COMPLETE
         and not combined_response_selected
         and len(reproduction) != 1
     ):
@@ -5158,20 +5170,20 @@ def _audit_proportional_velocity_sweep(
         if int(current["outcome"]) != expected_reproduction_outcome:
             mismatches.append("reproduction outcome differs from independent comparison")
         expected_terminal = (
-            STAGE_B_OUTCOME_COMPLETE
+            PROPORTIONAL_OUTCOME_COMPLETE
             if expected_reproduction_outcome == 1
-            else STAGE_B_OUTCOME_INCONCLUSIVE
+            else PROPORTIONAL_OUTCOME_INCONCLUSIVE
         )
         if int(terminal["outcome"]) != expected_terminal:
             mismatches.append("terminal outcome differs from reproduction comparison")
         expected_cause = (
-            0 if expected_reproduction_outcome == 1 else STAGE_B_CAUSE_REPRODUCTION_MISMATCH
+            0 if expected_reproduction_outcome == 1 else PROPORTIONAL_CAUSE_REPRODUCTION_MISMATCH
         )
         if int(terminal["cause"]) != expected_cause:
             mismatches.append("terminal cause differs from reproduction comparison")
     elif reproduction and reproduction[-1]["record_kind"] == "reproduction_v3":
         current = reproduction[-1]
-        prior, active = _stage_b_candidates_from_v3(current, plan)
+        prior, active = _proportional_candidates_from_v3(current, plan)
         replay_candidate = {
             "memberships": [
                 *(int(item["member_mask"]) for item in replay["selected"]),
@@ -5187,16 +5199,16 @@ def _audit_proportional_velocity_sweep(
         if active != replay_candidate:
             mismatches.append("schema-3 current summary differs from independent replay")
         projection = reproduction_projection or project_proportional_core_pair(prior, active)
-        mismatches.extend(_compare_stage_b_v3_record(current, projection))
+        mismatches.extend(_compare_proportional_v3_record(current, projection))
         reported_current_digest = int(current["current_digest_low"]) | (
             int(current["current_digest_high"]) << 32
         )
         if pre_reproduction_digest != reported_current_digest:
             mismatches.append("reproduction current digest differs from canonical prefix")
         expected_terminal = (
-            STAGE_B_OUTCOME_COMPLETE
+            PROPORTIONAL_OUTCOME_COMPLETE
             if projection["outcome"] == "complete"
-            else STAGE_B_OUTCOME_INCONCLUSIVE
+            else PROPORTIONAL_OUTCOME_INCONCLUSIVE
         )
         if int(terminal["outcome"]) != expected_terminal:
             mismatches.append("terminal outcome differs from schema-3 core projection")
@@ -5205,7 +5217,7 @@ def _audit_proportional_velocity_sweep(
             mismatches.append("terminal cause differs from schema-3 core projection")
     elif reproduction:
         current = reproduction[-1]
-        prior, active = _stage_b_candidates_from_v4(current, plan)
+        prior, active = _proportional_candidates_from_v4(current, plan)
         replay_candidate = _schema8_run_candidate(
             {
                 "proportional_replay": replay,
@@ -5214,17 +5226,19 @@ def _audit_proportional_velocity_sweep(
         )
         if active != replay_candidate:
             mismatches.append("schema-8 current summary differs from independent replay")
-        projection = reproduction_projection or _project_stage_b_schema8_candidates(prior, active)
-        mismatches.extend(_compare_stage_b_v4_record(current, projection))
+        projection = reproduction_projection or _project_proportional_schema8_candidates(
+            prior, active
+        )
+        mismatches.extend(_compare_proportional_v4_record(current, projection))
         reported_current_digest = int(current["current_digest_low"]) | (
             int(current["current_digest_high"]) << 32
         )
         if pre_reproduction_digest != reported_current_digest:
             mismatches.append("schema-8 current digest differs from canonical prefix")
         expected_terminal = (
-            STAGE_B_OUTCOME_COMPLETE
+            PROPORTIONAL_OUTCOME_COMPLETE
             if projection["outcome"] == "complete"
-            else STAGE_B_OUTCOME_INCONCLUSIVE
+            else PROPORTIONAL_OUTCOME_INCONCLUSIVE
         )
         if int(terminal["outcome"]) != expected_terminal:
             mismatches.append("terminal outcome differs from schema-8 component projection")
@@ -5639,11 +5653,11 @@ _BW_REQUIRED_HALF_WIDTH_FRACTION = 1.0 / 15.0
 _BW_TERMINAL_CAUSE_ACCEPTED = 21
 _BW_STATIONARITY_EXCESSIVE_DRIFT = 6
 
-# `BREAKAWAY_STAGE_B_SCHEMA_REVISION` (combined_plan.rs): the rules revision
+# `BREAKAWAY_PROPORTIONAL_SCHEMA_REVISION` (combined_plan.rs): the rules revision
 # `AdditiveDiscoveryPlanned.schema_revision` reports, so an offline decoder can
 # confirm it is regenerating the ladder under the exact rules the firmware
 # applied rather than a stale or newer revision.
-_BW_STAGE_B_MIN_SCHEMA_REVISION = 15
+_BW_PROPORTIONAL_MIN_SCHEMA_REVISION = 15
 _BW_PROPORTIONAL_SCHEMA_REVISION = 17
 
 # `NOMINATION_SCREEN_C_SIGMA` (band_confirmation.rs): the pointwise 95%
@@ -6948,14 +6962,14 @@ def audit_breakaway_campaign(
         if int(discovery_planned["prior_plan_digest"]) != int(probe_planned["plan_digest"]):
             raise ValueError("breakaway discovery plan does not chain to the probe plan digest")
         if not (
-            _BW_STAGE_B_MIN_SCHEMA_REVISION
+            _BW_PROPORTIONAL_MIN_SCHEMA_REVISION
             <= int(discovery_planned["schema_revision"])
             <= _BW_PROPORTIONAL_SCHEMA_REVISION
         ):
             mismatches.append(
                 f"discovery schema_revision: firmware="
                 f"{int(discovery_planned['schema_revision'])} want="
-                f"{int(_BW_STAGE_B_MIN_SCHEMA_REVISION)}-"
+                f"{int(_BW_PROPORTIONAL_MIN_SCHEMA_REVISION)}-"
                 f"{int(_BW_PROPORTIONAL_SCHEMA_REVISION)} (offline replay regenerates the ladder "
                 f"under a different rules revision than the firmware applied)"
             )
