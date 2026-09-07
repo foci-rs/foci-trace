@@ -84,7 +84,7 @@ _U128_MAX = (1 << 128) - 1
 #   through _STANDALONE_STAGE_C_SCHEMA_REVISION
 #         standalone Stage C, planned by `plan_velocity_integral_response`
 #         with `combined_selected_response: None`. Decode-only mirror: this
-#         builder named the `StageCAcquisition::ReproducedStageB` acquisition
+#         builder named the `IntegralAcquisition::ReproducedProportional` acquisition
 #         kind, removed once it was left with no live installer. Firmware no
 #         longer defines this workflow; this constant exists here only so
 #         archived captures keep decoding.
@@ -2227,7 +2227,7 @@ def audit_velocity_integral(
         # (`plan_breakaway_velocity_integral_response`), which is also
         # non-combined (`plan_combined_workflow` is False for it) but, unlike
         # the immediate-scored range below it, can be legitimately
-        # *reproduced* via `stage_c_resume` -- and a reproduced breakaway run
+        # *reproduced* via `integral_resume` -- and a reproduced breakaway run
         # genuinely reports `Complete` (1), not `CompleteCandidate` (0).
         # Breakaway sets no combined recovery-flags bit and emits no combined
         # tail (both checked above and unaffected by this carve-out), so the

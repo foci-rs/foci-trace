@@ -24,7 +24,7 @@ FRAME_MAGIC = 0x43525446
 # Version 20 adds the velocity feedforward clamp-engaged flag to the critical
 # payload.
 # Version 19 adds `error_code` to the breakaway campaign terminal and a new
-# ConfirmationStageCPlanRefused (26) terminal cause, so a confirmed
+# ConfirmationIntegralPlanRefused (26) terminal cause, so a confirmed
 # acceptance whose Stage-C plan build was refused is attributable instead of
 # reporting a self-contradictory Accepted cause.
 # Version 17 adds `error_code` to the breakaway discovery terminal, so a

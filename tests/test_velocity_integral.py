@@ -246,7 +246,7 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
     if schema_revision >= 14:
         # The breakaway-seeded campaign
         # (`plan_breakaway_velocity_integral_response`, integral_plan.rs:1387).
-        # It has no Stage-B sweep, so `StageCAuthority::new_breakaway` zeroes
+        # It has no Stage-B sweep, so `IntegralAcquisitionAuthority::new_breakaway` zeroes
         # every directional field; it passes `combined_selected_response: None`
         # and `probe_constrained_test_point: false`; and it passes
         # `append_exact_cap: false`, so the ladder is the plain
@@ -3502,7 +3502,7 @@ def test_breakaway_reproduced_complete_audits_clean() -> None:
     `combined_selected_response`, so `stage_c_combined_workflow` is False for
     schema 16 exactly as it is for the pre-existing schema-14 immediate-scored
     range -- but unlike that range, a breakaway run that is reproduced via
-    `stage_c_resume` genuinely reaches `Complete`, not just
+    `integral_resume` genuinely reaches `Complete`, not just
     `CompleteCandidate`. The guard must carve out schema 16 alone (not the
     whole >= 8 non-combined range) so this legitimate terminal audits clean
     while a real standalone claim of the same outcome (schema 14, tested
