@@ -296,7 +296,7 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
         # schema_revision >= 14 (Breakaway) ran first and zeroed Stage-B
         # authority, set fixed_p=951, and shrank the ladder back to 12
         # unaugmented rungs (see that tier's comment). Schema 17 is the
-        # ReproducedStageB/standalone family, not Breakaway, so every field
+        # ReproducedProportional/standalone family, not Breakaway, so every field
         # that tier changed must be restored to the schema-7 tier's values
         # here, before applying the augmented 13-rung geometry on top.
         # integral_plan_digest picks its hashed build representation by dict
@@ -350,7 +350,7 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
     if schema_revision >= 18:
         # Back to the breakaway-seeded campaign: same builder as the schema-14
         # tier, so every Stage-B authority field that tier zeroed is zeroed
-        # again here, undoing the ReproducedStageB restoration the schema-17
+        # again here, undoing the ReproducedProportional restoration the schema-17
         # tier applied. What schema 18 keeps from that tier is the half-octave
         # geometry (it is a response-ladder schema) and `build_features`, since
         # only current firmware can emit this revision at all. What
@@ -441,14 +441,14 @@ def test_schema_eight_plan_hashes_selected_response_and_appends_exact_cap() -> N
     ("schema_revision", "combined"),
     [(1, False), (7, False), (8, True), (12, True), (13, True), (14, False)],
 )
-def test_stage_c_workflow_follows_the_firmware_schema_ranges(
+def test_integral_workflow_follows_the_firmware_schema_ranges(
     schema_revision: int, combined: bool
 ) -> None:
     """The four firmware constants that partition the Stage-C schema space:
-    `STAGE_C_EVIDENCE_SCHEMA_REVISION = 7` (integral_plan.rs:24),
+    `INTEGRAL_EVIDENCE_SCHEMA_REVISION = 7` (integral_plan.rs:24),
     `FIRST_COMBINED_INTEGRAL_SCHEMA_REVISION = 8` and
     `COMBINED_INTEGRAL_SCHEMA_REVISION = 13` (combined_plan.rs:20,22), and
-    `BREAKAWAY_STAGE_C_SCHEMA_REVISION = 14` (combined_plan.rs:40). Only 8
+    `BREAKAWAY_INTEGRAL_SCHEMA_REVISION = 14` (combined_plan.rs:40). Only 8
     through 13 are combined; 14 is a standalone breakaway run, which is why
     `schema >= 8` on its own is not a combined-workflow test.
     """
@@ -564,7 +564,7 @@ def test_schema_three_plan_digest_hashes_limit_evidence_capability() -> None:
     assert integral_plan_digest(latched) != integral_plan_digest(polling)
 
 
-def test_schema_four_plan_digest_hashes_stage_b_validity_context() -> None:
+def test_schema_four_plan_digest_hashes_proportional_validity_context() -> None:
     full = _plan(schema_revision=4)
     transferred = {**full, "directional_validity": [3, 4]}
     full_margin = {**full, "reduced_margin": False}
@@ -730,7 +730,7 @@ def test_schema_seventeen_derives_the_half_octave_rung():
 def test_schema_sixteen_derive_integral_ladder_also_gets_the_half_octave_rung():
     # Breakaway plans (schema 16) now also receive the half-octave insertion
     # -- the rung participates in the live gain search, not only the
-    # ReproducedStageB/standalone (schema 17) characterization path.
+    # ReproducedProportional/standalone (schema 17) characterization path.
     ladder = derive_integral_ladder(
         pwm_hz=25_000,
         moving_stroke_us=512_000,
@@ -798,7 +798,7 @@ def test_schema_seventeen_selects_transition_capable_prefix_independently() -> N
     # Mirrors the schema-7 standalone _validate_plan tests (e.g.
     # test_schema_four_plan_reconstructs_exact_counts_and_duration above) with
     # schema_revision=17 -- confirms _validate_plan runs the same independent
-    # Stage-B test-point reconstruction for the new standalone/ReproducedStageB
+    # Stage-B test-point reconstruction for the new standalone/ReproducedProportional
     # schema that it already runs for schema 7.
     plan = _plan(schema_revision=17)
     plan["plan_digest"] = integral_plan_digest(plan)
@@ -1063,7 +1063,7 @@ def _moving_recovery_record(
 # Field order and widths below mirror `_decode_velocity_sweep_evidence`'s
 # `kind == 11` (78-byte, Event 151) and `kind == 10` (89-byte, Event 150)
 # branches in `foci_trace/protocol.py` exactly -- the only two shapes those
-# branches accept. `test_stage_c_evidence_helpers_round_trip_through_the_decoder`
+# branches accept. `test_integral_evidence_helpers_round_trip_through_the_decoder`
 # decodes every record either helper builds and asserts the result equals
 # what the helper claims, so a field-order or field-count mistake here fails
 # immediately instead of silently building a dict `audit_velocity_integral`
@@ -1071,7 +1071,7 @@ def _moving_recovery_record(
 # firmware decoder.
 
 
-def _stage_c_rest_selection_record(
+def _integral_rest_selection_record(
     rung_index: int,
     slot: int,
     owner: int,
@@ -1154,7 +1154,7 @@ def _stage_c_rest_selection_record(
     return raw, {"record_kind": "rest_selection", **decoded}
 
 
-def _stage_c_recovery_rest_record(
+def _integral_recovery_rest_record(
     rung_index: int,
     sequence: int,
     plan_digest: int,
@@ -1224,7 +1224,7 @@ def _stage_c_recovery_rest_record(
     return raw, {"record_kind": "recovery_rest", **decoded}
 
 
-def test_stage_c_evidence_helpers_round_trip_through_the_decoder() -> None:
+def test_integral_evidence_helpers_round_trip_through_the_decoder() -> None:
     """Decode every shape either synthetic-evidence helper can produce and
     assert the result equals what the helper claims. `audit_velocity_integral`
     trusts the separately built dictionary in each `(raw, dict)` pair while
@@ -1238,13 +1238,13 @@ def test_stage_c_evidence_helpers_round_trip_through_the_decoder() -> None:
     plan_digest = 0xABCDEF01
 
     for owner, direction, slot in ((3, 0, 2), (3, 1, 5), (4, 0, 0), (4, 1, 7), (5, 0, 0)):
-        raw, expected = _stage_c_rest_selection_record(
+        raw, expected = _integral_rest_selection_record(
             1, slot, owner, 9, plan_digest, direction=direction
         )
         assert len(raw) == 78
         assert _decode_velocity_sweep_evidence(raw) == expected
 
-    raw, expected = _stage_c_recovery_rest_record(
+    raw, expected = _integral_recovery_rest_record(
         1,
         9,
         plan_digest,
@@ -1430,7 +1430,7 @@ def _rung_record(
 
 # Real, measured shape of a Breakaway (schema-16) plan after the ladder gate
 # widened to include it -- 13 positive rungs (the same half-octave insertion
-# ReproducedStageB plans already carried), captured from
+# ReproducedProportional plans already carried), captured from
 # `build_test_breakaway_plan()` in the Rust suite via a temporary print, not
 # hand-derived. The schema-14 archived-capture tier in `_plan()` stays
 # unaugmented (it pins a real historical capture predating this change), so
@@ -1481,7 +1481,7 @@ def _synthetic_complete_capture(
     # Below schema 12 the grammar never runs (its floor is 12) and no
     # rest_selection/recovery_rest records are emitted, so the schedule below
     # is inert and every existing schema-1-through-11 fixture is unaffected.
-    stage_c_scored = schema_revision >= 12
+    integral_scored = schema_revision >= 12
     # Firmware unified rung-origin recovery onto the stabilized rest schedule
     # (`RecoveryRestSchedule`/`integral_recovery_rest_schedule` are gone), but
     # that changed the evidence grammar, so it came with a schema bump. A
@@ -1529,9 +1529,9 @@ def _synthetic_complete_capture(
             direction_results[direction].append(result)
             records.append(_observation_record(result, sequence, int(plan["plan_digest"])))
             sequence += 1
-            if stage_c_scored:
+            if integral_scored:
                 records.append(
-                    _stage_c_rest_selection_record(
+                    _integral_rest_selection_record(
                         rung_index,
                         slot,
                         ordinary_owner,
@@ -1571,16 +1571,16 @@ def _synthetic_complete_capture(
         )
         sequence += 1
         if schema_revision >= 2:
-            if stage_c_scored and rung_index == moving_recovery_rung:
+            if integral_scored and rung_index == moving_recovery_rung:
                 records.append(
-                    _stage_c_rest_selection_record(
+                    _integral_rest_selection_record(
                         rung_index, 0, 5, sequence, int(plan["plan_digest"])
                     )
                 )
                 sequence += 1
                 if stabilized:
                     records.append(
-                        _stage_c_recovery_rest_record(
+                        _integral_recovery_rest_record(
                             rung_index,
                             sequence,
                             int(plan["plan_digest"]),
@@ -2214,7 +2214,7 @@ def _synthetic_recovery_fault_prefix(
     return raw_observations, [*retained, records[-1]]
 
 
-def test_stage_c_fault_accepts_one_missing_final_recovery() -> None:
+def test_integral_fault_accepts_one_missing_final_recovery() -> None:
     raw, records = _synthetic_recovery_fault_prefix()
 
     audit = audit_velocity_integral(raw, records)
@@ -2227,7 +2227,7 @@ def test_stage_c_fault_accepts_one_missing_final_recovery() -> None:
     assert "pre-fault prefix" in audit["caveats"][0]
 
 
-def test_stage_c_non_fault_rejects_one_missing_final_recovery() -> None:
+def test_integral_non_fault_rejects_one_missing_final_recovery() -> None:
     raw, records = _synthetic_recovery_fault_prefix(outcome=2)
 
     audit = audit_velocity_integral(raw, records)
@@ -2236,7 +2236,7 @@ def test_stage_c_non_fault_rejects_one_missing_final_recovery() -> None:
     assert any("recovery rungs" in item for item in audit["mismatches"])
 
 
-def test_stage_c_fault_rejects_two_missing_recovery_records() -> None:
+def test_integral_fault_rejects_two_missing_recovery_records() -> None:
     raw, records = _synthetic_recovery_fault_prefix(missing_recoveries=(12, 13))
 
     audit = audit_velocity_integral(raw, records)
@@ -2245,7 +2245,7 @@ def test_stage_c_fault_rejects_two_missing_recovery_records() -> None:
     assert any("recovery rungs" in item for item in audit["mismatches"])
 
 
-def test_stage_c_fault_rejects_missing_intermediate_recovery() -> None:
+def test_integral_fault_rejects_missing_intermediate_recovery() -> None:
     raw, records = _synthetic_recovery_fault_prefix(missing_recoveries=(12,))
 
     audit = audit_velocity_integral(raw, records)
@@ -2756,8 +2756,8 @@ def test_schema_four_sufficiency_requires_both_closing_bookends() -> None:
 
 @pytest.mark.parametrize("schema_revision", [0, 19])
 def test_integral_ladder_rejects_unsupported_schema(schema_revision: int) -> None:
-    """Schema 17 -- the half-octave `ReproducedStageB` ladder
-    (`STAGE_C_EVIDENCE_SCHEMA_REVISION`, integral_plan.rs:21) -- is a real
+    """Schema 17 -- the half-octave `ReproducedProportional` ladder
+    (`INTEGRAL_EVIDENCE_SCHEMA_REVISION`, integral_plan.rs:21) -- is a real
     firmware schema, so the rejected boundary sits one above it. 18 does not
     exist as a Stage-C revision in firmware.
     """
@@ -2850,7 +2850,7 @@ def test_current_observer_peak_overrides_sparse_trace_peak() -> None:
     assert result["classification"] == 3
 
 
-def test_reconstruct_observation_applies_drift_bound_at_stage_c_schema_thirteen() -> None:
+def test_reconstruct_observation_applies_drift_bound_at_integral_schema_thirteen() -> None:
     """Direct coverage of the drift bound at its floor schema. The schema-14
     breakaway fixture now drives `reconstruct_observation` above that floor end
     to end, but only with samples the bound accepts; this pins the rejecting
@@ -2879,7 +2879,7 @@ def test_reconstruct_observation_applies_drift_bound_at_stage_c_schema_thirteen(
     assert result["stationarity_code"] == 6
 
 
-def test_reconstruct_observation_uses_significance_test_below_stage_c_schema_thirteen() -> None:
+def test_reconstruct_observation_uses_significance_test_below_integral_schema_thirteen() -> None:
     """The sibling of the test above, one schema revision below the Stage C
     drift-bound floor: the identical raw samples take the legacy significance
     test instead and reject for a different reason (ResolvedSlope, not
@@ -2998,7 +2998,7 @@ def test_every_slot_order_is_decoded_and_separates_the_digest() -> None:
     assert digests[0] == integral_plan_digest(bare)
 
 
-_STAGE_C_NONTERMINAL_KINDS = frozenset(
+_INTEGRAL_NONTERMINAL_KINDS = frozenset(
     (
         "integral_plan_marker",
         "integral_observation",
@@ -3011,7 +3011,7 @@ _STAGE_C_NONTERMINAL_KINDS = frozenset(
 )
 
 
-def _renumber_stage_c_nonterminal_sequence(
+def _renumber_integral_nonterminal_sequence(
     records: list[tuple[bytes, dict[str, object]]],
 ) -> int:
     """Recompute the contiguous 1..N evidence sequence in place, in both the
@@ -3033,7 +3033,7 @@ def _renumber_stage_c_nonterminal_sequence(
     """
     sequence = 1
     for index, (raw, value) in enumerate(records):
-        if value["record_kind"] not in _STAGE_C_NONTERMINAL_KINDS:
+        if value["record_kind"] not in _INTEGRAL_NONTERMINAL_KINDS:
             continue
         value["evidence_sequence"] = sequence
         if value["record_kind"] != "integral_plan_marker":
@@ -3044,7 +3044,7 @@ def _renumber_stage_c_nonterminal_sequence(
     return sequence
 
 
-def _rebuild_stage_c_digest(
+def _rebuild_integral_digest(
     plan: dict[str, object], records: list[tuple[bytes, dict[str, object]]]
 ) -> int:
     """Recompute the terminal digest the same way `_synthetic_complete_capture` does."""
@@ -3059,13 +3059,13 @@ def _rebuild_stage_c_digest(
     return digest
 
 
-def test_renumber_stage_c_nonterminal_sequence_keeps_raw_and_decoded_in_sync() -> None:
-    """`_renumber_stage_c_nonterminal_sequence` must patch the raw evidence
+def test_renumber_integral_nonterminal_sequence_keeps_raw_and_decoded_in_sync() -> None:
+    """`_renumber_integral_nonterminal_sequence` must patch the raw evidence
     sequence bytes alongside the decoded dict, or a real decoder run over the
     renumbered stream would report different sequence numbers than the dicts
     the tests assert against -- the digest would then be rebuilt from bytes
     that disagree with the fixture's own claims about itself. Remove a
-    record, as `test_stabilized_stage_c_recovery_without_event_150_reports_both_validators`
+    record, as `test_stabilized_integral_recovery_without_event_150_reports_both_validators`
     does, and confirm every remaining raw record decodes to the exact
     sequence its dict carries.
     """
@@ -3079,12 +3079,12 @@ def test_renumber_stage_c_nonterminal_sequence_keeps_raw_and_decoded_in_sync() -
         if value["record_kind"] == "recovery_rest"
     )
     del records[removed_index]
-    _renumber_stage_c_nonterminal_sequence(records)
+    _renumber_integral_nonterminal_sequence(records)
 
     checked = 0
     for raw, value in records:
         if (
-            value["record_kind"] not in _STAGE_C_NONTERMINAL_KINDS
+            value["record_kind"] not in _INTEGRAL_NONTERMINAL_KINDS
             or value["record_kind"] == "integral_plan_marker"
         ):
             continue
@@ -3094,7 +3094,7 @@ def test_renumber_stage_c_nonterminal_sequence_keeps_raw_and_decoded_in_sync() -
     assert checked > 0
 
 
-def test_immediate_scored_stage_c_recovery_passes_with_no_event_150() -> None:
+def test_immediate_scored_integral_recovery_passes_with_no_event_150() -> None:
     """Firmware unified rung-origin recovery onto the stabilized rest schedule,
     but bumped the schema when it did, so an archived capture keeps decoding
     under the schedule its own firmware ran. Schema 14 is that archived shape:
@@ -3114,7 +3114,7 @@ def test_immediate_scored_stage_c_recovery_passes_with_no_event_150() -> None:
     assert audit["matches_firmware"] is True
 
 
-def test_unified_rest_stage_c_recovery_passes_with_event_150() -> None:
+def test_unified_rest_integral_recovery_passes_with_event_150() -> None:
     """The post-bump counterpart of the archived schema-14 shape above, and the
     reason the bump exists: the same breakaway workflow, planned by the same
     builder, but with every recovery that completes a scored rest emitting its
@@ -3160,9 +3160,9 @@ def test_archived_schema_fourteen_capture_carrying_event_150_is_rejected() -> No
         if value["record_kind"] == "rest_selection" and int(value["owner"]) == 5
     )
     records.insert(selection_index + 1, (donor_raw, donor))
-    next_sequence = _renumber_stage_c_nonterminal_sequence(records)
+    next_sequence = _renumber_integral_nonterminal_sequence(records)
     terminal["evidence_sequence"] = next_sequence
-    terminal["digest"] = _rebuild_stage_c_digest(plan, records)
+    terminal["digest"] = _rebuild_integral_digest(plan, records)
     records.append((terminal_raw, terminal))
 
     audit = audit_velocity_integral(raw, records)
@@ -3187,9 +3187,9 @@ def test_unified_rest_capture_without_event_150_is_rejected() -> None:
         if value["record_kind"] == "recovery_rest"
     )
     del records[removed_index]
-    next_sequence = _renumber_stage_c_nonterminal_sequence(records)
+    next_sequence = _renumber_integral_nonterminal_sequence(records)
     terminal["evidence_sequence"] = next_sequence
-    terminal["digest"] = _rebuild_stage_c_digest(plan, records)
+    terminal["digest"] = _rebuild_integral_digest(plan, records)
     records.append((terminal_raw, terminal))
 
     audit = audit_velocity_integral(raw, records)
@@ -3306,14 +3306,14 @@ def test_breakaway_rung_carrying_a_response_horizon_is_rejected() -> None:
     )
     terminal = records[-1][1]
     assert terminal["record_kind"] == "integral_terminal"
-    terminal["digest"] = _rebuild_stage_c_digest(plan, records[:-1])
+    terminal["digest"] = _rebuild_integral_digest(plan, records[:-1])
 
     audit = audit_velocity_integral(raw, records)
 
     assert audit["mismatches"] == ["rung 3 reports a response horizon outside a combined workflow"]
 
 
-def test_stabilized_stage_c_recovery_passes_with_event_150() -> None:
+def test_stabilized_integral_recovery_passes_with_event_150() -> None:
     """The combined-workflow counterpart to the breakaway case above: schema
     12 also emits the owner-5 selection, then Event 150, then the recovery.
     Both must reach an empty mismatch list, pinning that the grammar holds
@@ -3327,7 +3327,7 @@ def test_stabilized_stage_c_recovery_passes_with_event_150() -> None:
     assert audit["matches_firmware"] is True
 
 
-def test_stabilized_stage_c_recovery_without_event_150_reports_both_validators() -> None:
+def test_stabilized_integral_recovery_without_event_150_reports_both_validators() -> None:
     """Removing Event 150 from an otherwise-valid stabilized capture must still
     be rejected, proving the presence rule has teeth under `Stabilized` and
     was not simply disabled. Two validators fire on the same real stream:
@@ -3345,9 +3345,9 @@ def test_stabilized_stage_c_recovery_without_event_150_reports_both_validators()
         if value["record_kind"] == "recovery_rest"
     )
     del records[removed_index]
-    next_sequence = _renumber_stage_c_nonterminal_sequence(records)
+    next_sequence = _renumber_integral_nonterminal_sequence(records)
     terminal["evidence_sequence"] = next_sequence
-    terminal["digest"] = _rebuild_stage_c_digest(plan, records)
+    terminal["digest"] = _rebuild_integral_digest(plan, records)
     records.append((terminal_raw, terminal))
 
     audit = audit_velocity_integral(raw, records)
@@ -3511,7 +3511,7 @@ def test_breakaway_reproduced_complete_audits_clean() -> None:
 
     Breakaway plans now also receive the half-octave rung (real values
     measured from `build_test_breakaway_plan()` in the Rust suite, matching
-    the same 13-rung shape `ReproducedStageB` plans already used), so this
+    the same 13-rung shape `ReproducedProportional` plans already used), so this
     fixture overrides the ladder-derived fields the schema-14 tier's
     unaugmented 12-rung archived-capture values would otherwise leave stale.
     """
@@ -3561,7 +3561,7 @@ def test_standalone_non_breakaway_complete_still_flagged() -> None:
     assert audit["mismatches"] == ["standalone sufficient run falsely reports the combined outcome"]
 
 
-def test_combined_stage_c_audit_unchanged() -> None:
+def test_combined_integral_audit_unchanged() -> None:
     """Locks the combined branch (schemas 8-13) against the schema-16
     breakaway carve-out: a combined (schema-13) sufficient run reporting
     `Complete` (outcome 1) still audits clean, unmodified by the new
@@ -3866,7 +3866,7 @@ def _analyze_complete_prefix(capture_path: Path) -> object:
 # Step 4 below needs the ordinary evidence stream only, a real terminal is
 # never reachable from `foc213-p18b`'s truncated recording, and a
 # synthesized sentinel stands in for it instead.
-_STAGE_C_EVIDENCE_KINDS = frozenset(
+_INTEGRAL_EVIDENCE_KINDS = frozenset(
     {
         "integral_observation",
         "rest_selection",
@@ -3878,7 +3878,7 @@ _STAGE_C_EVIDENCE_KINDS = frozenset(
 )
 
 
-def _stage_c_evidence_records(capture_path: Path) -> list[dict[str, object]]:
+def _integral_evidence_records(capture_path: Path) -> list[dict[str, object]]:
     """Decode one capture's Stage-C evidence records in stream order.
 
     `audit_velocity_integral` cannot run on `foc213-p18b`: its recorder
@@ -3897,7 +3897,7 @@ def _stage_c_evidence_records(capture_path: Path) -> list[dict[str, object]]:
         frame = decode_frame(record.payload)
         if frame.header.frame_type != FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE:
             continue
-        if frame.payload.get("record_kind") in _STAGE_C_EVIDENCE_KINDS:
+        if frame.payload.get("record_kind") in _INTEGRAL_EVIDENCE_KINDS:
             records.append(frame.payload)
     return records
 
@@ -4078,7 +4078,7 @@ def test_p18b_decoded_prefix_satisfies_the_scored_rest_grammar() -> None:
     if not _P18B_CAPTURE.exists():
         pytest.skip(f"archived capture not present: {_P18B_CAPTURE}")
 
-    records = _stage_c_evidence_records(_P18B_CAPTURE)
+    records = _integral_evidence_records(_P18B_CAPTURE)
     last_recovery_index = max(
         index
         for index, record in enumerate(records)
