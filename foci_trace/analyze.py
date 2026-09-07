@@ -8,7 +8,7 @@ import json
 import math
 import struct
 import sys
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from statistics import median
 from typing import BinaryIO
 
@@ -47,9 +47,11 @@ from .protocol import (
     VELOCITY_OBSERVATION_FLAG_PID_VELOCITY_ACTUAL_VALID,
     VELOCITY_OBSERVATION_FLAG_PPTM_ACTUAL_VALID,
     DecodeError,
+    Frame,
     assemble_breakaway_ticks,
     decode_frame,
 )
+from .tracking_lag import TrackingLagReport, analyze_tracking_lag, format_tracking_lag
 from .velocity_integral import (
     audit_integral_reproduction_pair,
     audit_velocity_integral,
@@ -346,6 +348,7 @@ class CaptureAnalysis:
     breakaway_campaign_audits: list[dict[str, object]] = field(default_factory=list)
     corexy_plus: str | None = None
     corexy_minus: str | None = None
+    tracking_lag: TrackingLagReport | None = None
 
 
 @dataclass(frozen=True)
@@ -2556,9 +2559,11 @@ def analyze_capture(
     decoupling_f_pwm_hz: float = DEFAULT_DECOUPLING_F_PWM_HZ,
     decoupling_pole_pairs: int = DEFAULT_DECOUPLING_POLE_PAIRS,
     decoupling_position_units_per_rev: int = DEFAULT_DECOUPLING_POSITION_UNITS_PER_REV,
+    mm_per_rev: float | None = None,
 ) -> CaptureAnalysis:
     """Analyze one FTRF capture stream."""
     states: dict[int, _DeviceState] = {}
+    decoded_frames: list[tuple[int, Frame]] = []
     commissioning = CommissioningCaptureBuilder()
     for record in CaptureReader(source).records():
         state = _state(states, record.device_index)
@@ -2575,6 +2580,7 @@ def analyze_capture(
         except DecodeError:
             state.report.decode_errors += 1
             continue
+        decoded_frames.append((record.device_index, frame))
         header = frame.header
         if state.protocol_version is None:
             state.protocol_version = header.protocol_version
@@ -2736,6 +2742,16 @@ def analyze_capture(
                     post_discriminator=_contour_post_discriminator(relevant_segments),
                 )
             )
+    tracking_lag: TrackingLagReport | None = None
+    if decoded_frames:
+        clock_hz_by_device = {index: state.clock_hz for index, state in states.items()}
+        product_by_device = {index: state.report.product for index, state in states.items()}
+        tracking_lag = analyze_tracking_lag(
+            decoded_frames,
+            clock_hz_by_device=clock_hz_by_device,
+            product_by_device=product_by_device,
+            mm_per_rev=mm_per_rev,
+        )
     return CaptureAnalysis(
         devices=[states[index].report for index in sorted(states)],
         commissioning=commissioning_report,
@@ -2748,6 +2764,7 @@ def analyze_capture(
         breakaway_campaign_audits=_breakaway_campaign_audits(states, commissioning_report),
         corexy_plus=corexy_plus,
         corexy_minus=corexy_minus,
+        tracking_lag=tracking_lag,
     )
 
 
@@ -2812,6 +2829,8 @@ def format_summary(
     include_phase_split: bool = False,
     include_feedforward_audit: bool = False,
     include_decoupling_audit: bool = False,
+    tracking_lag: TrackingLagReport | None = None,
+    mm_per_rev: float | None = None,
 ) -> str:
     """Format capture summaries for operator review."""
     lines: list[str] = []
@@ -3071,6 +3090,8 @@ def format_summary(
                             f"{decoupling.vq_cross_range[0]:.1f}.."
                             f"{decoupling.vq_cross_range[1]:.1f} samples={decoupling.samples}"
                         )
+    if tracking_lag is not None:
+        lines.extend(format_tracking_lag(tracking_lag, mm_per_rev))
     return "\n".join(lines)
 
 
@@ -3081,6 +3102,7 @@ def format_analysis(
     include_feedforward_audit: bool = False,
     include_decoupling_audit: bool = False,
     include_contour: bool = False,
+    mm_per_rev: float | None = None,
 ) -> str:
     """Format full capture analysis, optionally including CoreXY contour reports."""
     text = format_summary(
@@ -3088,6 +3110,8 @@ def format_analysis(
         include_phase_split=include_phase_split,
         include_feedforward_audit=include_feedforward_audit,
         include_decoupling_audit=include_decoupling_audit,
+        tracking_lag=analysis.tracking_lag,
+        mm_per_rev=mm_per_rev,
     )
     commissioning_text = format_commissioning_report(analysis.commissioning)
     if commissioning_text:
@@ -3306,6 +3330,7 @@ def analysis_to_json(analysis: CaptureAnalysis) -> dict[str, object]:
             }
             for segment in analysis.contour_segments
         ],
+        "tracking_lag": asdict(analysis.tracking_lag) if analysis.tracking_lag else None,
     }
 
 
@@ -3415,6 +3440,12 @@ def main(argv: list[str] | None = None) -> int:
         metavar="PATH",
         help="write machine-readable velocity measurement evidence to PATH",
     )
+    parser.add_argument(
+        "--mm-per-rev",
+        type=float,
+        default=None,
+        help="motor mm per revolution for the tracking-lag mm column",
+    )
 
     try:
         args = parser.parse_args(argv)
@@ -3439,6 +3470,7 @@ def main(argv: list[str] | None = None) -> int:
                 decoupling_f_pwm_hz=args.decoupling_f_pwm_hz,
                 decoupling_pole_pairs=args.decoupling_pole_pairs,
                 decoupling_position_units_per_rev=args.decoupling_position_units_per_rev,
+                mm_per_rev=args.mm_per_rev,
             )
     except OSError as exc:
         print(f"failed to read {args.capture}: {exc}", file=sys.stderr)
@@ -3466,6 +3498,7 @@ def main(argv: list[str] | None = None) -> int:
                 include_feedforward_audit=args.feedforward_audit,
                 include_decoupling_audit=args.decoupling_audit,
                 include_contour=args.contour_analysis,
+                mm_per_rev=args.mm_per_rev,
             )
         )
     return 0

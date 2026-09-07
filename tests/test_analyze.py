@@ -3486,3 +3486,55 @@ def test_analyze_capture_does_not_flag_prior_phase_motion_as_premature() -> None
 
     assert len(analysis.breakaway_campaign_audits) == 1
     assert analysis.breakaway_campaign_audits[0]["matches_firmware"] is True
+
+
+def _status_payload_v22(pressure: int, max_cycles: int) -> bytes:
+    return _status_payload(0, 0) + struct.pack("<II", pressure, max_cycles)
+
+
+def test_analyze_capture_reports_tracking_lag_and_budget() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+    meta = _metadata_payload("ABC")
+    writer.write_firmware_frame(
+        0, 110, _header(FRAME_TYPE_METADATA, meta, 1, 0, 0, 255, version=22) + meta
+    )
+    before = _status_payload_v22(0, 90_000)
+    writer.write_firmware_frame(
+        0, 120, _header(FRAME_TYPE_STATUS, before, 2, 0, 0, 255, version=22) + before
+    )
+    tpm = 84_000
+    seq = 3
+    for i in range(400):
+        payload = _critical_payload(-144, 0, 0, 0)
+        # _critical_payload fixes pid_velocity_actual at 20; patch the velocity slot to 75 RPM
+        payload = payload[:16] + struct.pack("<i", 75) + payload[20:]
+        writer.write_firmware_frame(
+            0,
+            130 + i,
+            _header(FRAME_TYPE_CRITICAL, payload, seq, (100 + i) * tpm, 1, 0, version=22) + payload,
+        )
+        seq += 1
+    after = _status_payload_v22(0, 95_000)
+    writer.write_firmware_frame(
+        0, 900, _header(FRAME_TYPE_STATUS, after, seq, 800 * tpm, 0, 255, version=22) + after
+    )
+    output.seek(0)
+
+    analysis = analyze_capture(output, mm_per_rev=40.0)
+    report = analysis.tracking_lag
+    assert report is not None and report.refused is None
+    (seg,) = report.segments
+    assert seg.lag_ms == pytest.approx(-1.7578, abs=0.01)
+    assert report.budgets[0].bracketed and report.budgets[0].max_spi_sample_cycles == 95_000
+    text = format_summary(analysis.devices, tracking_lag=report, mm_per_rev=40.0)
+    assert "lag=-1.76ms" in text
+    assert "budget dev0 bracketed=True max_cycles=95000 threshold=120000 pressure_delta=0" in text
+
+    full = format_analysis(analysis, mm_per_rev=40.0)
+    assert "lag=-1.76ms" in full and "budget dev0 bracketed=True" in full
+
+    assert analysis_to_json(analysis)["tracking_lag"]["segments"][0]["lag_ms"] == pytest.approx(
+        -1.7578, abs=0.01
+    )
