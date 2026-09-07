@@ -102,7 +102,7 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
         "schema_revision": schema_revision,
         "channel": 0,
         "stage_b_plan_digest": 0xDDEEFF0099AABBCC,
-        "final_p": 1_448,
+        "fixed_p": 1_448,
         "directional_memberships": [0x380000, 0x3C0000],
         "joint_membership": 0x380000,
         "directional_pooled_intervals": [
@@ -184,7 +184,7 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
     if schema_revision >= 7:
         plan.update(
             {
-                "final_p": 724,
+                "fixed_p": 724,
                 "stage_b_joint_membership": 0x001C_0000,
                 "joint_membership": 0x0004_0000,
                 "directional_memberships": [0x001C_0000, 0x001C_0000],
@@ -198,7 +198,7 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
     if schema_revision >= 8:
         plan.update(
             {
-                "final_p": 1_024,
+                "fixed_p": 1_024,
                 "combined_selected_response": True,
                 "selected_response_intervals_q": [
                     [12_900_000, 13_200_000],
@@ -272,7 +272,7 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
                 # the real capture reports, so the fixture models the decoded
                 # value rather than firmware's `Option::None`.
                 "combined_selected_response": False,
-                "final_p": 951,
+                "fixed_p": 951,
                 "usable_torque_limit": 2_534,
                 "directional_memberships": [0, 0],
                 "stage_b_joint_membership": 0,
@@ -294,7 +294,7 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
         )
     if schema_revision >= 17:
         # schema_revision >= 14 (Breakaway) ran first and zeroed Stage-B
-        # authority, set final_p=951, and shrank the ladder back to 12
+        # authority, set fixed_p=951, and shrank the ladder back to 12
         # unaugmented rungs (see that tier's comment). Schema 17 is the
         # ReproducedStageB/standalone family, not Breakaway, so every field
         # that tier changed must be restored to the schema-7 tier's values
@@ -312,7 +312,7 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
         plan.update(
             {
                 "combined_selected_response": False,
-                "final_p": 724,
+                "fixed_p": 724,
                 "usable_torque_limit": 2_534,
                 "directional_memberships": [0x001C_0000, 0x001C_0000],
                 "stage_b_joint_membership": 0x001C_0000,
@@ -359,7 +359,7 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
         # from `stage_c_stabilized_recovery_rest`.
         plan.update(
             {
-                "final_p": 951,
+                "fixed_p": 951,
                 "directional_memberships": [0, 0],
                 "stage_b_joint_membership": 0,
                 "joint_membership": 0,
@@ -553,7 +553,7 @@ def test_operational_clamp_transition_ceiling_admits_p1024_not_p1448() -> None:
 
     assert selection["transition_ceiling"] == 1_088
     assert selection["joint_membership"] == 0b01
-    assert selection["final_p"] == 1_024
+    assert selection["fixed_p"] == 1_024
 
 
 def test_schema_three_plan_digest_hashes_limit_evidence_capability() -> None:
@@ -626,7 +626,7 @@ def test_schema_seven_selects_transition_capable_prefix_independently() -> None:
     assert selection == {
         "stage_b_joint_membership": 0x001C_0000,
         "joint_membership": 0x0004_0000,
-        "final_p": 724,
+        "fixed_p": 724,
         "transition_ceiling": 979,
         "reduced_margin": True,
         "probe_constrained_test_point": True,
@@ -652,10 +652,10 @@ def test_schema_seven_rejects_upper_component_until_target_is_redeclared() -> No
     )
 
     assert unavailable["joint_membership"] == 0
-    assert unavailable["final_p"] == 0
+    assert unavailable["fixed_p"] == 0
     assert unavailable["transition_ceiling"] == 979
     assert reconfigured["joint_membership"] == 0x0004_0000
-    assert reconfigured["final_p"] == 1_024
+    assert reconfigured["fixed_p"] == 1_024
     assert reconfigured["transition_ceiling"] == 1_234
 
 
@@ -681,7 +681,7 @@ def test_schema_seven_transition_boundary_and_overflow_fail_closed() -> None:
         **common,
     )
 
-    assert below["final_p"] == 979
+    assert below["fixed_p"] == 979
     assert at_or_above["joint_membership"] == 0
     with pytest.raises(ValueError, match="invalid Stage-C transition"):
         select_transition_capable_test_point(
@@ -815,7 +815,7 @@ def _plan_marker(plan: dict[str, object], sequence: int) -> tuple[bytes, dict[st
                 0,
                 7,
                 int(plan["plan_digest"]),
-                int(plan["final_p"]),
+                int(plan["fixed_p"]),
                 int(plan["planned_velocity_mrev_s"]),
                 int(plan["target_velocity_rpm"]),
                 int(plan["pwm_hz"]),
@@ -866,7 +866,7 @@ def _plan_marker(plan: dict[str, object], sequence: int) -> tuple[bytes, dict[st
         7,
         sequence,
         int(plan["plan_digest"]),
-        int(plan["final_p"]),
+        int(plan["fixed_p"]),
         int(plan["positive_rung_count"]),
         int(plan["maximum_workflow_ms"]),
     )
@@ -875,7 +875,7 @@ def _plan_marker(plan: dict[str, object], sequence: int) -> tuple[bytes, dict[st
         "run_sequence": 7,
         "evidence_sequence": sequence,
         "plan_digest": plan["plan_digest"],
-        "final_p": plan["final_p"],
+        "fixed_p": plan["fixed_p"],
         "positive_rung_count": plan["positive_rung_count"],
         "maximum_workflow_ms": plan["maximum_workflow_ms"],
     }
@@ -895,7 +895,7 @@ def _plan_records(plan: dict[str, object]) -> list[tuple[bytes, dict[str, object
         "schema_revision",
         "channel",
         "stage_b_plan_digest",
-        "final_p",
+        "fixed_p",
         "directional_memberships",
         "joint_membership",
         "directional_pooled_intervals",
@@ -1038,7 +1038,7 @@ def _moving_recovery_record(
         "evidence_sequence": sequence,
         "stage": 1,
         "rung_index": rung_index,
-        "velocity_p": int(plan["final_p"]),
+        "velocity_p": int(plan["fixed_p"]),
         "planned_velocity_mrev_s": (4_383 if int(plan["schema_revision"]) >= 10 else 4_394),
         "start_offset_counts": 1_500,
         "closest_offset_counts": 900,
@@ -1584,7 +1584,7 @@ def _synthetic_complete_capture(
                             rung_index,
                             sequence,
                             int(plan["plan_digest"]),
-                            velocity_p=int(plan["final_p"]),
+                            velocity_p=int(plan["fixed_p"]),
                             start_offset_counts=1_500,
                             closest_offset_counts=900,
                             first_in_band_offset_counts=950,
@@ -1599,7 +1599,7 @@ def _synthetic_complete_capture(
                     _recovery_record(
                         rung_index,
                         sequence,
-                        velocity_p=int(plan["final_p"]),
+                        velocity_p=int(plan["fixed_p"]),
                         planned_velocity_mrev_s=(4_383 if schema_revision >= 10 else 4_394),
                     )
                 )
@@ -1612,7 +1612,7 @@ def _synthetic_complete_capture(
             "<IQHIiIHBHIIIIHH",
             7,
             int(plan["plan_digest"]),
-            int(plan["final_p"]),
+            int(plan["fixed_p"]),
             int(plan["planned_velocity_mrev_s"]),
             int(plan["target_velocity_rpm"]),
             int(plan["pwm_hz"]),
@@ -1649,7 +1649,7 @@ def _synthetic_complete_capture(
     # one, so hardcoding 1 for every schema >= 8 run (as this fixture used
     # to) claims a combined completion an immediate-scored run never
     # reaches. The combined-only terminal encoding (`combined_workflow`/
-    # `final_p`/`target_status`/`target_terminus`, and the corresponding
+    # `fixed_p`/`target_status`/`target_terminus`, and the corresponding
     # recovery_flags bits) must likewise not claim a combined workflow the
     # plan does not have, or the fixture falsifies its own terminal to reach
     # an empty mismatch list.
@@ -1700,7 +1700,7 @@ def _synthetic_complete_capture(
                 **(
                     {
                         "combined_workflow": True,
-                        "final_p": plan["final_p"],
+                        "fixed_p": plan["fixed_p"],
                         "target_status": 3,
                         "target_terminus": None,
                     }
@@ -2420,6 +2420,8 @@ def test_committed_schema_four_q8_8_plan_remains_bit_exact() -> None:
     )
     response = json.loads(capture.read_text())["integral_responses"][0]
     plan = response["plan"]
+    # Archived capture predates the field rename; no back-compat is owed to it.
+    plan["fixed_p"] = plan.pop("final_p")
     mismatches: list[str] = []
 
     assert response["matches_firmware"] is True
@@ -2475,7 +2477,7 @@ def test_schema_seven_reconstructs_selected_test_point_and_qualifiers() -> None:
     assert response["matches_firmware"] is True
     assert response["plan"]["stage_b_joint_membership"] == 0x001C_0000
     assert response["plan"]["joint_membership"] == 0x0004_0000
-    assert response["plan"]["final_p"] == 724
+    assert response["plan"]["fixed_p"] == 724
     assert response["plan"]["reduced_margin"] is True
     assert response["terminal"]["probe_constrained_test_point"] is True
 
@@ -2809,7 +2811,7 @@ def test_constant_rate_observation_reconstructs_firmware_fields() -> None:
         "family_size": 20,
         "target_velocity_rpm": 264,
         "encoder_counts_per_rev": 4_000,
-        "final_p": 1_448,
+        "fixed_p": 1_448,
         "hard_torque_limit": 1_000,
         "usable_torque_limit": 900,
     }
@@ -2831,7 +2833,7 @@ def test_current_observer_peak_overrides_sparse_trace_peak() -> None:
         "family_size": 20,
         "target_velocity_rpm": 264,
         "encoder_counts_per_rev": 4_000,
-        "final_p": 1_024,
+        "fixed_p": 1_024,
         "hard_torque_limit": 2_816,
         "usable_torque_limit": 2_534,
     }
@@ -2860,7 +2862,7 @@ def test_reconstruct_observation_applies_drift_bound_at_stage_c_schema_thirteen(
         "family_size": 20,
         "target_velocity_rpm": 264,
         "encoder_counts_per_rev": 4_000,
-        "final_p": 1_448,
+        "fixed_p": 1_448,
         "hard_torque_limit": 1_000,
         "usable_torque_limit": 900,
         "schema_revision": STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION,
@@ -2888,7 +2890,7 @@ def test_reconstruct_observation_uses_significance_test_below_stage_c_schema_thi
         "family_size": 20,
         "target_velocity_rpm": 264,
         "encoder_counts_per_rev": 4_000,
-        "final_p": 1_448,
+        "fixed_p": 1_448,
         "hard_torque_limit": 1_000,
         "usable_torque_limit": 900,
         "schema_revision": STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION - 1,
@@ -3407,7 +3409,7 @@ def test_stabilized_terminal_dropping_the_combined_workflow_flag_is_rejected() -
 
 def test_immediate_scored_terminal_carrying_the_combined_tail_is_rejected() -> None:
     """Tail-only: a genuine immediate-scored terminal must not carry the
-    decoded combined tail (`combined_workflow`/`final_p`/`target_status`/
+    decoded combined tail (`combined_workflow`/`fixed_p`/`target_status`/
     `target_terminus`, only ever set by `protocol.py` when the wire payload
     is the 66-byte combined variant), even with an honest `recovery_flags`
     byte. Before this round, the agreement check only looked at the
@@ -3420,7 +3422,7 @@ def test_immediate_scored_terminal_carrying_the_combined_tail_is_rejected() -> N
     terminal = {
         **terminal,
         "combined_workflow": True,
-        "final_p": 1_024,
+        "fixed_p": 1_024,
         "target_status": 3,
         "target_terminus": None,
     }
@@ -3443,7 +3445,7 @@ def test_stabilized_terminal_missing_the_combined_tail_is_rejected() -> None:
     terminal = {
         key: value
         for key, value in terminal.items()
-        if key not in ("combined_workflow", "final_p", "target_status", "target_terminus")
+        if key not in ("combined_workflow", "fixed_p", "target_status", "target_terminus")
     }
     records[-1] = (terminal_raw, terminal)
 

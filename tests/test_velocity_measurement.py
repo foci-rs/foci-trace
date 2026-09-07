@@ -2233,7 +2233,7 @@ def test_stage_b_core_projection_accepts_shared_membership_and_renominates() -> 
         "low_delta": -1,
         "high_delta": 0,
     }
-    assert projected["final_p"] == 1448
+    assert projected["fixed_p"] == 1448
     assert projected["coverage"] == [
         {"coverage": "full", "signed_rung_distance": 0, "gain_ratio": [1, 1]},
         {"coverage": "full", "signed_rung_distance": 0, "gain_ratio": [1, 1]},
@@ -2265,7 +2265,7 @@ def test_stage_b_core_projection_reports_all_mismatch_reasons() -> None:
 
     assert projected["outcome"] == "reproduction_mismatch"
     assert projected["reason_mask"] == 0b1_1111
-    assert projected["final_p"] == 0
+    assert projected["fixed_p"] == 0
 
 
 def test_stage_b_core_projection_preserves_reduced_and_transferred_coverage() -> None:
@@ -2286,7 +2286,7 @@ def test_stage_b_core_projection_preserves_reduced_and_transferred_coverage() ->
 
     assert projected["outcome"] == "complete"
     assert projected["reduced_margin"] is True
-    assert projected["final_p"] == 3
+    assert projected["fixed_p"] == 3
     assert projected["coverage"][0] == {
         "coverage": "transferred",
         "signed_rung_distance": 1,
@@ -2324,7 +2324,7 @@ def test_schema8_projection_selects_shared_operating_component_from_captures() -
         project_stage_b_schema8_pair(reports[1], reports[2]),
     )
 
-    assert [projection["final_p"] for projection in projections] == [1024, 1024, 1024]
+    assert [projection["fixed_p"] for projection in projections] == [1024, 1024, 1024]
     assert projections[0]["selected_joint_mask"] == 0x001C_0000
     assert projections[0]["reduced_margin"] is False
     for projection in projections[1:]:
@@ -2336,7 +2336,7 @@ def test_schema8_projection_selects_shared_operating_component_from_captures() -
         assert projection["selected_member_count"] == 2
         assert projection["reduced_margin"] is True
         assert projection["directional_validity"] == [3, 1]
-    assert all(projection["final_p"] != 1448 for projection in projections)
+    assert all(projection["fixed_p"] != 1448 for projection in projections)
 
 
 def test_schema8_candidate_terminal_uses_joint_union_membership() -> None:
@@ -2444,7 +2444,7 @@ def test_stage_b_reproduction_v3_group_requires_exact_fragment_order() -> None:
         "reason_mask": 0,
         "previous_nominated_p": 1024,
         "current_nominated_p": 1448,
-        "final_p": 1448,
+        "fixed_p": 1448,
         "reduced_margin": 0,
     }
     records = [header]
@@ -2508,7 +2508,7 @@ def test_stage_b_reproduction_v4_group_accepts_shared_fragment_names() -> None:
             "reason_mask": 0,
             "previous_provisional_p": 1024,
             "current_provisional_p": 1024,
-            "final_p": 1024,
+            "fixed_p": 1024,
             "selected_joint_mask": 0x001C_0000,
             "selected_first_rung": 18,
             "selected_member_count": 3,
@@ -3792,11 +3792,11 @@ class _BreakawayCampaignBuilder:
             self.ladder["confidence_family_size"],
             self.probe_digest,
         )
-        self.candidate_p_raw = self.ladder["gains"][
+        self.nominated_p_raw = self.ladder["gains"][
             self.ladder["gains"].index(self.breakaway_raw) + 1
         ]
         self.confirmation_digest = breakaway_confirmation_plan_digest(
-            self.discovery_digest, self.candidate_p_raw, 0, 8, 4, 70, 80, 0
+            self.discovery_digest, self.nominated_p_raw, 0, 8, 4, 70, 80, 0
         )
         self.required_se = breakaway_required_relative_se_permille()
 
@@ -4228,7 +4228,7 @@ class _BreakawayCampaignBuilder:
             prior,
             family_size,
             self.observations_per_direction,
-            self.candidate_p_raw,
+            self.nominated_p_raw,
             70,
             80,
             0,
@@ -4295,7 +4295,7 @@ class _BreakawayCampaignBuilder:
         the reported wire record use the override, so the ONLY thing that
         disagrees with the frozen schedule is the schedule itself, not any
         other recomputed value. `confirmed_p_raw_override` lets a test claim
-        a `confirmed_p_raw` different from the nominated `candidate_p_raw`
+        a `confirmed_p_raw` different from the nominated `nominated_p_raw`
         without touching anything else. `omit_raw_evidence=True` skips
         emitting the raw-observation records while still emitting the
         (self-consistently derived) wire observation records.
@@ -4383,7 +4383,7 @@ class _BreakawayCampaignBuilder:
         confirmed_p_raw = (
             confirmed_p_raw_override
             if confirmed_p_raw_override is not None
-            else (self.candidate_p_raw if accepted else 0)
+            else (self.nominated_p_raw if accepted else 0)
         )
         terminal = _bw_tag(
             10,
@@ -5334,7 +5334,7 @@ def test_audit_breakaway_campaign_rejects_a_confirmed_p_that_does_not_match_the_
 
     Must be rejected even when every interval is honestly contained in
     [70, 80] and every mask is complete -- the OLD audit never compared
-    `confirmation_planned.candidate_p_raw` against
+    `confirmation_planned.nominated_p_raw` against
     `confirmation_terminal.confirmed_p_raw` at all.
     """
     builder = _BreakawayCampaignBuilder()
@@ -5345,7 +5345,7 @@ def test_audit_breakaway_campaign_rejects_a_confirmed_p_that_does_not_match_the_
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
-        *builder.confirmation_ticks(confirmed_p_raw_override=builder.candidate_p_raw + 1),
+        *builder.confirmation_ticks(confirmed_p_raw_override=builder.nominated_p_raw + 1),
         builder.campaign_terminal_tick(),
     ]
     result = audit_breakaway_campaign(ticks)

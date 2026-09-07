@@ -3114,7 +3114,7 @@ def format_analysis(
             memberships = projection.get("memberships", [])
             stage_b_lines.append(
                 "stage_b_core interpretation={interpretation} previous={previous} "
-                "current={current} core={core} selected={selected} final_p={final_p} "
+                "current={current} core={core} selected={selected} fixed_p={fixed_p} "
                 "validity={validity} reason_mask={reason} reduced_margin={margin} "
                 "coverage={coverage} conservative_common={common} offline_derived={derived}".format(
                     interpretation=projection.get("interpretation", "firmware-schema-3"),
@@ -3122,7 +3122,7 @@ def format_analysis(
                     current=[value["current"] for value in memberships],
                     core=projection.get("core_masks", []),
                     selected=projection.get("selected_joint_mask", "contiguous-core"),
-                    final_p=projection.get("final_p", 0),
+                    fixed_p=projection.get("fixed_p", 0),
                     validity=projection.get("directional_validity", "legacy"),
                     reason=projection.get("reason_mask", 0),
                     margin=str(bool(projection.get("reduced_margin"))).lower(),
@@ -3148,7 +3148,7 @@ def format_analysis(
                 run=integral.get("run_sequence", "?"),
                 outcome=terminal.get("outcome", "?") if isinstance(terminal, dict) else "?",
                 cause=terminal.get("cause", "?") if isinstance(terminal, dict) else "?",
-                p=plan.get("final_p", 0) if isinstance(plan, dict) else 0,
+                p=plan.get("fixed_p", 0) if isinstance(plan, dict) else 0,
                 probe=str(
                     bool(terminal.get("probe_constrained_test_point", False))
                     if isinstance(terminal, dict)

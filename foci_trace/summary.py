@@ -124,14 +124,14 @@ class LiveSummary:
                     int(frame.payload["scored_max_displacement_counts"]),
                 )
             elif kind == "reproduction_v4_header":
-                device.stage_b_nominated_p = int(frame.payload["final_p"])
+                device.stage_b_nominated_p = int(frame.payload["fixed_p"])
                 device.stage_b_directional_validity = (
                     int(frame.payload["forward_validity"]),
                     int(frame.payload["reverse_validity"]),
                 )
                 device.stage_b_reduced_margin = bool(frame.payload["reduced_margin"])
             elif kind == "integral_plan_core":
-                device.velocity_integral_test_p = int(frame.payload["final_p"])
+                device.velocity_integral_test_p = int(frame.payload["fixed_p"])
                 if "directional_validity" in frame.payload:
                     validity = frame.payload["directional_validity"]
                     device.stage_b_directional_validity = (

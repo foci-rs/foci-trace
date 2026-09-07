@@ -815,7 +815,7 @@ def test_decodes_a_breakaway_stage_c_plan_core_without_a_combined_response() -> 
 
     assert frame.payload["record_kind"] == "integral_plan_core"
     assert frame.payload["schema_revision"] == 14
-    assert frame.payload["final_p"] == 951
+    assert frame.payload["fixed_p"] == 951
     assert frame.payload["combined_selected_response"] is False
 
 
@@ -972,7 +972,7 @@ def test_decodes_schema_seven_velocity_integral_source_and_filtered_masks() -> N
     assert frame.payload["schema_revision"] == 7
     assert frame.payload["stage_b_joint_membership"] == 0x001C_0000
     assert frame.payload["joint_membership"] == 0x0004_0000
-    assert frame.payload["final_p"] == 724
+    assert frame.payload["fixed_p"] == 724
 
 
 def test_decodes_rung_origin_recovery_record() -> None:
@@ -1335,7 +1335,7 @@ def test_decodes_velocity_integral_response_plan_marker() -> None:
         "evidence_sequence": 1,
         "plan_digest_low": 0x89AB_CDEF,
         "plan_digest_high": 0x0123_4567,
-        "final_p": 1_448,
+        "fixed_p": 1_448,
         "positive_rung_count": 5,
         "maximum_workflow_ms": 69_888,
         "plan_digest": 0x0123_4567_89AB_CDEF,
@@ -2332,7 +2332,7 @@ def test_decodes_schema_eight_integral_terminal_target() -> None:
 
     assert frame.payload["record_kind"] == "integral_terminal"
     assert frame.payload["combined_workflow"] is True
-    assert frame.payload["final_p"] == 1_024
+    assert frame.payload["fixed_p"] == 1_024
     assert frame.payload["target_status"] == 2
     assert frame.payload["target_terminus"] == 6
 
@@ -3418,7 +3418,7 @@ def test_decode_breakaway_confirmation_planned_matches_the_firmware_golden_bytes
     assert decoded["prior_plan_digest"] == _BW_PRIOR_PLAN_DIGEST
     assert decoded["family_size"] == 8
     assert decoded["observations_per_direction"] == 4
-    assert decoded["candidate_p_raw"] == 0x0910
+    assert decoded["nominated_p_raw"] == 0x0910
     assert decoded["band_lower_percent"] == 70
     assert decoded["band_upper_percent"] == 80
     assert decoded["capture_profile"] == 0

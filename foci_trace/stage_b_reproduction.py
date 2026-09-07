@@ -102,9 +102,9 @@ def project_schema8_candidates(
         }
     )
     selected_count = int(selected_joint["member_count"])
-    final_rung, final_p = (0, 0)
+    final_rung, fixed_p = (0, 0)
     if selected_count:
-        final_rung, final_p, _margin = component_nomination(selected_joint)
+        final_rung, fixed_p, _margin = component_nomination(selected_joint)
 
     pooled = []
     common = []
@@ -181,7 +181,7 @@ def project_schema8_candidates(
         "selected_member_count": selected_count,
         "previous_provisional_p": int(previous["nominated_p"]),
         "current_provisional_p": int(current["nominated_p"]),
-        "final_p": final_p,
+        "fixed_p": fixed_p,
         "directional_validity": validity,
         "reduced_margin": 0 < selected_count <= 2,
         "coverage": coverage,

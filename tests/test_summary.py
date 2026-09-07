@@ -119,7 +119,7 @@ def test_summary_tracks_velocity_integral_rungs_and_terminal() -> None:
         (
             {
                 "record_kind": "integral_plan_core",
-                "final_p": 724,
+                "fixed_p": 724,
                 "directional_validity": [3, 4],
                 "reduced_margin": True,
             },

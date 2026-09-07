@@ -309,7 +309,7 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     _append_integer(encoded, schema_revision, 2)
     _append_integer(encoded, int(plan["channel"]), 1)
     _append_integer(encoded, int(plan["stage_b_plan_digest"]), 8)
-    _append_integer(encoded, int(plan["final_p"]), 2)
+    _append_integer(encoded, int(plan["fixed_p"]), 2)
     for membership in plan["directional_memberships"]:  # type: ignore[union-attr]
         _append_integer(encoded, int(membership), 4)
     if schema_revision >= 7:
@@ -329,7 +329,7 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     if is_post_foc252 or schema_revision >= _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION:
         _append_integer(encoded, int(selected), 1)
         if selected:
-            _append_integer(encoded, int(plan["final_p"]), 2)
+            _append_integer(encoded, int(plan["fixed_p"]), 2)
             for interval in plan["selected_response_intervals_q"]:  # type: ignore[union-attr]
                 _append_integer(encoded, int(interval[0]), 8, signed=True)
                 _append_integer(encoded, int(interval[1]), 8, signed=True)
@@ -637,7 +637,7 @@ def select_transition_capable_test_point(
         return {
             "stage_b_joint_membership": stage_b_joint_membership,
             "joint_membership": 0,
-            "final_p": 0,
+            "fixed_p": 0,
             "transition_ceiling": transition_ceiling,
             "reduced_margin": False,
             "probe_constrained_test_point": bool(stage_b_joint_membership),
@@ -648,7 +648,7 @@ def select_transition_capable_test_point(
     return {
         "stage_b_joint_membership": stage_b_joint_membership,
         "joint_membership": filtered,
-        "final_p": ladder[selected_rung],
+        "fixed_p": ladder[selected_rung],
         "transition_ceiling": transition_ceiling,
         "reduced_margin": member_count <= 2,
         "probe_constrained_test_point": filtered != stage_b_joint_membership,
@@ -1026,7 +1026,7 @@ def _compact_plan_marker(plan: dict[str, object], run_sequence: int) -> bytes:
     record = bytearray((0,))
     _append_integer(record, run_sequence, 4)
     _append_integer(record, int(plan["plan_digest"]), 8)
-    _append_integer(record, int(plan["final_p"]), 2)
+    _append_integer(record, int(plan["fixed_p"]), 2)
     _append_integer(record, int(plan["planned_velocity_mrev_s"]), 4)
     _append_integer(record, int(plan["target_velocity_rpm"]), 4, signed=True)
     _append_integer(record, int(plan["pwm_hz"]), 4)
@@ -1198,7 +1198,7 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
         else:
             try:
                 expected_exposure = recovery_quantization_exposed(
-                    int(plan["final_p"]),
+                    int(plan["fixed_p"]),
                     int(plan["target_velocity_rpm"]),
                     int(plan["encoder_counts_per_rev"]),
                     int(plan["pwm_hz"]),
@@ -1228,7 +1228,7 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
         except (KeyError, ValueError) as error:
             mismatches.append(f"Stage-C test-point reconstruction failed: {error}")
         else:
-            for field in ("joint_membership", "final_p", "reduced_margin"):
+            for field in ("joint_membership", "fixed_p", "reduced_margin"):
                 if plan[field] != selection[field]:
                     mismatches.append(
                         f"plan {field}: firmware={plan[field]} offline={selection[field]}"
@@ -1649,7 +1649,7 @@ def audit_velocity_integral(
             {
                 "run_sequence": run_sequence,
                 "plan_digest": plan["plan_digest"],
-                "final_p": plan["final_p"],
+                "fixed_p": plan["fixed_p"],
                 "positive_rung_count": plan["positive_rung_count"],
                 "maximum_workflow_ms": plan["maximum_workflow_ms"],
             },
@@ -1657,7 +1657,7 @@ def audit_velocity_integral(
             (
                 "run_sequence",
                 "plan_digest",
-                "final_p",
+                "fixed_p",
                 "positive_rung_count",
                 "maximum_workflow_ms",
             ),
@@ -2203,7 +2203,7 @@ def audit_velocity_integral(
         # recovery_flags workflow bit and its target-status bits (both
         # inside the same byte), the decoded combined tail's mere presence
         # (`protocol.py` only sets `terminal["combined_workflow"]` when the
-        # wire payload carries the extra final_p/target_status/
+        # wire payload carries the extra fixed_p/target_status/
         # target_terminus block -- a 66-byte terminal -- independently of
         # what the recovery_flags byte says), and, for a sufficient run,
         # the outcome itself: `integral_sweep.rs:1174-1177` reports

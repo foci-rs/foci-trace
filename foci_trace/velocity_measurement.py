@@ -3127,8 +3127,8 @@ def _stage_b_core_coverage(
         ratio = [1, 1]
     else:
         source_p = _stage_b_gain_at(p_start, p_top, rung_count, source_rung)
-        final_p = _stage_b_gain_at(p_start, p_top, rung_count, final_rung)
-        ratio = [max(source_p, final_p), max(1, min(source_p, final_p))]
+        fixed_p = _stage_b_gain_at(p_start, p_top, rung_count, final_rung)
+        ratio = [max(source_p, fixed_p), max(1, min(source_p, fixed_p))]
     return {
         "coverage": coverage,
         "signed_rung_distance": distance,
@@ -3284,7 +3284,7 @@ def project_stage_b_core_pair(
     reason_mask |= int(pooled[0]["overlap"][0] > pooled[0]["overlap"][1]) << 3
     reason_mask |= int(pooled[1]["overlap"][0] > pooled[1]["overlap"][1]) << 4
 
-    final_p = 0
+    fixed_p = 0
     reduced_margin = False
     coverage = [
         {"coverage": "transferred", "signed_rung_distance": 0, "gain_ratio": [0, 0]},
@@ -3293,7 +3293,7 @@ def project_stage_b_core_pair(
     if cores[2]:
         joint_first = (cores[2] & -cores[2]).bit_length() - 1
         final_rung = joint_first + (cores[2].bit_count() - 1) // 2
-        final_p = _stage_b_gain_at(p_start, p_top, rung_count, final_rung)
+        fixed_p = _stage_b_gain_at(p_start, p_top, rung_count, final_rung)
         coverage = [
             _stage_b_core_coverage(core, final_rung, p_start, p_top, rung_count)
             for core in cores[:2]
@@ -3308,7 +3308,7 @@ def project_stage_b_core_pair(
         "core_masks": cores,
         "previous_provisional_p": int(previous["nominated_p"]),
         "current_provisional_p": int(current["nominated_p"]),
-        "final_p": final_p,
+        "fixed_p": fixed_p,
         "reduced_margin": reduced_margin,
         "coverage": coverage,
         "pooled": pooled,
@@ -3394,7 +3394,7 @@ def _assemble_stage_b_reproduction(
         "schema_revision": int(header["schema_revision"]),
         "outcome": int(header["outcome"]),
         "reason_mask": int(header["reason_mask"]),
-        "final_p": int(header["final_p"]),
+        "fixed_p": int(header["fixed_p"]),
         "reduced_margin": bool(header["reduced_margin"]),
         "memberships": [dict(value) for value in fragments[1:4]],
         "pooled": [dict(value) for value in fragments[4:6]],
@@ -3818,7 +3818,7 @@ def _compare_stage_b_v3_record(
     expected_outcome = 1 if projection["outcome"] == "complete" else 2
     if int(reproduction["outcome"]) != expected_outcome:
         mismatches.append("schema-3 reproduction outcome differs from core projection")
-    for name in ("reason_mask", "final_p"):
+    for name in ("reason_mask", "fixed_p"):
         if int(reproduction[name]) != int(projection[name]):
             mismatches.append(f"schema-3 reproduction {name} differs from core projection")
     if bool(reproduction["reduced_margin"]) != bool(projection["reduced_margin"]):
@@ -3834,7 +3834,7 @@ def _compare_stage_b_v4_record(
     expected_outcome = 1 if projection["outcome"] == "complete" else 2
     scalar_fields = (
         "reason_mask",
-        "final_p",
+        "fixed_p",
         "selected_joint_mask",
         "selected_first_rung",
         "selected_member_count",
@@ -5032,7 +5032,7 @@ def _audit_stage_b_velocity_sweep(
         if int(reproduction_group["outcome"]) == 1:
             expected_memberships = list(v3_projection["core_masks"])
             expected_intervals = [list(value["overlap"]) for value in v3_projection["pooled"]]
-            expected_nominated_p = int(v3_projection["final_p"])
+            expected_nominated_p = int(v3_projection["fixed_p"])
             expected_coverage_mask = sum(
                 (1 << index)
                 for index, value in enumerate(v3_projection["coverage"])
@@ -5050,7 +5050,7 @@ def _audit_stage_b_velocity_sweep(
             int(v4_projection["selected_joint_mask"]),
         ]
         expected_intervals = [list(value["overlap"]) for value in v4_projection["pooled"]]
-        expected_nominated_p = int(v4_projection["final_p"])
+        expected_nominated_p = int(v4_projection["fixed_p"])
         expected_coverage_mask = sum(
             (1 << index)
             for index, value in enumerate(v4_projection["coverage"])
@@ -6654,7 +6654,7 @@ def breakaway_discovery_plan_digest(
 
 def breakaway_confirmation_plan_digest(
     discovery_plan_digest: int,
-    candidate_p_raw: int,
+    nominated_p_raw: int,
     capture_profile: int,
     family_size: int,
     observations_per_direction: int,
@@ -6671,7 +6671,7 @@ def breakaway_confirmation_plan_digest(
     """
     digest = FNV1A64_OFFSET
     digest = _bw_fnv1a_extend(digest, discovery_plan_digest, 8)
-    digest = _bw_fnv1a_extend(digest, candidate_p_raw, 2)
+    digest = _bw_fnv1a_extend(digest, nominated_p_raw, 2)
     digest = _bw_fnv1a_extend(digest, capture_profile, 1)
     digest = _bw_fnv1a_extend(digest, family_size, 2)
     digest = _bw_fnv1a_extend(digest, observations_per_direction, 2)
@@ -7211,7 +7211,7 @@ def audit_breakaway_campaign(
             )
         expected_confirmation_digest = breakaway_confirmation_plan_digest(
             int(discovery_planned["plan_digest"]),  # type: ignore[index]
-            int(confirmation_planned["candidate_p_raw"]),
+            int(confirmation_planned["nominated_p_raw"]),
             int(confirmation_planned["capture_profile"]),
             int(confirmation_planned["family_size"]),
             int(confirmation_planned["observations_per_direction"]),
@@ -7421,11 +7421,11 @@ def audit_breakaway_campaign(
                 "schedule, or representability failed) -- REJECTED"
             )
         if confirmation_accepted and confirmation_planned is not None:
-            candidate_p_raw = int(confirmation_planned["candidate_p_raw"])
+            nominated_p_raw = int(confirmation_planned["nominated_p_raw"])
             confirmed_p_raw = int(confirmation_terminal["confirmed_p_raw"])
-            if candidate_p_raw != confirmed_p_raw:
+            if nominated_p_raw != confirmed_p_raw:
                 mismatches.append(
-                    f"confirmation accepted candidate_p_raw={int(candidate_p_raw)} != "
+                    f"confirmation accepted nominated_p_raw={int(nominated_p_raw)} != "
                     f"confirmed_p_raw={int(confirmed_p_raw)}"
                 )
 

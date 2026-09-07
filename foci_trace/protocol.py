@@ -782,7 +782,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             (
                 ("run_sequence", "I"),
                 ("plan_digest", "Q"),
-                ("final_p", "H"),
+                ("fixed_p", "H"),
                 ("planned_velocity_mrev_s", "I"),
                 ("target_velocity_rpm", "i"),
                 ("pwm_hz", "I"),
@@ -836,7 +836,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                         ("channel", "B"),
                         ("stage_b_plan_digest_low", "I"),
                         ("stage_b_plan_digest_high", "I"),
-                        ("final_p", "H"),
+                        ("fixed_p", "H"),
                     ),
                 )
             )
@@ -961,7 +961,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ("evidence_sequence", "H"),
                 ("plan_digest_low", "I"),
                 ("plan_digest_high", "I"),
-                ("final_p", "H"),
+                ("fixed_p", "H"),
                 ("positive_rung_count", "B"),
                 ("maximum_workflow_ms", "I"),
             ),
@@ -1443,7 +1443,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             if cursor.take("B") != 1:
                 raise DecodeError("combined integral terminal marker is invalid")
             decoded["combined_workflow"] = True
-            decoded["final_p"] = cursor.take("H")
+            decoded["fixed_p"] = cursor.take("H")
             decoded["target_status"] = cursor.take("B")
             target_terminus_plus_one = cursor.take("B")
             decoded["target_terminus"] = (
@@ -1838,7 +1838,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                     (
                         ("previous_provisional_p", "H"),
                         ("current_provisional_p", "H"),
-                        ("final_p", "H"),
+                        ("fixed_p", "H"),
                         ("selected_joint_mask", "I"),
                         ("selected_first_rung", "B"),
                         ("selected_member_count", "B"),
@@ -1857,7 +1857,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                     (
                         ("previous_nominated_p", "H"),
                         ("current_nominated_p", "H"),
-                        ("final_p", "H"),
+                        ("fixed_p", "H"),
                         ("reduced_margin", "B"),
                         ("schema_revision", "H"),
                     ),
@@ -2711,7 +2711,7 @@ def decode_breakaway_record(
                 ("prior_plan_digest", "Q"),
                 ("family_size", "H"),
                 ("observations_per_direction", "H"),
-                ("candidate_p_raw", "H"),
+                ("nominated_p_raw", "H"),
                 ("band_lower_percent", "B"),
                 ("band_upper_percent", "B"),
                 ("capture_profile", "B"),
