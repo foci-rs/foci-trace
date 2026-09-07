@@ -2139,7 +2139,7 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                 source_index,
                 stage="b",
             )
-            companion_stage_c = next(
+            companion_integral = next(
                 (
                     item.payload
                     for item in state.velocity_sweep_evidence
@@ -2150,8 +2150,8 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                 None,
             )
             replay = report.get("proportional_replay")
-            if isinstance(companion_stage_c, dict) and isinstance(replay, dict):
-                companion_schema = int(companion_stage_c.get("schema_revision", 0))
+            if isinstance(companion_integral, dict) and isinstance(replay, dict):
+                companion_schema = int(companion_integral.get("schema_revision", 0))
                 if companion_schema == 11:
                     replay["schema_revision"] = 12
                 elif companion_schema == 10:
@@ -3092,12 +3092,12 @@ def format_analysis(
     commissioning_text = format_commissioning_report(analysis.commissioning)
     if commissioning_text:
         text = "\n".join(part for part in (text, commissioning_text) if part)
-    stage_b_lines = []
+    proportional_lines = []
     for sweep in analysis.velocity_sweep_audits:
         replay = sweep.get("proportional_replay")
         if not isinstance(replay, dict):
             continue
-        stage_b_lines.append(
+        proportional_lines.append(
             "proportional dev={device} source={source} run={run} p={p} coverage={coverage} "
             "matches_firmware={matches}".format(
                 device=sweep.get("device_index", "?"),
@@ -3112,8 +3112,8 @@ def format_analysis(
         if isinstance(pair_audit, dict) and isinstance(pair_audit.get("projection"), dict):
             projection = pair_audit["projection"]
             memberships = projection.get("memberships", [])
-            stage_b_lines.append(
-                "stage_b_core interpretation={interpretation} previous={previous} "
+            proportional_lines.append(
+                "proportional_core interpretation={interpretation} previous={previous} "
                 "current={current} core={core} selected={selected} fixed_p={fixed_p} "
                 "validity={validity} reason_mask={reason} reduced_margin={margin} "
                 "coverage={coverage} conservative_common={common} offline_derived={derived}".format(
@@ -3136,7 +3136,7 @@ def format_analysis(
         masks = evidence.get("eligible_masks", []) if isinstance(evidence, dict) else []
         plan = integral.get("plan", {})
         terminal = integral.get("terminal", {})
-        stage_b_lines.append(
+        proportional_lines.append(
             "velocity_integral dev={device} source={source} run={run} "
             "outcome={outcome} cause={cause} p={p} probe_constrained={probe} "
             "eligible={eligible} "
@@ -3174,7 +3174,7 @@ def format_analysis(
         plan = amplitude.get("plan", {})
         terminal = amplitude.get("terminal", {})
         comparison = amplitude.get("cross_run_comparison", {})
-        stage_b_lines.append(
+        proportional_lines.append(
             "fixed_gain_amplitude dev={device} source={source} run={run} "
             "namespace=fixed_gain_amplitude "
             "order={order} outcome={outcome} cause={cause} p={p} i={i} "
@@ -3194,7 +3194,7 @@ def format_analysis(
             )
         )
     for timing in analysis.outer_safety_timing_audits:
-        stage_b_lines.append(
+        proportional_lines.append(
             "outer_safety_timing dev={device} source={source} engine={engine} "
             "max_us={maximum} headroom_us={headroom} reopen_bound={reopen} "
             "raw_covered={raw} safety_only={safety_only} matches_firmware={matches}".format(
@@ -3211,8 +3211,8 @@ def format_analysis(
                 matches=str(bool(timing.get("matches_firmware"))).lower(),
             )
         )
-    if stage_b_lines:
-        text = "\n".join(part for part in (text, *stage_b_lines) if part)
+    if proportional_lines:
+        text = "\n".join(part for part in (text, *proportional_lines) if part)
     if not include_contour:
         return text
     lines = [text] if text else []
