@@ -1768,7 +1768,7 @@ def test_analyze_capture_includes_commissioning_report() -> None:
     assert analysis.commissioning.runs[0].result == "accepted"
     assert analysis.commissioning.runs[0].phases[0].critical_samples == 5
     assert "commissioning dev0 source=0 engine=commission" in text
-    assert "phase ClosedLoopEntry" in text
+    assert "phase ClosedLoopActivation" in text
 
 
 def test_contour_analysis_reports_along_and_cross_error() -> None:

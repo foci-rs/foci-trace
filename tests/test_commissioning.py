@@ -215,7 +215,7 @@ def test_successful_commission_attaches_closed_loop_samples() -> None:
     assert "phase_start" in text
     assert "phase_end" in text
     assert "engine_terminal" in text
-    assert "phase ClosedLoopEntry" in text
+    assert "phase ClosedLoopActivation" in text
     assert "samples=60" in text
     assert "result=accepted" in text
     assert data["runs"][0]["result"] == "accepted"

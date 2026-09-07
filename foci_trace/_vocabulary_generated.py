@@ -5,7 +5,7 @@ PHASE_NAMES: dict[int, str] = {
     2: "CoilCheck",
     3: "PhaseWiringCheck",
     4: "EncoderCheck",
-    5: "ElectricalId",
+    5: "ElectricalIdentification",
     6: "CurrentTune",
     7: "CurrentValidate",
     8: "InnerDone",
@@ -14,7 +14,7 @@ PHASE_NAMES: dict[int, str] = {
     20: "FixedGainAmplitudeValidation",
     21: "ReversalStandstillRobustnessGate",
     16: "EncoderAlign",
-    17: "ClosedLoopEntry",
+    17: "ClosedLoopActivation",
 }
 
 BREAKAWAY_PHASE_NAMES: dict[int, str] = {
