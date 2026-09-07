@@ -6,12 +6,15 @@ import struct
 from dataclasses import dataclass
 from typing import Any
 
+from ._vocabulary_generated import BREAKAWAY_PHASE_NAMES, PHASE_NAMES
 from .scored_rest import select_causal_rest_suffixes
 from .velocity_integral import (
     _COMBINED_STAGE_C_SCHEMA_REVISION,
     _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION,
     _RESPONSE_LADDER_STAGE_C_SCHEMA_REVISIONS,
 )
+
+__all__ = ["BREAKAWAY_PHASE_NAMES", "PHASE_NAMES"]
 
 FRAME_MAGIC = 0x43525446
 # Version 21 adds `stop_rung_index` to the breakaway discovery terminal: the
@@ -222,27 +225,6 @@ _ENGINE_KIND_NAMES = {
     2: "calibrate",
     3: "selftest",
     4: "outer_tune",
-}
-
-PHASE_NAMES = {
-    1: "AdcCalibrate",
-    2: "CoilCheck",
-    3: "PhaseWiringCheck",
-    4: "EncoderCheck",
-    5: "ElectricalId",
-    6: "CurrentTune",
-    7: "CurrentValidate",
-    8: "InnerDone",
-    16: "EncoderAlign",
-    17: "ClosedLoopEntry",
-    18: "BreakawayProportionalAcquisition",
-    19: "IntegralGainResponseCharacterization",
-    20: "FixedGainAmplitudeValidation",
-    21: "ReversalStandstillRobustnessGate",
-    22: "PositionTune",
-    23: "FilterTune",
-    24: "Commit",
-    25: "OuterDone",
 }
 
 COMMISSION_STATUS_NAMES = {
@@ -2246,14 +2228,6 @@ COMMISSION_ERROR_NAMES = {
     70: "primitive_already_open",
     71: "primitive_start_in_future",
     72: "recovery_origin_mismatch",
-}
-
-# `BreakawayPhase` (breakaway_reporting.rs): which of the three campaign
-# drivers owns a `BreakawayCampaignTerminal` closure record.
-BREAKAWAY_PHASE_NAMES = {
-    0: "breakaway_probe",
-    1: "proportional_response_discovery",
-    2: "proportional_band_confirmation",
 }
 
 # Persistent `BreakawayCheckpoint` codes. Values are append-only because they
