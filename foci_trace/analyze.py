@@ -60,7 +60,7 @@ from .velocity_measurement import (
     VelocityObservation,
     analyze_velocity_observations,
     audit_breakaway_campaign,
-    audit_stage_b_reproduction_pair,
+    audit_proportional_reproduction_pair,
     audit_velocity_sweep,
     capture_rule_features,
     velocity_report_to_json,
@@ -2009,7 +2009,7 @@ def _attach_rest_selection_audit(
     trace plan record carries no rule-contract marker at all -- neither
     build_features nor a schema_revision -- so a Stage B rest selection always
     falls back to the historical grammar. That is correct for the combined flow,
-    whose Stage B runs at COMBINED_STAGE_B_SCHEMA_REVISION (14), below the
+    whose Stage B runs at COMBINED_PROPORTIONAL_SCHEMA_REVISION (14), below the
     rest-walk floor of 17, so it never walks. Resolving a breakaway Stage B walk
     would require build_features on the Stage B plan record, which the wire does
     not carry; that gap is tracked separately and is not what the combined
@@ -2149,7 +2149,7 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                 ),
                 None,
             )
-            replay = report.get("stage_b_replay")
+            replay = report.get("proportional_replay")
             if isinstance(companion_stage_c, dict) and isinstance(replay, dict):
                 companion_schema = int(companion_stage_c.get("schema_revision", 0))
                 if companion_schema == 11:
@@ -2164,7 +2164,7 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
             if report.get("reproduction") is not None:
                 previous = retained_candidates.get(candidate_key)
                 if previous is not None:
-                    pair_audit = audit_stage_b_reproduction_pair(previous, report)
+                    pair_audit = audit_proportional_reproduction_pair(previous, report)
                     report["reproduction_pair_audit"] = pair_audit
                     if not pair_audit["matches_firmware"]:
                         report["matches_firmware"] = False
@@ -3094,11 +3094,11 @@ def format_analysis(
         text = "\n".join(part for part in (text, commissioning_text) if part)
     stage_b_lines = []
     for sweep in analysis.velocity_sweep_audits:
-        replay = sweep.get("stage_b_replay")
+        replay = sweep.get("proportional_replay")
         if not isinstance(replay, dict):
             continue
         stage_b_lines.append(
-            "stage_b dev={device} source={source} run={run} p={p} coverage={coverage} "
+            "proportional dev={device} source={source} run={run} p={p} coverage={coverage} "
             "matches_firmware={matches}".format(
                 device=sweep.get("device_index", "?"),
                 source=sweep.get("source_index", "?"),
@@ -3140,7 +3140,7 @@ def format_analysis(
             "velocity_integral dev={device} source={source} run={run} "
             "outcome={outcome} cause={cause} p={p} probe_constrained={probe} "
             "eligible={eligible} "
-            "stage_b_validity={validity} reduced_margin={margin} "
+            "proportional_validity={validity} reduced_margin={margin} "
             "bookend_available={bookends} rest_boundary={boundary} "
             "matches_firmware={matches}".format(
                 device=integral.get("device_index", "?"),

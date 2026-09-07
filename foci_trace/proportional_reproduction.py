@@ -32,12 +32,12 @@ def project_schema8_candidates(
 ) -> dict[str, object]:
     """Apply the schema-8 comparator to two retained Stage-B summaries."""
     from .velocity_measurement import (
-        _contiguous_stage_b_mask,
+        _contiguous_proportional_mask,
+        _proportional_closed_intersection,
+        _proportional_core_coverage,
+        _proportional_gain_at,
+        _proportional_membership_comparison,
         _ratio_margin,
-        _stage_b_closed_intersection,
-        _stage_b_core_coverage,
-        _stage_b_gain_at,
-        _stage_b_membership_comparison,
     )
 
     geometry = ("p_start", "p_top", "rung_count")
@@ -53,7 +53,7 @@ def project_schema8_candidates(
         or rung_count not in range(1, 33)
         or any(mask & ~valid_bits for mask in (*previous_masks, *current_masks))
         or any(
-            mask and not _contiguous_stage_b_mask(mask, rung_count)
+            mask and not _contiguous_proportional_mask(mask, rung_count)
             for mask in (*previous_masks[:2], *current_masks[:2])
         )
         or previous_masks[2] == 0
@@ -65,11 +65,11 @@ def project_schema8_candidates(
         }
 
     memberships = [
-        _stage_b_membership_comparison(left, right)
+        _proportional_membership_comparison(left, right)
         for left, right in zip(previous_masks, current_masks, strict=True)
     ]
     cores = [int(item["core"]) for item in memberships]
-    if any(core and not _contiguous_stage_b_mask(core, rung_count) for core in cores[:2]):
+    if any(core and not _contiguous_proportional_mask(core, rung_count) for core in cores[:2]):
         return {
             "interpretation": "schema-8 what-if",
             "outcome": "evidence_integrity_fault",
@@ -79,7 +79,7 @@ def project_schema8_candidates(
         component: dict[str, int],
     ) -> tuple[int, int, Fraction]:
         rung = int(component["first_rung"]) + (int(component["member_count"]) - 1) // 2
-        p = _stage_b_gain_at(p_start, p_top, rung_count, rung)
+        p = _proportional_gain_at(p_start, p_top, rung_count, rung)
         return rung, p, _ratio_margin(p, p_start, p_top)
 
     directional_cores = cores[:2]
@@ -113,8 +113,8 @@ def project_schema8_candidates(
         current_pooled = [int(value) for value in current["pooled_intervals"][direction]]
         previous_common = [int(value) for value in previous["common_intervals"][direction]]
         current_common = [int(value) for value in current["common_intervals"][direction]]
-        pooled_overlap = _stage_b_closed_intersection(previous_pooled, current_pooled)
-        conservative = _stage_b_closed_intersection(previous_common, current_common)
+        pooled_overlap = _proportional_closed_intersection(previous_pooled, current_pooled)
+        conservative = _proportional_closed_intersection(previous_common, current_common)
         pooled.append(
             {
                 "previous": previous_pooled,
@@ -151,7 +151,7 @@ def project_schema8_candidates(
         else:
             validity.append(4)
         coverage.append(
-            _stage_b_core_coverage(core, final_rung, p_start, p_top, rung_count)
+            _proportional_core_coverage(core, final_rung, p_start, p_top, rung_count)
             if selected_count
             else {
                 "coverage": "transferred",

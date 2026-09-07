@@ -68,7 +68,7 @@ _TERMINAL_COMBINED_WORKFLOW = 1 << 7
 _REST_REJECTION_OWNER_NAMES = {
     0b00: "stage_c_anchor",
     0b01: "stage_c_positive_observation",
-    0b10: "stage_c_recovery",
+    0b10: "integral_recovery",
     0b11: "stage_c_cleanup",
 }
 _SLOT_TRANSITION_ALLOWANCE_US = 20_000
@@ -88,13 +88,13 @@ _U128_MAX = (1 << 128) - 1
 #         kind, removed once it was left with no live installer. Firmware no
 #         longer defines this workflow; this constant exists here only so
 #         archived captures keep decoding.
-#   _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION through
-#   _COMBINED_STAGE_C_SCHEMA_REVISION
+#   _FIRST_COMBINED_INTEGRAL_SCHEMA_REVISION through
+#   _COMBINED_INTEGRAL_SCHEMA_REVISION
 #         the combined P-then-I workflow. Decode-only mirror: firmware
 #         deleted `plan_combined_velocity_integral_response` and the
 #         `combined_selected_response` field it populated, and deleted
-#         `FIRST_COMBINED_STAGE_C_SCHEMA_REVISION` outright; its sibling
-#         survives renamed to `STAGE_C_PLAN_SCHEMA_REVISION` (value
+#         `FIRST_COMBINED_INTEGRAL_SCHEMA_REVISION` outright; its sibling
+#         survives renamed to `INTEGRAL_PLAN_SCHEMA_REVISION` (value
 #         unchanged, 13). Firmware no longer defines this workflow; these
 #         two constants exist here only so archived schema-8-to-13 captures
 #         keep decoding.
@@ -132,8 +132,8 @@ _U128_MAX = (1 << 128) - 1
 # response -- a shape firmware cannot emit -- claim the standalone workflow and
 # escape every combined-terminal rule.
 _STANDALONE_STAGE_C_SCHEMA_REVISION = 7
-_FIRST_COMBINED_STAGE_C_SCHEMA_REVISION = 8
-_COMBINED_STAGE_C_SCHEMA_REVISION = 13
+_FIRST_COMBINED_INTEGRAL_SCHEMA_REVISION = 8
+_COMBINED_INTEGRAL_SCHEMA_REVISION = 13
 _BREAKAWAY_STAGE_C_SCHEMA_REVISION = 16
 _HALF_OCTAVE_STAGE_C_SCHEMA_REVISION = 17
 _UNIFIED_REST_STAGE_C_SCHEMA_REVISION = 18
@@ -141,7 +141,7 @@ _UNIFIED_REST_STAGE_C_SCHEMA_REVISION = 18
 # Every schema whose ladder carries the half-octave insertion and hashes
 # `i_top_cap`. All three are response-ladder plans; they are listed rather than
 # ranged because the breakaway workflow's two ranges are not contiguous.
-_RESPONSE_LADDER_STAGE_C_SCHEMA_REVISIONS = (
+_RESPONSE_LADDER_INTEGRAL_SCHEMA_REVISIONS = (
     _BREAKAWAY_STAGE_C_SCHEMA_REVISION,
     _HALF_OCTAVE_STAGE_C_SCHEMA_REVISION,
     _UNIFIED_REST_STAGE_C_SCHEMA_REVISION,
@@ -217,12 +217,12 @@ def plan_slot_order(plan: dict[str, object]) -> int:
     return (int(plan.get("flags", 0)) & _PLAN_SLOT_ORDER_MASK) >> _PLAN_SLOT_ORDER_SHIFT
 
 
-def stage_c_schema_is_known(schema_revision: int) -> bool:
+def integral_schema_is_known(schema_revision: int) -> bool:
     """Return whether one Stage-C evidence schema revision exists in firmware."""
     return 1 <= schema_revision <= _UNIFIED_REST_STAGE_C_SCHEMA_REVISION
 
 
-def stage_c_stabilized_recovery_rest(schema_revision: int) -> bool:
+def integral_stabilized_recovery_rest(schema_revision: int) -> bool:
     """Return whether one Stage-C schema emits a rest record per recovery.
 
     Firmware picked the schedule per plan until it unified rung-origin recovery
@@ -232,12 +232,12 @@ def stage_c_stabilized_recovery_rest(schema_revision: int) -> bool:
     breakaway or standalone capture carries no rest record at all. From the
     unified-rest revision on, every completed scored rest emits one.
     """
-    return stage_c_combined_workflow(schema_revision) or (
+    return integral_combined_workflow(schema_revision) or (
         schema_revision >= _UNIFIED_REST_STAGE_C_SCHEMA_REVISION
     )
 
 
-def stage_c_combined_workflow(schema_revision: int) -> bool:
+def integral_combined_workflow(schema_revision: int) -> bool:
     """Return whether one Stage-C schema revision is a combined P-then-I run.
 
     Decode-only mirror: firmware deleted
@@ -251,9 +251,9 @@ def stage_c_combined_workflow(schema_revision: int) -> bool:
     response.
     """
     return (
-        _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION
+        _FIRST_COMBINED_INTEGRAL_SCHEMA_REVISION
         <= schema_revision
-        <= _COMBINED_STAGE_C_SCHEMA_REVISION
+        <= _COMBINED_INTEGRAL_SCHEMA_REVISION
     )
 
 
@@ -293,7 +293,7 @@ def _append_integer(buffer: bytearray, value: int, size: int, *, signed: bool = 
 def integral_plan_digest(plan: dict[str, object]) -> int:
     """Recompute the firmware Stage-C plan digest over every immutable input."""
     schema_revision = int(plan["schema_revision"])
-    combined_workflow = stage_c_combined_workflow(schema_revision)
+    combined_workflow = integral_combined_workflow(schema_revision)
     # A newer capture states build_features and, like the single-path
     # firmware writer, gates the selected-response blocks on content
     # (`combined_selected_response.is_some()`) rather than the schema number. A
@@ -308,12 +308,12 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
         _append_integer(encoded, int(plan["build_revision"]), 4)
     _append_integer(encoded, schema_revision, 2)
     _append_integer(encoded, int(plan["channel"]), 1)
-    _append_integer(encoded, int(plan["stage_b_plan_digest"]), 8)
+    _append_integer(encoded, int(plan["proportional_plan_digest"]), 8)
     _append_integer(encoded, int(plan["fixed_p"]), 2)
     for membership in plan["directional_memberships"]:  # type: ignore[union-attr]
         _append_integer(encoded, int(membership), 4)
     if schema_revision >= 7:
-        _append_integer(encoded, int(plan["stage_b_joint_membership"]), 4)
+        _append_integer(encoded, int(plan["proportional_joint_membership"]), 4)
     _append_integer(encoded, int(plan["joint_membership"]), 4)
     if schema_revision >= 4:
         for validity in plan["directional_validity"]:  # type: ignore[union-attr]
@@ -326,7 +326,7 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     # .is_some()` and the intervals only behind it, so a breakaway plan hashes a
     # bare zero and carries no `selected_response_intervals_q` key. A newer
     # writer does this unconditionally; a legacy writer only from FIRST_COMBINED.
-    if is_post_foc252 or schema_revision >= _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION:
+    if is_post_foc252 or schema_revision >= _FIRST_COMBINED_INTEGRAL_SCHEMA_REVISION:
         _append_integer(encoded, int(selected), 1)
         if selected:
             _append_integer(encoded, int(plan["fixed_p"]), 2)
@@ -402,7 +402,7 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     slot_order = plan_slot_order(plan)
     if slot_order:
         _append_integer(encoded, slot_order, 1)
-    if schema_revision in _RESPONSE_LADDER_STAGE_C_SCHEMA_REVISIONS:
+    if schema_revision in _RESPONSE_LADDER_INTEGRAL_SCHEMA_REVISIONS:
         _append_integer(encoded, int(plan["i_top_cap"]), 2)
     return _fnv1a64(bytes(encoded))
 
@@ -457,7 +457,7 @@ def derive_integral_ladder(
     build_features: int,
 ) -> dict[str, object]:
     """Reconstruct the cap-only whole-octave positive-I ladder."""
-    if not stage_c_schema_is_known(schema_revision):
+    if not integral_schema_is_known(schema_revision):
         raise ValueError("unsupported Stage-C evidence schema")
     if shortest_suffix_us < 2:
         raise ValueError("shortest suffix must contain at least two microseconds")
@@ -493,7 +493,7 @@ def derive_integral_ladder(
     # half-octave rung immediately below the ladder's top native octave rung,
     # but only when that gap is entirely within the pure-octave region (never
     # inside the fixed 1, 2, 3 prefix).
-    is_response_ladder_schema = schema_revision in _RESPONSE_LADDER_STAGE_C_SCHEMA_REVISIONS
+    is_response_ladder_schema = schema_revision in _RESPONSE_LADDER_INTEGRAL_SCHEMA_REVISIONS
     if is_response_ladder_schema and len(rungs) >= 2:
         upper_octave = rungs[-1]
         lower_octave = upper_octave // 2
@@ -508,7 +508,7 @@ def derive_integral_ladder(
     # (`integral_plan.rs:1217`). The breakaway plan at schema 14 passes
     # `append_exact_cap: false` (`integral_plan.rs:1438`) and so keeps the
     # plain whole-octave ladder, exactly like the standalone schemas below 8.
-    if stage_c_combined_workflow(schema_revision) and rungs[-1] != i_top_cap:
+    if integral_combined_workflow(schema_revision) and rungs[-1] != i_top_cap:
         rungs.append(i_top_cap)
     family_size = (len(rungs) + 2) * _I_OBSERVATIONS_PER_DIRECTION
     if len(rungs) < 3:
@@ -582,7 +582,7 @@ def _stage_b_ladder(p_start: int, p_top: int) -> list[int]:
 
 def select_transition_capable_test_point(
     *,
-    stage_b_joint_membership: int,
+    proportional_joint_membership: int,
     target_rpm: int,
     counts_per_rev: int,
     pwm_hz: int,
@@ -593,7 +593,7 @@ def select_transition_capable_test_point(
 ) -> dict[str, int | bool]:
     """Independently filter and nominate the Stage-C proportional test point."""
     if (
-        not 0 <= stage_b_joint_membership <= 0xFFFF_FFFF
+        not 0 <= proportional_joint_membership <= 0xFFFF_FFFF
         or target_rpm == -(1 << 31)
         or not -(1 << 31) < target_rpm < (1 << 31)
         or not 0 < counts_per_rev <= 0xFFFF_FFFF
@@ -611,7 +611,7 @@ def select_transition_capable_test_point(
         p_top = min(0x7FFF, (256 * probe_limit) // target_magnitude)
     ladder = _stage_b_ladder(p_start, p_top)
     valid_bits = (1 << len(ladder)) - 1
-    if stage_b_joint_membership & ~valid_bits:
+    if proportional_joint_membership & ~valid_bits:
         raise ValueError("Stage-B joint membership exceeds its ladder")
 
     stroke_cycles = _checked_u128(
@@ -628,30 +628,30 @@ def select_transition_capable_test_point(
 
     filtered = 0
     for rung_index, gain in enumerate(ladder):
-        if stage_b_joint_membership & (1 << rung_index) == 0:
+        if proportional_joint_membership & (1 << rung_index) == 0:
             continue
         lhs = _checked_u128(_checked_u128(gain * error_num) * prefix_scale)
         if lhs < rhs:
             filtered |= 1 << rung_index
     if filtered == 0:
         return {
-            "stage_b_joint_membership": stage_b_joint_membership,
+            "proportional_joint_membership": proportional_joint_membership,
             "joint_membership": 0,
             "fixed_p": 0,
             "transition_ceiling": transition_ceiling,
             "reduced_margin": False,
-            "probe_constrained_test_point": bool(stage_b_joint_membership),
+            "probe_constrained_test_point": bool(proportional_joint_membership),
         }
     first_rung = (filtered & -filtered).bit_length() - 1
     member_count = filtered.bit_count()
     selected_rung = first_rung + (member_count - 1) // 2
     return {
-        "stage_b_joint_membership": stage_b_joint_membership,
+        "proportional_joint_membership": proportional_joint_membership,
         "joint_membership": filtered,
         "fixed_p": ladder[selected_rung],
         "transition_ceiling": transition_ceiling,
         "reduced_margin": member_count <= 2,
-        "probe_constrained_test_point": filtered != stage_b_joint_membership,
+        "probe_constrained_test_point": filtered != proportional_joint_membership,
     }
 
 
@@ -1001,7 +1001,7 @@ def compare_integral_runs(
     }
 
 
-def stage_c_slot_transition(state: str, outcome: str, comparison: str | None = None) -> str:
+def integral_slot_transition(state: str, outcome: str, comparison: str | None = None) -> str:
     """Return the firmware-owned retained-slot state after one terminal."""
     if state not in {"authority_only", "candidate"}:
         raise ValueError("Stage-C terminal requires retained authority")
@@ -1062,7 +1062,7 @@ def _compact_plan_marker(plan: dict[str, object], run_sequence: int) -> bytes:
     # which also hashes `recovery_lower_rate_q` -- never reach this function:
     # `_velocity_integral_audits` (analyze.py) filters their run sequences out
     # before the audit sees them.
-    if stage_c_combined_workflow(int(plan["schema_revision"])):
+    if integral_combined_workflow(int(plan["schema_revision"])):
         _append_integer(record, 1, 1)
         # A combined plan always carries the intervals -- the field is not
         # optional on `VelocityIntegralPlan` -- so the fallback is reached only
@@ -1121,7 +1121,7 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
     # Raises for a legacy capture whose build_revision names no known
     # representation, preserving the old refuse-to-guess behavior.
     build_features = capture_build_features(plan, stage="c")
-    if not stage_c_schema_is_known(schema_revision):
+    if not integral_schema_is_known(schema_revision):
         mismatches.append(
             f"plan schema revision {schema_revision} is outside the firmware Stage-C range"
         )
@@ -1134,7 +1134,7 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
     # as a standalone run. Every derivation below, and the recovery schedule
     # and terminal expectations in `audit_velocity_integral`, read the workflow
     # from the schema once this check has confirmed the two agree.
-    combined_workflow = stage_c_combined_workflow(schema_revision)
+    combined_workflow = integral_combined_workflow(schema_revision)
     if bool(plan.get("combined_selected_response", False)) != combined_workflow:
         mismatches.append(
             "plan combined selected response contradicts its schema workflow: "
@@ -1218,7 +1218,7 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
     ):
         try:
             selection = select_transition_capable_test_point(
-                stage_b_joint_membership=int(plan["stage_b_joint_membership"]),
+                proportional_joint_membership=int(plan["proportional_joint_membership"]),
                 target_rpm=int(plan["target_velocity_rpm"]),
                 counts_per_rev=int(plan["encoder_counts_per_rev"]),
                 pwm_hz=int(plan["pwm_hz"]),
@@ -1351,7 +1351,7 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
             mismatches.append(f"plan {name}: firmware={plan[name]} offline={expected}")
 
 
-def _stage_c_run_sufficient(
+def _integral_run_sufficient(
     schema_revision: int,
     opening: list[tuple[int, int] | None],
     bookend: list[tuple[int, int] | None],
@@ -1418,7 +1418,7 @@ def _audit_failed_stage_c_admission(
     }
 
 
-def _retained_stage_c_evidence(
+def _retained_integral_evidence(
     rung_results: dict[int, list[dict[str, object]]],
     positive_count: int,
 ) -> tuple[
@@ -1595,7 +1595,7 @@ def audit_velocity_integral(
     # actually ran. The `audit_scored_rest_grammar` call below still gates on
     # `schema_floor=12` -- the revision recovery-rest evidence first exists at
     # all -- so below that floor this value is inert.
-    stabilized_recovery_rest = stage_c_stabilized_recovery_rest(schema_revision)
+    stabilized_recovery_rest = integral_stabilized_recovery_rest(schema_revision)
     mismatches.extend(
         audit_scored_rest_grammar(
             [value for _raw, value in nonterminal],
@@ -2041,7 +2041,7 @@ def audit_velocity_integral(
         # outside a combined workflow is reported rather than ignored. The
         # decoder makes that observable -- it reads the fields only from the
         # 83-byte rung payload, never the 70-byte one (`protocol.py:1203`).
-        rung_combined_workflow = stage_c_combined_workflow(schema_revision)
+        rung_combined_workflow = integral_combined_workflow(schema_revision)
         if schema_revision >= 9 and rung_combined_workflow:
             i_raw = int(expected_gains[rung_index])
             expected_tau_us = (
@@ -2123,7 +2123,7 @@ def audit_velocity_integral(
     outcome = int(terminal["outcome"])
     cause = int(terminal["cause"])
     faulted = outcome == 3
-    opening, bookend, positive, eligible_masks = _retained_stage_c_evidence(
+    opening, bookend, positive, eligible_masks = _retained_integral_evidence(
         rung_results,
         positive_count,
     )
@@ -2142,7 +2142,7 @@ def audit_velocity_integral(
     # Preserved: `evidence_terminal`'s assessment-error arm (`:1211`) passes
     # the materialized evidence through unchanged, and every dispatch-level
     # promotion overwrites only `outcome`/`cause` on an already-built terminal
-    # -- `apply_stage_c_terminal` (`commission_dispatch/stage_c.rs:273`, `:283`,
+    # -- `apply_integral_terminal` (`commission_dispatch/integral.rs:273`, `:283`,
     # `:338`, `:358`) and the disarm-failure paths in
     # `commission_dispatch/mod.rs` (`:606`, `:1417`, `:1430`, `:1467`). A
     # complete, fully sufficient run whose dispatcher found no Stage-C
@@ -2181,13 +2181,13 @@ def audit_velocity_integral(
             mismatches.append("terminal opening-anchor availability mask differs from replay")
         if terminal_bookend_mask != bookend_available_mask:
             mismatches.append("terminal bookend availability mask differs from replay")
-    sufficient = _stage_c_run_sufficient(
+    sufficient = _integral_run_sufficient(
         schema_revision,
         opening,
         bookend,
         eligible_masks,
     )
-    if schema_revision >= _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION:
+    if schema_revision >= _FIRST_COMBINED_INTEGRAL_SCHEMA_REVISION:
         # `plan.combined_workflow` (integral_plan.rs:508) is exactly
         # `combined_selected_response.is_some()`, and which workflow built the
         # plan is fixed by the schema revision: 8 through 13 are combined, 16
@@ -2232,7 +2232,7 @@ def audit_velocity_integral(
         # Breakaway sets no combined recovery-flags bit and emits no combined
         # tail (both checked above and unaffected by this carve-out), so the
         # outcome check is the only one that needs to know about it.
-        plan_combined_workflow = stage_c_combined_workflow(schema_revision)
+        plan_combined_workflow = integral_combined_workflow(schema_revision)
         recovery_flags = int(terminal.get("recovery_flags", 0))
         terminal_combined_workflow = bool(recovery_flags & _TERMINAL_COMBINED_WORKFLOW)
         if terminal_combined_workflow != plan_combined_workflow:
@@ -2262,7 +2262,7 @@ def audit_velocity_integral(
             # (`integral_evidence.rs:167-175`), which resets both to empty.
             # Not every fault does: the assessment-error arm
             # (`integral_sweep.rs:1211`) passes the materialized `evidence`
-            # through unchanged, and `commission_dispatch/stage_c.rs`
+            # through unchanged, and `commission_dispatch/integral.rs`
             # (`:273`, `:283`, `:338`, `:358`) can promote an already-built,
             # evidence-bearing terminal to `Fault` after the fact. So an
             # evidence-bearing fault terminal is reachable, and these checks

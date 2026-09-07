@@ -20,7 +20,7 @@ from foci_trace.velocity_integral import (
     SLOT_ORDER_REVERSE_FIRST,
     UnsupportedIntegralRepresentationError,
     _compact_plan_marker,
-    _retained_stage_c_evidence,
+    _retained_integral_evidence,
     _validate_plan,
     audit_integral_reproduction_pair,
     audit_velocity_integral,
@@ -30,20 +30,20 @@ from foci_trace.velocity_integral import (
     delta_e,
     depth_three_consensus,
     derive_integral_ladder,
+    integral_combined_workflow,
     integral_deficit_reaches_target,
     integral_numerator_for_build,
     integral_numerator_for_build_features,
     integral_plan_digest,
+    integral_schema_is_known,
+    integral_slot_transition,
+    integral_stabilized_recovery_rest,
     observation_role,
     reconstruct_observation,
     recovery_quantization_exposed,
     select_transition_capable_test_point,
     slot_direction_index,
     slot_for_observation,
-    stage_c_combined_workflow,
-    stage_c_schema_is_known,
-    stage_c_slot_transition,
-    stage_c_stabilized_recovery_rest,
     velocity_i_tau_us,
 )
 from foci_trace.velocity_measurement import (
@@ -101,7 +101,7 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
         "build_revision": LEGACY_Q8_8_BUILD,
         "schema_revision": schema_revision,
         "channel": 0,
-        "stage_b_plan_digest": 0xDDEEFF0099AABBCC,
+        "proportional_plan_digest": 0xDDEEFF0099AABBCC,
         "fixed_p": 1_448,
         "directional_memberships": [0x380000, 0x3C0000],
         "joint_membership": 0x380000,
@@ -185,7 +185,7 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
         plan.update(
             {
                 "fixed_p": 724,
-                "stage_b_joint_membership": 0x001C_0000,
+                "proportional_joint_membership": 0x001C_0000,
                 "joint_membership": 0x0004_0000,
                 "directional_memberships": [0x001C_0000, 0x001C_0000],
                 "directional_validity": [3, 3],
@@ -275,7 +275,7 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
                 "fixed_p": 951,
                 "usable_torque_limit": 2_534,
                 "directional_memberships": [0, 0],
-                "stage_b_joint_membership": 0,
+                "proportional_joint_membership": 0,
                 "joint_membership": 0,
                 "directional_validity": [0, 0],
                 "reduced_margin": False,
@@ -315,7 +315,7 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
                 "fixed_p": 724,
                 "usable_torque_limit": 2_534,
                 "directional_memberships": [0x001C_0000, 0x001C_0000],
-                "stage_b_joint_membership": 0x001C_0000,
+                "proportional_joint_membership": 0x001C_0000,
                 "joint_membership": 0x0004_0000,
                 "directional_validity": [3, 3],
                 "reduced_margin": True,
@@ -356,12 +356,12 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
         # only current firmware can emit this revision at all. What
         # separates it from schema 14 on the wire is neither of those: it is
         # the recovery-rest grammar, which `_synthetic_complete_capture` reads
-        # from `stage_c_stabilized_recovery_rest`.
+        # from `integral_stabilized_recovery_rest`.
         plan.update(
             {
                 "fixed_p": 951,
                 "directional_memberships": [0, 0],
-                "stage_b_joint_membership": 0,
+                "proportional_joint_membership": 0,
                 "joint_membership": 0,
                 "directional_validity": [0, 0],
                 "reduced_margin": False,
@@ -446,13 +446,13 @@ def test_stage_c_workflow_follows_the_firmware_schema_ranges(
 ) -> None:
     """The four firmware constants that partition the Stage-C schema space:
     `STAGE_C_EVIDENCE_SCHEMA_REVISION = 7` (integral_plan.rs:24),
-    `FIRST_COMBINED_STAGE_C_SCHEMA_REVISION = 8` and
-    `COMBINED_STAGE_C_SCHEMA_REVISION = 13` (combined_plan.rs:20,22), and
+    `FIRST_COMBINED_INTEGRAL_SCHEMA_REVISION = 8` and
+    `COMBINED_INTEGRAL_SCHEMA_REVISION = 13` (combined_plan.rs:20,22), and
     `BREAKAWAY_STAGE_C_SCHEMA_REVISION = 14` (combined_plan.rs:40). Only 8
     through 13 are combined; 14 is a standalone breakaway run, which is why
     `schema >= 8` on its own is not a combined-workflow test.
     """
-    assert stage_c_combined_workflow(schema_revision) is combined
+    assert integral_combined_workflow(schema_revision) is combined
 
 
 def test_breakaway_schema_ladder_omits_the_combined_exact_cap() -> None:
@@ -545,7 +545,7 @@ def test_operational_clamp_transition_ceiling_admits_p1024_not_p1448() -> None:
         "probe_limit": 2_816,
     }
     selection = select_transition_capable_test_point(
-        stage_b_joint_membership=0b11,
+        proportional_joint_membership=0b11,
         p_start=1_024,
         p_top=1_448,
         **common,
@@ -577,7 +577,7 @@ def test_schema_seven_plan_digest_hashes_both_memberships_and_both_flags() -> No
     plan = _plan(schema_revision=7)
     baseline = integral_plan_digest(plan)
 
-    assert baseline != integral_plan_digest({**plan, "stage_b_joint_membership": 0x0018_0000})
+    assert baseline != integral_plan_digest({**plan, "proportional_joint_membership": 0x0018_0000})
     assert baseline != integral_plan_digest({**plan, "joint_membership": 0x000C_0000})
     assert baseline != integral_plan_digest({**plan, "flags": 0b11})
 
@@ -615,7 +615,7 @@ def test_compact_plan_marker_suffix_belongs_to_the_combined_workflow() -> None:
 
 def test_schema_seven_selects_transition_capable_prefix_independently() -> None:
     selection = select_transition_capable_test_point(
-        stage_b_joint_membership=0x001C_0000,
+        proportional_joint_membership=0x001C_0000,
         target_rpm=264,
         counts_per_rev=4_000,
         pwm_hz=25_000,
@@ -624,7 +624,7 @@ def test_schema_seven_selects_transition_capable_prefix_independently() -> None:
     )
 
     assert selection == {
-        "stage_b_joint_membership": 0x001C_0000,
+        "proportional_joint_membership": 0x001C_0000,
         "joint_membership": 0x0004_0000,
         "fixed_p": 724,
         "transition_ceiling": 979,
@@ -635,7 +635,7 @@ def test_schema_seven_selects_transition_capable_prefix_independently() -> None:
 
 def test_schema_seven_rejects_upper_component_until_target_is_redeclared() -> None:
     unavailable = select_transition_capable_test_point(
-        stage_b_joint_membership=0x0018_0000,
+        proportional_joint_membership=0x0018_0000,
         target_rpm=264,
         counts_per_rev=4_000,
         pwm_hz=25_000,
@@ -643,7 +643,7 @@ def test_schema_seven_rejects_upper_component_until_target_is_redeclared() -> No
         probe_limit=2_534,
     )
     reconfigured = select_transition_capable_test_point(
-        stage_b_joint_membership=0x000C_0000,
+        proportional_joint_membership=0x000C_0000,
         target_rpm=132,
         counts_per_rev=4_000,
         pwm_hz=25_000,
@@ -669,13 +669,13 @@ def test_schema_seven_transition_boundary_and_overflow_fail_closed() -> None:
     }
 
     below = select_transition_capable_test_point(
-        stage_b_joint_membership=1 << 0,
+        proportional_joint_membership=1 << 0,
         p_start=979,
         p_top=980,
         **common,
     )
     at_or_above = select_transition_capable_test_point(
-        stage_b_joint_membership=1 << 1,
+        proportional_joint_membership=1 << 1,
         p_start=979,
         p_top=980,
         **common,
@@ -685,7 +685,7 @@ def test_schema_seven_transition_boundary_and_overflow_fail_closed() -> None:
     assert at_or_above["joint_membership"] == 0
     with pytest.raises(ValueError, match="invalid Stage-C transition"):
         select_transition_capable_test_point(
-            stage_b_joint_membership=1,
+            proportional_joint_membership=1,
             target_rpm=1 << 31,
             counts_per_rev=4_000,
             pwm_hz=25_000,
@@ -697,7 +697,7 @@ def test_schema_seven_transition_boundary_and_overflow_fail_closed() -> None:
 
 
 def test_schema_seventeen_is_known():
-    assert stage_c_schema_is_known(17)
+    assert integral_schema_is_known(17)
 
 
 def test_schema_seventeen_derives_the_half_octave_rung():
@@ -840,7 +840,7 @@ def _plan_marker(plan: dict[str, object], sequence: int) -> tuple[bytes, dict[st
         # interval endpoints exist only for a combined workflow. A breakaway
         # plan's marker ends after `usable_torque_limit` with no trailing byte
         # at all -- not a byte carrying zero.
-        if stage_c_combined_workflow(int(plan["schema_revision"])):
+        if integral_combined_workflow(int(plan["schema_revision"])):
             raw.extend(struct.pack("<B", 1))
             # Same fallback as `_compact_plan_marker`, so the forged capture
             # built by `forge_standalone` (which strips the block a combined
@@ -894,7 +894,7 @@ def _plan_records(plan: dict[str, object]) -> list[tuple[bytes, dict[str, object
         "build_features" if "build_features" in plan else "build_revision",
         "schema_revision",
         "channel",
-        "stage_b_plan_digest",
+        "proportional_plan_digest",
         "fixed_p",
         "directional_memberships",
         "joint_membership",
@@ -910,7 +910,7 @@ def _plan_records(plan: dict[str, object]) -> list[tuple[bytes, dict[str, object
         "usable_torque_limit",
     ]
     if int(plan["schema_revision"]) >= 7:
-        core_names.insert(core_names.index("joint_membership"), "stage_b_joint_membership")
+        core_names.insert(core_names.index("joint_membership"), "proportional_joint_membership")
     if int(plan["schema_revision"]) in (16, 17, 18):
         core_names.append("i_top_cap")
     schedule_names = [
@@ -1380,7 +1380,7 @@ def _rung_record(
     if (
         plan is not None
         and int(plan["schema_revision"]) >= 9
-        and stage_c_combined_workflow(int(plan["schema_revision"]))
+        and integral_combined_workflow(int(plan["schema_revision"]))
     ):
         tau_us = (
             0
@@ -1488,7 +1488,7 @@ def _synthetic_complete_capture(
     # fixture therefore emits the schedule its declared revision's firmware
     # actually ran: the combined range and the unified-rest range carry a rest
     # record per recovery, the breakaway and standalone ranges below do not.
-    stabilized = stage_c_stabilized_recovery_rest(schema_revision)
+    stabilized = integral_stabilized_recovery_rest(schema_revision)
     plan["plan_digest"] = integral_plan_digest(plan)
     records = _plan_records(plan)
     sequence = 1
@@ -1636,7 +1636,7 @@ def _synthetic_complete_capture(
             digest = ((digest ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
     # `plan.combined_workflow` (integral_plan.rs:508) is exactly
     # `combined_selected_response.is_some()`. Reading it back off the plan
-    # dict here, rather than calling `stage_c_combined_workflow` a second
+    # dict here, rather than calling `integral_combined_workflow` a second
     # time, keeps this an assertion about the fixture itself: the terminal is
     # built from the same field the plan record publishes, so a `_plan()`
     # revision that ever disagreed with its schema would show up as a
@@ -2131,7 +2131,7 @@ def test_opening_anchor_retention_is_all_or_none() -> None:
     eligible = {"classification": 0, "components": [(100, 110)]}
     ineligible = {"classification": 4, "components": []}
 
-    opening, bookend, positive, masks = _retained_stage_c_evidence(
+    opening, bookend, positive, masks = _retained_integral_evidence(
         {0: [eligible, ineligible]},
         positive_count=12,
     )
@@ -2422,6 +2422,7 @@ def test_committed_schema_four_q8_8_plan_remains_bit_exact() -> None:
     plan = response["plan"]
     # Archived capture predates the field rename; no back-compat is owed to it.
     plan["fixed_p"] = plan.pop("final_p")
+    plan["proportional_plan_digest"] = plan.pop("stage_b_plan_digest")
     mismatches: list[str] = []
 
     assert response["matches_firmware"] is True
@@ -2475,7 +2476,7 @@ def test_schema_seven_reconstructs_selected_test_point_and_qualifiers() -> None:
     response = audit_velocity_integral(raw, records)
 
     assert response["matches_firmware"] is True
-    assert response["plan"]["stage_b_joint_membership"] == 0x001C_0000
+    assert response["plan"]["proportional_joint_membership"] == 0x001C_0000
     assert response["plan"]["joint_membership"] == 0x0004_0000
     assert response["plan"]["fixed_p"] == 724
     assert response["plan"]["reduced_margin"] is True
@@ -2496,7 +2497,7 @@ def test_schema_seven_decodes_rest_rejection_after_sufficiency_and_owner() -> No
 
     assert response["matches_firmware"] is True
     assert response["terminal"]["rest_rejection_after_sufficiency"] is True
-    assert response["terminal"]["rest_rejection_owner"] == "stage_c_recovery"
+    assert response["terminal"]["rest_rejection_owner"] == "integral_recovery"
 
 
 def test_schema_seven_rest_rejection_owner_is_none_when_flag_clear() -> None:
@@ -2743,14 +2744,14 @@ def test_every_slot_order_passes_the_plan_flag_whitelist(
 
 
 def test_schema_four_sufficiency_requires_both_closing_bookends() -> None:
-    from foci_trace.velocity_integral import _stage_c_run_sufficient
+    from foci_trace.velocity_integral import _integral_run_sufficient
 
     opening = [(10, 20), (-20, -10)]
     masks = [0b111, 0b111]
 
-    assert _stage_c_run_sufficient(4, opening, [(11, 21), (-21, -11)], masks) is True
-    assert _stage_c_run_sufficient(4, opening, [(11, 21), None], masks) is False
-    assert _stage_c_run_sufficient(3, opening, [None, None], masks) is True
+    assert _integral_run_sufficient(4, opening, [(11, 21), (-21, -11)], masks) is True
+    assert _integral_run_sufficient(4, opening, [(11, 21), None], masks) is False
+    assert _integral_run_sufficient(3, opening, [None, None], masks) is True
 
 
 @pytest.mark.parametrize("schema_revision", [0, 19])
@@ -2855,7 +2856,7 @@ def test_reconstruct_observation_applies_drift_bound_at_stage_c_schema_thirteen(
     to end, but only with samples the bound accepts; this pins the rejecting
     side, where a wrong key name or a mis-threaded schema_revision argument
     would otherwise be caught by nothing."""
-    from foci_trace.velocity_measurement import STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION
+    from foci_trace.velocity_measurement import INTEGRAL_DRIFT_BOUND_MIN_SCHEMA_REVISION
 
     raw = [VelocityObservation(index, 1_000, 1, 0, 1, None) for index in range(256)]
     plan = {
@@ -2865,7 +2866,7 @@ def test_reconstruct_observation_applies_drift_bound_at_stage_c_schema_thirteen(
         "fixed_p": 1_448,
         "hard_torque_limit": 1_000,
         "usable_torque_limit": 900,
-        "schema_revision": STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION,
+        "schema_revision": INTEGRAL_DRIFT_BOUND_MIN_SCHEMA_REVISION,
     }
 
     result = reconstruct_observation(raw, {"rung_index": 0, "slot": 0, "i_raw": 0}, plan)
@@ -2883,7 +2884,7 @@ def test_reconstruct_observation_uses_significance_test_below_stage_c_schema_thi
     drift-bound floor: the identical raw samples take the legacy significance
     test instead and reject for a different reason (ResolvedSlope, not
     ExcessiveDrift)."""
-    from foci_trace.velocity_measurement import STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION
+    from foci_trace.velocity_measurement import INTEGRAL_DRIFT_BOUND_MIN_SCHEMA_REVISION
 
     raw = [VelocityObservation(index, 1_000, 1, 0, 1, None) for index in range(256)]
     plan = {
@@ -2893,7 +2894,7 @@ def test_reconstruct_observation_uses_significance_test_below_stage_c_schema_thi
         "fixed_p": 1_448,
         "hard_torque_limit": 1_000,
         "usable_torque_limit": 900,
-        "schema_revision": STAGE_C_DRIFT_BOUND_MIN_SCHEMA_REVISION - 1,
+        "schema_revision": INTEGRAL_DRIFT_BOUND_MIN_SCHEMA_REVISION - 1,
     }
 
     result = reconstruct_observation(raw, {"rung_index": 0, "slot": 0, "i_raw": 0}, plan)
@@ -2949,7 +2950,7 @@ def test_eligibility_movement_and_signed_response_divergence_stay_separate() -> 
 def test_retained_slot_lifecycle_is_deterministic(
     state: str, outcome: str, comparison: str | None, expected: str
 ) -> None:
-    assert stage_c_slot_transition(state, outcome, comparison) == expected
+    assert integral_slot_transition(state, outcome, comparison) == expected
 
 
 def test_mirrored_slot_order_is_reported_and_hashed_only_when_set() -> None:
@@ -3499,7 +3500,7 @@ def test_breakaway_reproduced_complete_audits_clean() -> None:
     """A breakaway (schema-16) run reproduced to `Complete` (outcome 1) must
     not be flagged by the standalone-outcome guard. Breakaway
     (`plan_breakaway_velocity_integral_response`) sets no
-    `combined_selected_response`, so `stage_c_combined_workflow` is False for
+    `combined_selected_response`, so `integral_combined_workflow` is False for
     schema 16 exactly as it is for the pre-existing schema-14 immediate-scored
     range -- but unlike that range, a breakaway run that is reproduced via
     `integral_resume` genuinely reaches `Complete`, not just
@@ -3645,7 +3646,7 @@ def _fault_the_terminal_preserving_evidence(
 ) -> list[tuple[bytes, dict[str, object]]]:
     """Fault a terminal the way a dispatch-level promotion does.
 
-    `apply_stage_c_terminal` (`commission_dispatch/stage_c.rs:273`, `:283`,
+    `apply_integral_terminal` (`commission_dispatch/integral.rs:273`, `:283`,
     `:338`, `:358`) and the disarm-failure paths in
     `commission_dispatch/mod.rs` (`:606`, `:1417`, `:1430`, `:1467`) overwrite
     only `outcome` and `cause` on an already-built terminal, and
@@ -3669,7 +3670,7 @@ def test_faulted_terminal_preserving_its_evidence_is_accepted() -> None:
     Demanding the reset shape from every fault terminal therefore rejected
     real firmware output. Two of the four fault paths reset and two preserve,
     and all of `evidence_terminal`'s integrity arm, the materialization arm,
-    and `apply_stage_c_terminal` report cause 4, so the terminal cannot say
+    and `apply_integral_terminal` report cause 4, so the terminal cannot say
     which path built it.
     """
     raw, records = _synthetic_complete_capture(schema_revision=14)
@@ -3962,7 +3963,7 @@ _TARGETED_GRAMMAR_MESSAGES = frozenset(
 #   `fault terminal retained nonempty anchor availability`. The audit demanded
 #   that every fault terminal report the reset evidence shape. Only two of the
 #   four fault paths reset it; the dispatch-level promotions
-#   (`commission_dispatch/stage_c.rs`, `commission_dispatch/mod.rs`) and
+#   (`commission_dispatch/integral.rs`, `commission_dispatch/mod.rs`) and
 #   `evidence_terminal`'s assessment-error arm overwrite outcome and cause on
 #   an already-built terminal and leave its evidence intact. This capture's
 #   preserved evidence reproduces the offline replay exactly.

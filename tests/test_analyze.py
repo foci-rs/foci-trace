@@ -2365,7 +2365,7 @@ def test_retained_foc_182_captures_replay_expected_stage_b_regions() -> None:
     for _axis, (filename, selected_ps, common_intervals) in fixtures.items():
         with (capture_dir / filename).open("rb") as source:
             analysis = analyze_capture(source)
-        replay = analysis.velocity_sweep_audits[0]["stage_b_replay"]
+        replay = analysis.velocity_sweep_audits[0]["proportional_replay"]
         selected = [
             [region for region in direction if region["kind"] == "valid"][-1]
             for direction in replay["directions"]
@@ -2398,7 +2398,7 @@ def test_schema8_complete_current_headroom_rung_uses_primitive_current_evidence(
     assert len(sweep["recoveries"]) == 20
     assert sweep["current_evidence"][-1]["contact"] == 1
     assert sweep["current_evidence"][-1]["moving_pid_output_peak"] == 2_534
-    assert sweep["stage_b_replay"]["directional_rungs"][1][-1]["eligible_mask"] == 0b0111
+    assert sweep["proportional_replay"]["directional_rungs"][1][-1]["eligible_mask"] == 0b0111
 
 
 def test_velocity_frames_group_by_device_source_and_engine_run() -> None:
@@ -2736,7 +2736,7 @@ def test_recovery_records_route_to_their_owning_stage(monkeypatch) -> None:
         {"record_kind": "plan", "run_sequence": 7},
         {"record_kind": "recovery_rest", "run_sequence": 7, "stage": 0},
         {"record_kind": "rung_origin_recovery", "run_sequence": 7, "stage": 0},
-        {"record_kind": "stage_b_terminal", "run_sequence": 7},
+        {"record_kind": "proportional_terminal", "run_sequence": 7},
         {"record_kind": "integral_plan_core", "run_sequence": 8},
         {
             "record_kind": "velocity_primitive_current",
@@ -2754,27 +2754,27 @@ def test_recovery_records_route_to_their_owning_stage(monkeypatch) -> None:
     ]
     routed: dict[str, list[str]] = {}
 
-    def stage_b(_raw, records):
-        routed["stage_b"] = [str(value["record_kind"]) for _bytes, value in records]
+    def proportional(_raw, records):
+        routed["proportional"] = [str(value["record_kind"]) for _bytes, value in records]
         return {"terminal": {"outcome": 3, "cause": 0}}
 
-    def stage_c(_raw, records):
-        routed["stage_c"] = [str(value["record_kind"]) for _bytes, value in records]
+    def integral(_raw, records):
+        routed["integral"] = [str(value["record_kind"]) for _bytes, value in records]
         return {"terminal": {"outcome": 3, "cause": 0}}
 
-    monkeypatch.setattr(analyze, "audit_velocity_sweep", stage_b)
-    monkeypatch.setattr(analyze, "audit_velocity_integral", stage_c)
+    monkeypatch.setattr(analyze, "audit_velocity_sweep", proportional)
+    monkeypatch.setattr(analyze, "audit_velocity_integral", integral)
 
     analyze._velocity_sweep_audits({0: state})
     analyze._velocity_integral_audits({0: state})
 
-    assert routed["stage_b"] == [
+    assert routed["proportional"] == [
         "plan",
         "recovery_rest",
         "rung_origin_recovery",
-        "stage_b_terminal",
+        "proportional_terminal",
     ]
-    assert routed["stage_c"] == [
+    assert routed["integral"] == [
         "integral_plan_core",
         "velocity_primitive_current",
         "recovery_rest",
@@ -2812,17 +2812,17 @@ def test_amplitude_records_bypass_stage_b_and_stage_c_replay(monkeypatch) -> Non
         analyze._VelocitySweepEvidenceFrame(index, 0, bytes((index,)), payload)
         for index, payload in enumerate(payloads, 1)
     ]
-    called = {"stage_b": False, "stage_c": False, "amplitude": False}
+    called = {"proportional": False, "integral": False, "amplitude": False}
 
     monkeypatch.setattr(
         analyze,
         "audit_velocity_sweep",
-        lambda *_args: called.update(stage_b=True),
+        lambda *_args: called.update(proportional=True),
     )
     monkeypatch.setattr(
         analyze,
         "audit_velocity_integral",
-        lambda *_args: called.update(stage_c=True),
+        lambda *_args: called.update(integral=True),
     )
 
     def amplitude(records):
@@ -2842,7 +2842,7 @@ def test_amplitude_records_bypass_stage_b_and_stage_c_replay(monkeypatch) -> Non
     analyze._velocity_integral_audits({0: state})
     analyze._fixed_gain_amplitude_audits({0: state})
 
-    assert called == {"stage_b": False, "stage_c": False, "amplitude": True}
+    assert called == {"proportional": False, "integral": False, "amplitude": True}
 
 
 def test_stage_b_schema_ten_is_bound_by_its_companion_stage_c_plan(monkeypatch) -> None:
@@ -2851,7 +2851,7 @@ def test_stage_b_schema_ten_is_bound_by_its_companion_stage_c_plan(monkeypatch) 
     state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
     payloads = (
         {"record_kind": "plan", "run_sequence": 9},
-        {"record_kind": "stage_b_terminal", "run_sequence": 9},
+        {"record_kind": "proportional_terminal", "run_sequence": 9},
         {
             "record_kind": "integral_plan_core",
             "run_sequence": 9,
@@ -2866,14 +2866,14 @@ def test_stage_b_schema_ten_is_bound_by_its_companion_stage_c_plan(monkeypatch) 
         analyze,
         "audit_velocity_sweep",
         lambda *_args: {
-            "stage_b_replay": {"schema_revision": 9},
+            "proportional_replay": {"schema_revision": 9},
             "terminal": {"outcome": 3, "cause": 0},
         },
     )
 
     audit = analyze._velocity_sweep_audits({0: state})[0]
 
-    assert audit["stage_b_replay"]["schema_revision"] == 10
+    assert audit["proportional_replay"]["schema_revision"] == 10
 
 
 def test_selected_recovery_rest_binds_stage_b_schema_eleven(monkeypatch) -> None:
@@ -2883,7 +2883,7 @@ def test_selected_recovery_rest_binds_stage_b_schema_eleven(monkeypatch) -> None
     payloads = (
         {"record_kind": "plan", "run_sequence": 9},
         {"record_kind": "recovery_rest", "run_sequence": 9, "stage": 0},
-        {"record_kind": "stage_b_terminal", "run_sequence": 9},
+        {"record_kind": "proportional_terminal", "run_sequence": 9},
         {
             "record_kind": "integral_plan_core",
             "run_sequence": 9,
@@ -2898,7 +2898,7 @@ def test_selected_recovery_rest_binds_stage_b_schema_eleven(monkeypatch) -> None
         analyze,
         "audit_velocity_sweep",
         lambda *_args: {
-            "stage_b_replay": {"schema_revision": 9},
+            "proportional_replay": {"schema_revision": 9},
             "terminal": {"outcome": 1, "cause": 0},
             "selected_recovery_rest": {"disposition": 0},
             "plan": {
@@ -2912,7 +2912,7 @@ def test_selected_recovery_rest_binds_stage_b_schema_eleven(monkeypatch) -> None
 
     audit = analyze._velocity_sweep_audits({0: state})[0]
 
-    assert audit["stage_b_replay"]["schema_revision"] == 11
+    assert audit["proportional_replay"]["schema_revision"] == 11
     assert audit["matches_firmware"] is True
 
 
@@ -2922,7 +2922,7 @@ def test_recovery_wide_stage_c_plan_binds_stage_b_schema_twelve(monkeypatch) -> 
     state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
     payloads = (
         {"record_kind": "plan", "run_sequence": 10},
-        {"record_kind": "stage_b_terminal", "run_sequence": 10},
+        {"record_kind": "proportional_terminal", "run_sequence": 10},
         {
             "record_kind": "integral_plan_core",
             "run_sequence": 10,
@@ -2937,14 +2937,14 @@ def test_recovery_wide_stage_c_plan_binds_stage_b_schema_twelve(monkeypatch) -> 
         analyze,
         "audit_velocity_sweep",
         lambda *_args: {
-            "stage_b_replay": {"schema_revision": 9},
+            "proportional_replay": {"schema_revision": 9},
             "terminal": {"outcome": 1, "cause": 0},
         },
     )
 
     audit = analyze._velocity_sweep_audits({0: state})[0]
 
-    assert audit["stage_b_replay"]["schema_revision"] == 12
+    assert audit["proportional_replay"]["schema_revision"] == 12
 
 
 def test_event_151_is_verified_against_its_causal_raw_suffixes() -> None:
@@ -3025,7 +3025,7 @@ def test_stage_b_rest_audit_falls_back_to_historical_grammar() -> None:
     neither build_features nor a schema_revision for the kind-1 Stage B plan. So
     the scored-rest audit cannot resolve the walk and uses the historical
     grammar. That is correct for the combined flow, whose Stage B runs at
-    COMBINED_STAGE_B_SCHEMA_REVISION (14), below the rest-walk floor of 17.
+    COMBINED_PROPORTIONAL_SCHEMA_REVISION (14), below the rest-walk floor of 17.
 
     This asserts through the real decode surface -- an actual decoded Stage B
     plan, with no build_features injected -- so it cannot pass on a state the

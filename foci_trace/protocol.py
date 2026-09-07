@@ -9,9 +9,9 @@ from typing import Any
 from ._vocabulary_generated import BREAKAWAY_PHASE_NAMES, PHASE_NAMES
 from .scored_rest import select_causal_rest_suffixes
 from .velocity_integral import (
-    _COMBINED_STAGE_C_SCHEMA_REVISION,
-    _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION,
-    _RESPONSE_LADDER_STAGE_C_SCHEMA_REVISIONS,
+    _COMBINED_INTEGRAL_SCHEMA_REVISION,
+    _FIRST_COMBINED_INTEGRAL_SCHEMA_REVISION,
+    _RESPONSE_LADDER_INTEGRAL_SCHEMA_REVISIONS,
 )
 
 __all__ = ["BREAKAWAY_PHASE_NAMES", "PHASE_NAMES"]
@@ -842,7 +842,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             )
             decoded["directional_memberships"] = [cursor.take("I") for _ in range(2)]
             if decoded["schema_revision"] >= 7:
-                decoded["stage_b_joint_membership"] = cursor.take("I")
+                decoded["proportional_joint_membership"] = cursor.take("I")
             decoded["joint_membership"] = cursor.take("I")
             if decoded["schema_revision"] >= 4:
                 decoded["directional_validity"] = [cursor.take("B") for _ in range(2)]
@@ -867,7 +867,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                     ),
                 )
             )
-            decoded["stage_b_plan_digest"] = decoded["stage_b_plan_digest_low"] | (
+            decoded["proportional_plan_digest"] = decoded["stage_b_plan_digest_low"] | (
                 decoded["stage_b_plan_digest_high"] << 32
             )
             if decoded["schema_revision"] >= 3 or len(payload) == 88:
@@ -879,9 +879,9 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             decoded["combined_selected_response"] = False
             schema_revision = decoded["schema_revision"]
             is_combined_schema = (
-                _FIRST_COMBINED_STAGE_C_SCHEMA_REVISION
+                _FIRST_COMBINED_INTEGRAL_SCHEMA_REVISION
                 <= schema_revision
-                <= _COMBINED_STAGE_C_SCHEMA_REVISION
+                <= _COMBINED_INTEGRAL_SCHEMA_REVISION
             )
             if is_combined_schema and cursor.offset < len(payload):
                 if cursor.take("B") != 1:
@@ -890,7 +890,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 decoded["selected_response_intervals_q"] = [
                     [cursor.take("i"), cursor.take("i")] for _ in range(2)
                 ]
-            if schema_revision in _RESPONSE_LADDER_STAGE_C_SCHEMA_REVISIONS:
+            if schema_revision in _RESPONSE_LADDER_INTEGRAL_SCHEMA_REVISIONS:
                 decoded["i_top_cap"] = cursor.take("H")
             decoded["record_kind"] = "integral_plan_core"
         elif fragment == 1:
@@ -969,13 +969,13 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         decoded["plan_digest"] = decoded["plan_digest_low"] | (decoded["plan_digest_high"] << 32)
         decoded["record_kind"] = "integral_plan_marker"
     elif kind == 1:
-        stage_b = len(payload) in (78, 91)
+        proportional = len(payload) in (78, 91)
         stage_b_recovery = len(payload) == 91
         plan_fields = [
             ("run_sequence", "I"),
             ("evidence_sequence", "H"),
         ]
-        if stage_b:
+        if proportional:
             plan_fields.extend((("plan_digest_low", "I"), ("plan_digest_high", "I")))
         plan_fields.extend(
             (
@@ -1019,7 +1019,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             cursor,
             tuple(plan_fields),
         )
-        if stage_b:
+        if proportional:
             decoded["plan_digest"] = decoded["plan_digest_low"] | (
                 decoded["plan_digest_high"] << 32
             )
@@ -1717,7 +1717,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ),
             )
         )
-        decoded["record_kind"] = "stage_b_terminal"
+        decoded["record_kind"] = "proportional_terminal"
     elif kind == 9 and len(payload) == 55:
         decoded = _take_fields(
             cursor,
@@ -2171,7 +2171,7 @@ BREAKAWAY_TERMINAL_CAUSE_NAMES = {
     23: "probe_internal_fault",
     24: "discovery_internal_fault",
     25: "confirmation_internal_fault",
-    26: "confirmation_stage_c_plan_refused",
+    26: "confirmation_integral_plan_refused",
     27: "confirmation_no_transition_capable_candidate",
 }
 
@@ -2789,7 +2789,7 @@ def decode_breakaway_record(
                 ("phase", "B"),
                 ("terminal_cause", "B"),
                 ("accepted", "B"),
-                ("stage_c_plan_digest", "Q"),
+                ("integral_plan_digest", "Q"),
             ),
         )
         if decoded["phase"] not in BREAKAWAY_PHASE_NAMES:

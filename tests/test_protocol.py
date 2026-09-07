@@ -402,7 +402,7 @@ def test_decodes_fragmented_velocity_integral_response_plan() -> None:
     assert core_frame.payload["record_kind"] == "integral_plan_core"
     assert core_frame.payload["run_sequence"] == 7
     assert core_frame.payload["plan_digest"] == 0x5566_7788_1122_3344
-    assert core_frame.payload["stage_b_plan_digest"] == 0xDDEE_FF00_99AA_BBCC
+    assert core_frame.payload["proportional_plan_digest"] == 0xDDEE_FF00_99AA_BBCC
     assert core_frame.payload["directional_memberships"] == [0x0038_0000, 0x003C_0000]
     assert core_frame.payload["directional_pooled_intervals"] == [
         [17_000_000, 18_000_000],
@@ -829,7 +829,7 @@ def test_schema_seventeen_core_record_decodes_i_top_cap() -> None:
             "<IIIIBBBiiii",
             0x001C_0000,  # directional_memberships[0]
             0x001C_0000,  # directional_memberships[1]
-            0x001C_0000,  # stage_b_joint_membership (schema >= 7)
+            0x001C_0000,  # proportional_joint_membership (schema >= 7)
             0x0004_0000,  # joint_membership
             3,  # directional_validity[0] (schema >= 4)
             3,  # directional_validity[1]
@@ -970,7 +970,7 @@ def test_decodes_schema_seven_velocity_integral_source_and_filtered_masks() -> N
 
     assert frame.payload["record_kind"] == "integral_plan_core"
     assert frame.payload["schema_revision"] == 7
-    assert frame.payload["stage_b_joint_membership"] == 0x001C_0000
+    assert frame.payload["proportional_joint_membership"] == 0x001C_0000
     assert frame.payload["joint_membership"] == 0x0004_0000
     assert frame.payload["fixed_p"] == 724
 
@@ -1787,7 +1787,7 @@ def test_decodes_stage_b_canonical_records_and_plan_identity() -> None:
                 0x5566_7788,
                 0x0000_0002,
             ),
-            "stage_b_terminal",
+            "proportional_terminal",
         ),
         (
             bytes([9])
@@ -3471,7 +3471,7 @@ def test_decode_breakaway_campaign_terminal_matches_the_firmware_golden_bytes() 
     assert decoded["phase"] == 2
     assert decoded["terminal_cause"] == 21
     assert decoded["accepted"] == 1
-    assert decoded["stage_c_plan_digest"] == _BW_PLAN_DIGEST
+    assert decoded["integral_plan_digest"] == _BW_PLAN_DIGEST
     # A pre-error_code-field (18-byte) payload still decodes at the current
     # protocol version -- "no error" and "field absent" stay distinct from 0.
     assert decoded["error_code"] is None
@@ -3492,7 +3492,7 @@ def test_breakaway_campaign_terminal_names_the_error_behind_a_confirmed_refusal(
 
     decoded = decode_breakaway_record(payload, protocol_version=19)
     assert decoded["record_kind"] == "breakaway_campaign_terminal"
-    assert decoded["terminal_cause_name"] == "confirmation_stage_c_plan_refused"
+    assert decoded["terminal_cause_name"] == "confirmation_integral_plan_refused"
     assert decoded["accepted"] == 0
     assert decoded["error_code"] == 11
     assert decoded["error_code_name"] == "velocity_validation_failed"

@@ -41,7 +41,7 @@ def test_summary_tracks_stage_b_regions_nomination_and_terminal() -> None:
         {"record_kind": "directional_region", "region_kind": 1},
         {"record_kind": "handoff", "nominated_p": 1448},
         {
-            "record_kind": "stage_b_terminal",
+            "record_kind": "proportional_terminal",
             "outcome": 0,
             "cause": 4,
             "recovery_unavailable": 1,
@@ -71,12 +71,12 @@ def test_summary_tracks_stage_b_regions_nomination_and_terminal() -> None:
 
     text = summary.render()
 
-    assert "stage_b_regions=1" in text
-    assert "stage_b_fragments=1" in text
-    assert "stage_b_p=1448" in text
-    assert "stage_b_outcome=0" in text
-    assert "stage_b_cause=4" in text
-    assert "stage_b_recovery_unavailable=true" in text
+    assert "proportional_regions=1" in text
+    assert "proportional_fragments=1" in text
+    assert "proportional_p=1448" in text
+    assert "proportional_outcome=0" in text
+    assert "proportional_cause=4" in text
+    assert "proportional_recovery_unavailable=true" in text
 
 
 def test_summary_tracks_recovery_rest() -> None:

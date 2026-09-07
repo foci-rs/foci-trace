@@ -31,12 +31,12 @@ class DeviceSummary:
     endpoint_pressure: int = 0
     first_spi_cycles: int = 0
     max_spi_cycles: int = 0
-    stage_b_regions: int = 0
-    stage_b_fragments: int = 0
+    proportional_regions: int = 0
+    proportional_fragments: int = 0
     stage_b_nominated_p: int = 0
-    stage_b_outcome: int | None = None
-    stage_b_cause: int | None = None
-    stage_b_recovery_unavailable: bool = False
+    proportional_outcome: int | None = None
+    proportional_cause: int | None = None
+    proportional_recovery_unavailable: bool = False
     selected_recovery_rest: tuple[int, int, int, int, int, int] | None = None
     stage_b_directional_validity: tuple[int, int] | None = None
     stage_b_reduced_margin: bool = False
@@ -103,15 +103,15 @@ class LiveSummary:
             kind = frame.payload.get("record_kind")
             if kind == "directional_region":
                 if int(frame.payload["region_kind"]) == 0:
-                    device.stage_b_regions += 1
+                    device.proportional_regions += 1
                 else:
-                    device.stage_b_fragments += 1
+                    device.proportional_fragments += 1
             elif kind == "handoff":
                 device.stage_b_nominated_p = int(frame.payload["nominated_p"])
-            elif kind == "stage_b_terminal":
-                device.stage_b_outcome = int(frame.payload["outcome"])
-                device.stage_b_cause = int(frame.payload["cause"])
-                device.stage_b_recovery_unavailable = bool(
+            elif kind == "proportional_terminal":
+                device.proportional_outcome = int(frame.payload["outcome"])
+                device.proportional_cause = int(frame.payload["cause"])
+                device.proportional_recovery_unavailable = bool(
                     int(frame.payload["recovery_unavailable"])
                 )
             elif kind == "recovery_rest":
@@ -197,12 +197,12 @@ class LiveSummary:
                 "voltage_limited={limited} status=0x{status:08x} spi_errors={spi} "
                 "qhi={qhi} endpoint_pressure={endpoint_pressure} "
                 "first_spi_cycles={first_spi} max_spi_cycles={max_spi} "
-                "stage_b_regions={regions} stage_b_fragments={fragments} "
-                "stage_b_p={stage_b_p} stage_b_outcome={stage_b_outcome} "
-                "stage_b_cause={stage_b_cause} "
-                "stage_b_recovery_unavailable={stage_b_recovery_unavailable} "
+                "proportional_regions={regions} proportional_fragments={fragments} "
+                "proportional_p={proportional_p} proportional_outcome={proportional_outcome} "
+                "proportional_cause={proportional_cause} "
+                "proportional_recovery_unavailable={proportional_recovery_unavailable} "
                 "selected_recovery_rest={selected_recovery_rest} "
-                "stage_b_validity={stage_b_validity} "
+                "proportional_validity={proportional_validity} "
                 "stage_b_reduced_margin={stage_b_reduced_margin} "
                 "velocity_integral_p={integral_p} "
                 "velocity_integral_rungs={integral_rungs} "
@@ -232,20 +232,24 @@ class LiveSummary:
                     endpoint_pressure=item.endpoint_pressure,
                     first_spi=item.first_spi_cycles,
                     max_spi=item.max_spi_cycles,
-                    regions=item.stage_b_regions,
-                    fragments=item.stage_b_fragments,
-                    stage_b_p=item.stage_b_nominated_p,
-                    stage_b_outcome=(
-                        "none" if item.stage_b_outcome is None else item.stage_b_outcome
+                    regions=item.proportional_regions,
+                    fragments=item.proportional_fragments,
+                    proportional_p=item.stage_b_nominated_p,
+                    proportional_outcome=(
+                        "none" if item.proportional_outcome is None else item.proportional_outcome
                     ),
-                    stage_b_cause=("none" if item.stage_b_cause is None else item.stage_b_cause),
-                    stage_b_recovery_unavailable=str(item.stage_b_recovery_unavailable).lower(),
+                    proportional_cause=(
+                        "none" if item.proportional_cause is None else item.proportional_cause
+                    ),
+                    proportional_recovery_unavailable=str(
+                        item.proportional_recovery_unavailable
+                    ).lower(),
                     selected_recovery_rest=(
                         "none"
                         if item.selected_recovery_rest is None
                         else ":".join(str(value) for value in item.selected_recovery_rest)
                     ),
-                    stage_b_validity=(
+                    proportional_validity=(
                         "none"
                         if item.stage_b_directional_validity is None
                         else ",".join(str(value) for value in item.stage_b_directional_validity)
