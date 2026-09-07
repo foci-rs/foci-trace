@@ -2,13 +2,13 @@ from copy import deepcopy
 
 import pytest
 
-from foci_trace.acceptance_matrix import (
+from foci_trace.fixed_gain_amplitude import (
     _compact_execution_marker,
     _fnv1a64,
-    assemble_matrix_plan,
-    audit_acceptance_matrix,
-    compare_matrix_runs,
-    matrix_plan_digest,
+    amplitude_plan_digest,
+    assemble_amplitude_plan,
+    audit_fixed_gain_amplitude,
+    compare_amplitude_runs,
     reconstruct_amplitude,
     reconstruct_direction,
     robust_rate_location,
@@ -64,11 +64,11 @@ def _schema_two_plan() -> dict[str, object]:
     return plan
 
 
-def _matrix_plan_fixture(*, acceptance_schema_revision: int) -> dict[str, object]:
+def _amplitude_plan_fixture(*, acceptance_schema_revision: int) -> dict[str, object]:
     """`_plan()` with `acceptance_schema_revision` overridden.
 
-    `matrix_plan_digest` hashes `acceptance_schema_revision` value-agnostically
-    (`acceptance_matrix.py:55-60`), so changing it changes the encoded bytes and
+    `amplitude_plan_digest` hashes `acceptance_schema_revision` value-agnostically
+    (`fixed_gain_amplitude.py:55-60`), so changing it changes the encoded bytes and
     therefore the digest; callers must supply the digest expected for that
     schema rather than reuse the schema-10 constant.
     """
@@ -109,24 +109,24 @@ def test_robust_location_matches_signed_firmware_midpoint() -> None:
 def test_plan_digest_is_sensitive_to_order_and_exact_targets() -> None:
     plan = _plan()
 
-    assert matrix_plan_digest(plan) == 0x2618_AA16_E7C5_77C3
+    assert amplitude_plan_digest(plan) == 0x2618_AA16_E7C5_77C3
 
     descending = deepcopy(plan)
     descending["order"] = 2
     descending["target_rpm"] = list(reversed(plan["target_rpm"]))
-    assert matrix_plan_digest(descending) != matrix_plan_digest(plan)
+    assert amplitude_plan_digest(descending) != amplitude_plan_digest(plan)
 
 
-def test_matrix_plan_digest_accepts_breakaway_acceptance_identity() -> None:
-    """A breakaway (`acceptance_schema_revision=16`) matrix plan decodes with
-    no code change: `matrix_plan_digest` hashes the field value-agnostically."""
-    plan = _matrix_plan_fixture(acceptance_schema_revision=16)
+def test_amplitude_plan_digest_accepts_breakaway_acceptance_identity() -> None:
+    """A breakaway (`acceptance_schema_revision=16`) amplitude plan decodes with
+    no code change: `amplitude_plan_digest` hashes the field value-agnostically."""
+    plan = _amplitude_plan_fixture(acceptance_schema_revision=16)
     plan["plan_digest"] = 0x5CAA_1C5A_DEE3_EC99
 
-    assert matrix_plan_digest(plan) == plan["plan_digest"]
+    assert amplitude_plan_digest(plan) == plan["plan_digest"]
 
 
-def test_matrix_plan_digest_still_accepts_legacy_combined_identity() -> None:
+def test_amplitude_plan_digest_still_accepts_legacy_combined_identity() -> None:
     """Archived combined captures (Stage C spans schema 8-13; the fixture
     baseline is 10) must keep decoding byte-identically alongside breakaway."""
     expected_digests = {
@@ -134,20 +134,20 @@ def test_matrix_plan_digest_still_accepts_legacy_combined_identity() -> None:
         13: 0xFBAC_7BDD_0EE2_262E,
     }
     for legacy, digest in expected_digests.items():
-        plan = _matrix_plan_fixture(acceptance_schema_revision=legacy)
+        plan = _amplitude_plan_fixture(acceptance_schema_revision=legacy)
         plan["plan_digest"] = digest
 
-        assert matrix_plan_digest(plan) == plan["plan_digest"]
+        assert amplitude_plan_digest(plan) == plan["plan_digest"]
 
 
 def test_schema_two_digest_and_execution_marker_bind_recovery_authority() -> None:
     plan = _schema_two_plan()
 
-    digest = matrix_plan_digest(plan)
+    digest = amplitude_plan_digest(plan)
     marker = _compact_execution_marker({**plan, "run_sequence": 7, "plan_digest": digest})
 
     assert digest == 0x8543_77D8_CC8D_7426
-    assert digest != matrix_plan_digest(_plan())
+    assert digest != amplitude_plan_digest(_plan())
     assert len(marker) == 98
     assert marker[15:19] == (4_394).to_bytes(4, "little")
     assert marker[19:23] == (263).to_bytes(4, "little", signed=True)
@@ -191,11 +191,11 @@ def test_plan_fragments_require_one_shared_identity() -> None:
         }
     )
 
-    assert assemble_matrix_plan(fragments)["run_sequence"] == 7
+    assert assemble_amplitude_plan(fragments)["run_sequence"] == 7
 
     fragments[2]["plan_digest"] = 10
     with pytest.raises(ValueError, match="disagree"):
-        assemble_matrix_plan(fragments)
+        assemble_amplitude_plan(fragments)
 
 
 def test_direction_reuses_depth_three_closed_interval_consensus() -> None:
@@ -255,17 +255,17 @@ def test_amplitude_preserves_reverse_sign_and_frozen_target() -> None:
     assert amplitude["directions"][1]["deficit_interval_q"] == [-1_065_766, -1_065_666]
 
 
-def test_complete_matrix_audit_reproduces_masks_counts_and_digest() -> None:
+def test_complete_amplitude_audit_reproduces_masks_counts_and_digest() -> None:
     plan = _plan()
     plan.update({"run_sequence": 7, "plan_digest": 0})
-    plan["plan_digest"] = matrix_plan_digest(plan)
+    plan["plan_digest"] = amplitude_plan_digest(plan)
     plan_fragments = [
         (
             bytes([fragment]),
             {
                 **plan,
                 "fragment": fragment,
-                "record_kind": "acceptance_matrix_plan",
+                "record_kind": "fixed_gain_amplitude_plan",
             },
         )
         for fragment in range(3)
@@ -303,7 +303,7 @@ def test_complete_matrix_audit_reproduces_masks_counts_and_digest() -> None:
                 {"amplitude_index": amplitude_index, "target_rpm": target_rpm},
                 plan,
             ),
-            "record_kind": "acceptance_matrix_amplitude",
+            "record_kind": "fixed_gain_amplitude_amplitude",
             "run_sequence": 7,
             "evidence_sequence": evidence_sequence,
             "plan_digest": plan["plan_digest"],
@@ -314,7 +314,7 @@ def test_complete_matrix_audit_reproduces_masks_counts_and_digest() -> None:
     for raw, _record in evidence[3:]:
         digest = _fnv1a64(raw, digest)
     terminal = {
-        "record_kind": "acceptance_matrix_terminal",
+        "record_kind": "fixed_gain_amplitude_terminal",
         "run_sequence": 7,
         "evidence_sequence": evidence_sequence,
         "schema_revision": 1,
@@ -335,7 +335,7 @@ def test_complete_matrix_audit_reproduces_masks_counts_and_digest() -> None:
     }
     evidence.append((b"terminal", terminal))
 
-    audit = audit_acceptance_matrix(evidence)
+    audit = audit_fixed_gain_amplitude(evidence)
 
     assert audit["matches_firmware"] is True
     assert audit["complete"] is True
@@ -343,16 +343,16 @@ def test_complete_matrix_audit_reproduces_masks_counts_and_digest() -> None:
     assert len(audit["amplitudes"]) == 5
 
 
-def _minimal_matrix_evidence(
+def _minimal_amplitude_evidence(
     *, nonterminal_sequences: list[int], terminal_evidence_sequence: int
 ) -> list[tuple[bytes, dict[str, object]]]:
     plan = _plan()
     plan.update({"run_sequence": 7, "plan_digest": 0})
-    plan["plan_digest"] = matrix_plan_digest(plan)
+    plan["plan_digest"] = amplitude_plan_digest(plan)
     plan_fragments = [
         (
             bytes([fragment]),
-            {**plan, "fragment": fragment, "record_kind": "acceptance_matrix_plan"},
+            {**plan, "fragment": fragment, "record_kind": "fixed_gain_amplitude_plan"},
         )
         for fragment in range(3)
     ]
@@ -371,7 +371,7 @@ def _minimal_matrix_evidence(
         for sequence in nonterminal_sequences
     ]
     terminal = {
-        "record_kind": "acceptance_matrix_terminal",
+        "record_kind": "fixed_gain_amplitude_terminal",
         "run_sequence": 7,
         "evidence_sequence": terminal_evidence_sequence,
         "schema_revision": 1,
@@ -382,20 +382,24 @@ def _minimal_matrix_evidence(
     return [*plan_fragments, *nonterminal, (b"terminal", terminal)]
 
 
-def test_matrix_audit_flags_a_gap_in_the_evidence_sequence() -> None:
-    evidence = _minimal_matrix_evidence(nonterminal_sequences=[1, 3], terminal_evidence_sequence=4)
+def test_amplitude_audit_flags_a_gap_in_the_evidence_sequence() -> None:
+    evidence = _minimal_amplitude_evidence(
+        nonterminal_sequences=[1, 3], terminal_evidence_sequence=4
+    )
 
-    audit = audit_acceptance_matrix(evidence)
+    audit = audit_fixed_gain_amplitude(evidence)
 
     assert any(
         "evidence sequence is not contiguous" in mismatch for mismatch in audit["mismatches"]
     )
 
 
-def test_matrix_audit_flags_a_terminal_sequence_that_skips_evidence() -> None:
-    evidence = _minimal_matrix_evidence(nonterminal_sequences=[1, 2], terminal_evidence_sequence=9)
+def test_amplitude_audit_flags_a_terminal_sequence_that_skips_evidence() -> None:
+    evidence = _minimal_amplitude_evidence(
+        nonterminal_sequences=[1, 2], terminal_evidence_sequence=9
+    )
 
-    audit = audit_acceptance_matrix(evidence)
+    audit = audit_fixed_gain_amplitude(evidence)
 
     assert any(
         "terminal sequence does not follow the final evidence record" in mismatch
@@ -406,11 +410,11 @@ def test_matrix_audit_flags_a_terminal_sequence_that_skips_evidence() -> None:
 _GRAMMAR_MISMATCH_MARKERS = ("scored-rest", "does not precede", "lacks its causal selection")
 
 
-def test_matrix_audit_enforces_the_stabilized_rejection_tail() -> None:
-    """`audit_acceptance_matrix` passes `stabilized_recovery_rest=True` and
+def test_amplitude_audit_enforces_the_stabilized_rejection_tail() -> None:
+    """`audit_fixed_gain_amplitude` passes `stabilized_recovery_rest=True` and
     `ordinary_rejection_tail=("velocity_primitive_current",)` at its call site
-    (acceptance_matrix.py:338); a test that only calls the grammar helper
-    directly would not catch a regression to `()` here. Existing matrix tests
+    (fixed_gain_amplitude.py:338); a test that only calls the grammar helper
+    directly would not catch a regression to `()` here. Existing amplitude tests
     run at schema 1 with no scored-rest selections, so the grammar exits below
     its floor and stays green regardless -- this fixture is schema 4 to reach
     the code path at all.
@@ -420,11 +424,11 @@ def test_matrix_audit_enforces_the_stabilized_rejection_tail() -> None:
     asserts the absence of grammar-specific mismatches, not a clean audit."""
     plan = _schema_two_plan()
     plan.update({"schema_revision": 4, "run_sequence": 7, "plan_digest": 0})
-    plan["plan_digest"] = matrix_plan_digest(plan)
+    plan["plan_digest"] = amplitude_plan_digest(plan)
     plan_fragments = [
         (
             bytes([fragment]),
-            {**plan, "fragment": fragment, "record_kind": "acceptance_matrix_plan"},
+            {**plan, "fragment": fragment, "record_kind": "fixed_gain_amplitude_plan"},
         )
         for fragment in range(3)
     ]
@@ -453,7 +457,7 @@ def test_matrix_audit_enforces_the_stabilized_rejection_tail() -> None:
         "slot": 0,
     }
     terminal = {
-        "record_kind": "acceptance_matrix_terminal",
+        "record_kind": "fixed_gain_amplitude_terminal",
         "run_sequence": 7,
         "cause": 53,
         "outcome": 1,
@@ -467,7 +471,7 @@ def test_matrix_audit_enforces_the_stabilized_rejection_tail() -> None:
         (b"terminal", terminal),
     ]
 
-    audit = audit_acceptance_matrix(evidence)
+    audit = audit_fixed_gain_amplitude(evidence)
 
     assert not any(
         marker in mismatch
@@ -501,7 +505,7 @@ def test_cross_run_comparison_distinguishes_absence_and_closed_touch() -> None:
     current["terminal"]["attempted_masks"][0] = 0b11110
     current["amplitudes"][1]["directions"][1]["availability"] = 3
 
-    comparison = compare_matrix_runs(previous, current)
+    comparison = compare_amplitude_runs(previous, current)
     by_key = {
         (item["amplitude_index"], item["direction"]): item for item in comparison["comparisons"]
     }
@@ -516,8 +520,8 @@ def test_cross_run_comparison_distinguishes_absence_and_closed_touch() -> None:
 
 
 def test_cross_run_signed_gap_preserves_movement_direction() -> None:
-    forward = compare_matrix_runs(_audit([0, 4], 2), _audit([6, 10], 8))
-    reverse = compare_matrix_runs(_audit([6, 10], 8), _audit([0, 4], 2))
+    forward = compare_amplitude_runs(_audit([0, 4], 2), _audit([6, 10], 8))
+    reverse = compare_amplitude_runs(_audit([6, 10], 8), _audit([0, 4], 2))
 
     assert forward["comparisons"][0]["signed_gap_q"] == 2
     assert reverse["comparisons"][0]["signed_gap_q"] == -2

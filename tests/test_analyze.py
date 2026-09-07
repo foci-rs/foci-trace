@@ -2686,7 +2686,7 @@ def test_velocity_integral_audit_is_added_only_when_present() -> None:
     assert "rest_boundary={'positive_rung_index': 3, 'slot': 5}" in format_analysis(analysis)
 
 
-def test_acceptance_matrix_audit_keeps_its_namespace_in_output() -> None:
+def test_fixed_gain_amplitude_audit_keeps_its_namespace_in_output() -> None:
     empty = velocity_analysis_to_json(CaptureAnalysis(devices=[]))
     audit = {
         "device_index": 0,
@@ -2705,14 +2705,14 @@ def test_acceptance_matrix_audit_keeps_its_namespace_in_output() -> None:
             "maximum_displacement_kind": "observed_bound",
         },
     }
-    analysis = CaptureAnalysis(devices=[], acceptance_matrix_audits=[audit])
+    analysis = CaptureAnalysis(devices=[], fixed_gain_amplitude_audits=[audit])
 
     encoded = velocity_analysis_to_json(analysis)
     rendered = format_analysis(analysis)
 
-    assert "acceptance_matrices" not in empty
-    assert encoded["acceptance_matrices"] == [audit]
-    assert "namespace=matrix" in rendered
+    assert "fixed_gain_amplitude_runs" not in empty
+    assert encoded["fixed_gain_amplitude_runs"] == [audit]
+    assert "namespace=amplitude" in rendered
     assert "outcome=Complete cause=None" in rendered
     assert "observed_bound_q=35" in rendered
 
@@ -2784,27 +2784,27 @@ def test_recovery_records_route_to_their_owning_stage(monkeypatch) -> None:
     ]
 
 
-def test_matrix_records_bypass_stage_b_and_stage_c_replay(monkeypatch) -> None:
+def test_amplitude_records_bypass_stage_b_and_stage_c_replay(monkeypatch) -> None:
     from foci_trace import analyze
 
     state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
     payloads = (
         {
-            "namespace": "acceptance_matrix",
-            "record_kind": "acceptance_matrix_plan",
+            "namespace": "fixed_gain_amplitude",
+            "record_kind": "fixed_gain_amplitude_plan",
             "run_sequence": 9,
             "fragment": 0,
         },
         {"record_kind": "integral_observation", "run_sequence": 9},
         {
-            "namespace": "acceptance_matrix",
-            "record_kind": "acceptance_matrix_amplitude",
+            "namespace": "fixed_gain_amplitude",
+            "record_kind": "fixed_gain_amplitude_amplitude",
             "run_sequence": 9,
         },
         {"record_kind": "recovery_rest", "run_sequence": 9, "stage": 1},
         {
-            "namespace": "acceptance_matrix",
-            "record_kind": "acceptance_matrix_terminal",
+            "namespace": "fixed_gain_amplitude",
+            "record_kind": "fixed_gain_amplitude_terminal",
             "run_sequence": 9,
         },
     )
@@ -2812,7 +2812,7 @@ def test_matrix_records_bypass_stage_b_and_stage_c_replay(monkeypatch) -> None:
         analyze._VelocitySweepEvidenceFrame(index, 0, bytes((index,)), payload)
         for index, payload in enumerate(payloads, 1)
     ]
-    called = {"stage_b": False, "stage_c": False, "matrix": False}
+    called = {"stage_b": False, "stage_c": False, "amplitude": False}
 
     monkeypatch.setattr(
         analyze,
@@ -2825,24 +2825,24 @@ def test_matrix_records_bypass_stage_b_and_stage_c_replay(monkeypatch) -> None:
         lambda *_args: called.update(stage_c=True),
     )
 
-    def matrix(records):
-        called["matrix"] = True
+    def amplitude(records):
+        called["amplitude"] = True
         assert [value["record_kind"] for _raw, value in records] == [
-            "acceptance_matrix_plan",
+            "fixed_gain_amplitude_plan",
             "integral_observation",
-            "acceptance_matrix_amplitude",
+            "fixed_gain_amplitude_amplitude",
             "recovery_rest",
-            "acceptance_matrix_terminal",
+            "fixed_gain_amplitude_terminal",
         ]
         return {"plan": None, "terminal": None}
 
-    monkeypatch.setattr(analyze, "audit_acceptance_matrix", matrix)
+    monkeypatch.setattr(analyze, "audit_fixed_gain_amplitude", amplitude)
 
     analyze._velocity_sweep_audits({0: state})
     analyze._velocity_integral_audits({0: state})
-    analyze._acceptance_matrix_audits({0: state})
+    analyze._fixed_gain_amplitude_audits({0: state})
 
-    assert called == {"stage_b": False, "stage_c": False, "matrix": True}
+    assert called == {"stage_b": False, "stage_c": False, "amplitude": True}
 
 
 def test_stage_b_schema_ten_is_bound_by_its_companion_stage_c_plan(monkeypatch) -> None:

@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 from statistics import median
 from typing import BinaryIO
 
-from .acceptance_matrix import audit_acceptance_matrix, compare_matrix_runs
 from .capture_file import (
     RECORD_TYPE_DEVICE_TABLE,
     RECORD_TYPE_FIRMWARE_FRAME,
@@ -32,6 +31,7 @@ from .contour import (
     contour_segment_report,
     pair_motor_samples,
 )
+from .fixed_gain_amplitude import audit_fixed_gain_amplitude, compare_amplitude_runs
 from .protocol import (
     EVENT_COMMISSION_OUTER_SAFETY_TIMING,
     FRAME_TYPE_CONTROL_DETAIL,
@@ -341,7 +341,7 @@ class CaptureAnalysis:
     velocity_reports: list[VelocityCaptureGroup] = field(default_factory=list)
     velocity_sweep_audits: list[dict[str, object]] = field(default_factory=list)
     velocity_integral_audits: list[dict[str, object]] = field(default_factory=list)
-    acceptance_matrix_audits: list[dict[str, object]] = field(default_factory=list)
+    fixed_gain_amplitude_audits: list[dict[str, object]] = field(default_factory=list)
     outer_safety_timing_audits: list[dict[str, object]] = field(default_factory=list)
     breakaway_campaign_audits: list[dict[str, object]] = field(default_factory=list)
     corexy_plus: str | None = None
@@ -2068,7 +2068,7 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                 int(item.payload["run_sequence"])
                 for item in state.velocity_sweep_evidence
                 if "run_sequence" in item.payload
-                and item.payload.get("namespace") != "acceptance_matrix"
+                and item.payload.get("namespace") != "fixed_gain_amplitude"
                 and item.payload.get("record_kind") != "outer_safety_timing"
                 and (
                     item.payload.get("record_kind") != "rung_origin_recovery"
@@ -2093,7 +2093,7 @@ def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, ob
                 item
                 for item in state.velocity_sweep_evidence
                 if int(item.payload.get("run_sequence", -1)) == run_sequence
-                and item.payload.get("namespace") != "acceptance_matrix"
+                and item.payload.get("namespace") != "fixed_gain_amplitude"
                 and item.payload.get("record_kind") != "outer_safety_timing"
                 and (
                     not str(item.payload.get("record_kind", "")).startswith("integral_")
@@ -2188,10 +2188,10 @@ def _velocity_integral_audits(states: dict[int, _DeviceState]) -> list[dict[str,
     audits: list[dict[str, object]] = []
     retained_candidates: dict[tuple[int, int], dict[str, object]] = {}
     for device_index, state in sorted(states.items()):
-        matrix_runs = {
+        amplitude_runs = {
             int(item.payload["run_sequence"])
             for item in state.velocity_sweep_evidence
-            if item.payload.get("namespace") == "acceptance_matrix"
+            if item.payload.get("namespace") == "fixed_gain_amplitude"
             and "run_sequence" in item.payload
         }
         run_sequences = sorted(
@@ -2218,7 +2218,7 @@ def _velocity_integral_audits(states: dict[int, _DeviceState]) -> list[dict[str,
                     )
                 )
                 and "run_sequence" in item.payload
-                and int(item.payload["run_sequence"]) not in matrix_runs
+                and int(item.payload["run_sequence"]) not in amplitude_runs
             }
         )
         for run_sequence in run_sequences:
@@ -2293,7 +2293,7 @@ def _velocity_integral_audits(states: dict[int, _DeviceState]) -> list[dict[str,
     return audits
 
 
-def _acceptance_matrix_audits(states: dict[int, _DeviceState]) -> list[dict[str, object]]:
+def _fixed_gain_amplitude_audits(states: dict[int, _DeviceState]) -> list[dict[str, object]]:
     audits: list[dict[str, object]] = []
     ascending: dict[tuple[int, int], dict[str, object]] = {}
     for device_index, state in sorted(states.items()):
@@ -2301,24 +2301,24 @@ def _acceptance_matrix_audits(states: dict[int, _DeviceState]) -> list[dict[str,
             {
                 int(item.payload["run_sequence"])
                 for item in state.velocity_sweep_evidence
-                if item.payload.get("record_kind") == "acceptance_matrix_plan"
+                if item.payload.get("record_kind") == "fixed_gain_amplitude_plan"
             }
         )
         for run_sequence in run_sequences:
-            matrix_records = [
+            amplitude_records = [
                 item
                 for item in state.velocity_sweep_evidence
                 if int(item.payload.get("run_sequence", -1)) == run_sequence
-                and item.payload.get("namespace") == "acceptance_matrix"
+                and item.payload.get("namespace") == "fixed_gain_amplitude"
             ]
-            if not matrix_records:
+            if not amplitude_records:
                 continue
-            source_indexes = {item.source_index for item in matrix_records}
+            source_indexes = {item.source_index for item in amplitude_records}
             if len(source_indexes) != 1:
-                raise ValueError("acceptance-matrix evidence changed source index")
+                raise ValueError("fixed-gain-amplitude evidence changed source index")
             source_index = next(iter(source_indexes))
-            start = min(item.timestamp_ticks for item in matrix_records)
-            end = max(item.timestamp_ticks for item in matrix_records)
+            start = min(item.timestamp_ticks for item in amplitude_records)
+            end = max(item.timestamp_ticks for item in amplitude_records)
             evidence = [
                 item
                 for item in state.velocity_sweep_evidence
@@ -2327,7 +2327,7 @@ def _acceptance_matrix_audits(states: dict[int, _DeviceState]) -> list[dict[str,
                 and int(item.payload.get("run_sequence", -1)) == run_sequence
                 and item.payload.get("record_kind") != "outer_safety_timing"
             ]
-            report = audit_acceptance_matrix(
+            report = audit_fixed_gain_amplitude(
                 [(item.raw_payload, item.payload) for item in evidence]
             )
             _attach_rest_selection_audit(report, state, evidence, source_index)
@@ -2353,10 +2353,12 @@ def _acceptance_matrix_audits(states: dict[int, _DeviceState]) -> list[dict[str,
                             and previous_plan.get("selected_p") == plan.get("selected_p")
                             and previous_plan.get("selected_i") == plan.get("selected_i")
                         ):
-                            report["cross_run_comparison"] = compare_matrix_runs(previous, report)
+                            report["cross_run_comparison"] = compare_amplitude_runs(
+                                previous, report
+                            )
                         else:
                             report["cross_run_comparison"] = {
-                                "error": "matrix runs do not share retained authority"
+                                "error": "amplitude runs do not share retained authority"
                             }
             audits.append(report)
     return audits
@@ -2741,7 +2743,7 @@ def analyze_capture(
         velocity_reports=_velocity_capture_groups(states, commissioning_report),
         velocity_sweep_audits=_velocity_sweep_audits(states),
         velocity_integral_audits=_velocity_integral_audits(states),
-        acceptance_matrix_audits=_acceptance_matrix_audits(states),
+        fixed_gain_amplitude_audits=_fixed_gain_amplitude_audits(states),
         outer_safety_timing_audits=_outer_safety_timing_audits(states),
         breakaway_campaign_audits=_breakaway_campaign_audits(states, commissioning_report),
         corexy_plus=corexy_plus,
@@ -3168,23 +3170,23 @@ def format_analysis(
                 matches=str(bool(integral.get("matches_firmware"))).lower(),
             )
         )
-    for matrix in analysis.acceptance_matrix_audits:
-        plan = matrix.get("plan", {})
-        terminal = matrix.get("terminal", {})
-        comparison = matrix.get("cross_run_comparison", {})
+    for amplitude in analysis.fixed_gain_amplitude_audits:
+        plan = amplitude.get("plan", {})
+        terminal = amplitude.get("terminal", {})
+        comparison = amplitude.get("cross_run_comparison", {})
         stage_b_lines.append(
-            "acceptance_matrix dev={device} source={source} run={run} namespace=matrix "
+            "fixed_gain_amplitude dev={device} source={source} run={run} namespace=amplitude "
             "order={order} outcome={outcome} cause={cause} p={p} i={i} "
             "matches_firmware={matches} observed_bound_q={bound}".format(
-                device=matrix.get("device_index", "?"),
-                source=matrix.get("source_index", "?"),
-                run=matrix.get("run_sequence", "?"),
+                device=amplitude.get("device_index", "?"),
+                source=amplitude.get("source_index", "?"),
+                run=amplitude.get("run_sequence", "?"),
                 order=plan.get("order", "?") if isinstance(plan, dict) else "?",
                 outcome=terminal.get("outcome_name", "?") if isinstance(terminal, dict) else "?",
                 cause=terminal.get("cause_name", "?") if isinstance(terminal, dict) else "?",
                 p=plan.get("selected_p", 0) if isinstance(plan, dict) else 0,
                 i=plan.get("selected_i", 0) if isinstance(plan, dict) else 0,
-                matches=str(bool(matrix.get("matches_firmware"))).lower(),
+                matches=str(bool(amplitude.get("matches_firmware"))).lower(),
                 bound=comparison.get("maximum_observed_displacement_q", "unpaired")
                 if isinstance(comparison, dict)
                 else "unpaired",
@@ -3337,8 +3339,8 @@ def velocity_analysis_to_json(analysis: CaptureAnalysis) -> dict[str, object]:
     }
     if analysis.velocity_integral_audits:
         result["integral_responses"] = analysis.velocity_integral_audits
-    if analysis.acceptance_matrix_audits:
-        result["acceptance_matrices"] = analysis.acceptance_matrix_audits
+    if analysis.fixed_gain_amplitude_audits:
+        result["fixed_gain_amplitude_runs"] = analysis.fixed_gain_amplitude_audits
     if analysis.breakaway_campaign_audits:
         result["breakaway_campaigns"] = analysis.breakaway_campaign_audits
     return result

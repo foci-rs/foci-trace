@@ -501,7 +501,7 @@ def test_decodes_schema_nine_slot_transition_allowance() -> None:
     assert frame.payload["maximum_workflow_ms"] == 197_896
 
 
-def test_decodes_acceptance_matrix_plan_fragments() -> None:
+def test_decodes_fixed_gain_amplitude_plan_fragments() -> None:
     core = bytearray([0])
     core.extend(struct.pack("<IHQB", 7, 1, 0x0123_4567_89AB_CDEF, 0))
     core.extend(
@@ -572,14 +572,14 @@ def test_decodes_acceptance_matrix_plan_fragments() -> None:
 
     assert [len(core), len(timing), len(motion)] == [73, 56, 43]
     assert [fragment["fragment"] for fragment in decoded] == [0, 1, 2]
-    assert all(fragment["namespace"] == "acceptance_matrix" for fragment in decoded)
+    assert all(fragment["namespace"] == "fixed_gain_amplitude" for fragment in decoded)
     assert decoded[0]["target_rpm"] == [16, 33, 66, 132, 263]
     assert decoded[0]["acceptance_plan_digest"] == 0xAABB_CCDD_EEFF_0011
     assert decoded[1]["recovery_maximum_slot_us"] == 3_000_000
     assert decoded[2]["requested_velocity_mrev_s"] == 4_383
 
 
-def test_decodes_schema_two_matrix_timing_and_compact_recovery_bounds() -> None:
+def test_decodes_schema_two_amplitude_timing_and_compact_recovery_bounds() -> None:
     timing = bytearray([0])
     timing.extend(struct.pack("<IHQB", 7, 2, 0x0123_4567_89AB_CDEF, 1))
     timing.extend(
@@ -637,7 +637,7 @@ def test_decodes_schema_two_matrix_timing_and_compact_recovery_bounds() -> None:
     ]
 
 
-def _acceptance_direction(
+def _fixed_gain_amplitude_direction(
     *,
     response: tuple[int, int] | None,
     robust: int | None,
@@ -674,11 +674,11 @@ def _acceptance_direction(
     return bytes(payload)
 
 
-def test_decodes_acceptance_matrix_amplitude_with_signed_evidence() -> None:
+def test_decodes_fixed_gain_amplitude_amplitude_with_signed_evidence() -> None:
     payload = bytearray([2])
     payload.extend(struct.pack("<IHQBi", 7, 4, 0x0123_4567_89AB_CDEF, 2, 66))
     payload.extend(
-        _acceptance_direction(
+        _fixed_gain_amplitude_direction(
             response=(700, 900),
             robust=800,
             deficit=(100, 300),
@@ -687,7 +687,7 @@ def test_decodes_acceptance_matrix_amplitude_with_signed_evidence() -> None:
         )
     )
     payload.extend(
-        _acceptance_direction(
+        _fixed_gain_amplitude_direction(
             response=(-900, -700),
             robust=-800,
             deficit=(-300, -100),
@@ -699,7 +699,7 @@ def test_decodes_acceptance_matrix_amplitude_with_signed_evidence() -> None:
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
 
     assert len(payload) == 124
-    assert frame.payload["record_kind"] == "acceptance_matrix_amplitude"
+    assert frame.payload["record_kind"] == "fixed_gain_amplitude_amplitude"
     assert frame.payload["amplitude_index"] == 2
     assert frame.payload["directions"][0]["response_interval_q"] == [700, 900]
     assert frame.payload["directions"][1]["robust_location_q"] == -800
@@ -707,7 +707,7 @@ def test_decodes_acceptance_matrix_amplitude_with_signed_evidence() -> None:
     assert frame.payload["directions"][0]["blocking_levels"] == [1, 2, 3, 4]
 
 
-def test_decodes_acceptance_matrix_terminal_namespace_and_masks() -> None:
+def test_decodes_fixed_gain_amplitude_terminal_namespace_and_masks() -> None:
     payload = bytearray([3])
     payload.extend(
         struct.pack(
@@ -729,7 +729,7 @@ def test_decodes_acceptance_matrix_terminal_namespace_and_masks() -> None:
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
 
     assert len(payload) == 67
-    assert frame.payload["namespace"] == "acceptance_matrix"
+    assert frame.payload["namespace"] == "fixed_gain_amplitude"
     assert frame.payload["outcome_name"] == "Inconclusive"
     assert frame.payload["cause_name"] == "InsufficientSharedFloor"
     assert frame.payload["attempted_masks"] == [0b11111, 0b11110]
@@ -2226,10 +2226,10 @@ def test_decode_commissioning_event_names() -> None:
         (143, "commission_rung_origin_recovery"),
         (144, "commission_outer_safety_timing"),
         (145, "commission_velocity_limit_latch_test"),
-        (146, "commission_acceptance_matrix_plan"),
-        (147, "commission_acceptance_matrix_observation"),
-        (148, "commission_acceptance_matrix_amplitude"),
-        (149, "commission_acceptance_matrix_terminal"),
+        (146, "commission_fixed_gain_amplitude_plan"),
+        (147, "commission_fixed_gain_amplitude_observation"),
+        (148, "commission_fixed_gain_amplitude_amplitude"),
+        (149, "commission_fixed_gain_amplitude_terminal"),
     ),
 )
 def test_decode_velocity_integral_response_event_names(event_id: int, event_name: str) -> None:
@@ -2538,8 +2538,8 @@ def test_new_and_old_stage_b_observation_lengths_both_decode() -> None:
     assert new_frame.payload["predicted_torque_target_abs"] == 500
 
 
-def _matrix_plan_core(order_byte: int, schema_revision: int = 5) -> bytes:
-    """Build one matrix plan core fragment with an explicit packed order byte."""
+def _amplitude_plan_core(order_byte: int, schema_revision: int = 5) -> bytes:
+    """Build one amplitude plan core fragment with an explicit packed order byte."""
     core = bytearray([0])
     core.extend(struct.pack("<IHQB", 7, 1, 0x0123_4567_89AB_CDEF, 0))
     core.extend(
@@ -2581,7 +2581,7 @@ def test_unpacks_the_amplitude_and_slot_order_from_the_packed_order_byte() -> No
         (0x11, 1, 1),
         (0x12, 2, 1),
     ):
-        payload = _matrix_plan_core(order_byte)
+        payload = _amplitude_plan_core(order_byte)
         frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
 
         assert frame.payload["order"] == order_byte, "digest input must stay the raw byte"
@@ -2591,7 +2591,7 @@ def test_unpacks_the_amplitude_and_slot_order_from_the_packed_order_byte() -> No
 
 def test_pre_mirror_captures_report_the_forward_first_slot_order() -> None:
     """Schema 4 and earlier never set the high nibble, so they are forward-first."""
-    payload = _matrix_plan_core(0x02, schema_revision=4)
+    payload = _amplitude_plan_core(0x02, schema_revision=4)
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
 
     assert frame.payload["order"] == 2
@@ -2601,7 +2601,7 @@ def test_pre_mirror_captures_report_the_forward_first_slot_order() -> None:
 
 def test_rejects_an_unusable_packed_order_byte() -> None:
     for order_byte in (0x00, 0x03, 0x21, 0xF1):
-        payload = _matrix_plan_core(order_byte)
+        payload = _amplitude_plan_core(order_byte)
         with pytest.raises(DecodeError):
             decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
 

@@ -585,7 +585,7 @@ def test_schema_seven_plan_digest_hashes_both_memberships_and_both_flags() -> No
 def test_compact_plan_marker_suffix_belongs_to_the_combined_workflow() -> None:
     """`encode_velocity_integral_plan_marker` (`integral_reporting.rs:454-471`)
     appends the presence byte and the four interval endpoints only inside
-    `if plan.combined_workflow || acquisition_kind is Acceptance*`. A breakaway
+    `if plan.combined_workflow || acquisition_kind is FixedGainAmplitude*`. A breakaway
     plan's marker therefore ends after `usable_torque_limit`, with no trailing
     byte at all -- emitting a zero byte there hashed one byte firmware never
     hashed and made every breakaway capture's terminal digest disagree.

@@ -49,11 +49,11 @@ class DeviceSummary:
     velocity_integral_probe_constrained_test_point: bool = False
     velocity_integral_bookend_mask: int | None = None
     velocity_integral_rest_boundary: tuple[int, int] | None = None
-    acceptance_matrix_p: int = 0
-    acceptance_matrix_i: int = 0
-    acceptance_matrix_amplitudes: int = 0
-    acceptance_matrix_outcome: int | None = None
-    acceptance_matrix_cause: int | None = None
+    fixed_gain_amplitude_p: int = 0
+    fixed_gain_amplitude_i: int = 0
+    fixed_gain_amplitude_amplitudes: int = 0
+    fixed_gain_amplitude_outcome: int | None = None
+    fixed_gain_amplitude_cause: int | None = None
     rung_origin_recoveries: int = 0
     contained_recoveries: int = 0
     outer_gap_max_us: int | None = None
@@ -166,14 +166,14 @@ class LiveSummary:
                     int(frame.payload["positive_rung_index"]),
                     int(frame.payload["slot"]),
                 )
-            elif kind == "acceptance_matrix_plan" and int(frame.payload["fragment"]) == 0:
-                device.acceptance_matrix_p = int(frame.payload["selected_p"])
-                device.acceptance_matrix_i = int(frame.payload["selected_i"])
-            elif kind == "acceptance_matrix_amplitude":
-                device.acceptance_matrix_amplitudes += 1
-            elif kind == "acceptance_matrix_terminal":
-                device.acceptance_matrix_outcome = int(frame.payload["outcome"])
-                device.acceptance_matrix_cause = int(frame.payload["cause"])
+            elif kind == "fixed_gain_amplitude_plan" and int(frame.payload["fragment"]) == 0:
+                device.fixed_gain_amplitude_p = int(frame.payload["selected_p"])
+                device.fixed_gain_amplitude_i = int(frame.payload["selected_i"])
+            elif kind == "fixed_gain_amplitude_amplitude":
+                device.fixed_gain_amplitude_amplitudes += 1
+            elif kind == "fixed_gain_amplitude_terminal":
+                device.fixed_gain_amplitude_outcome = int(frame.payload["outcome"])
+                device.fixed_gain_amplitude_cause = int(frame.payload["cause"])
             elif kind == "rung_origin_recovery":
                 device.rung_origin_recoveries += 1
                 if int(frame.payload["outcome"]) >= 2:
@@ -213,10 +213,10 @@ class LiveSummary:
                 "velocity_integral_probe_constrained={integral_probe_constrained} "
                 "velocity_integral_bookends={integral_bookends} "
                 "velocity_integral_rest_boundary={integral_rest_boundary} "
-                "acceptance_matrix_p={matrix_p} acceptance_matrix_i={matrix_i} "
-                "acceptance_matrix_amplitudes={matrix_amplitudes} "
-                "acceptance_matrix_outcome={matrix_outcome} "
-                "acceptance_matrix_cause={matrix_cause} "
+                "fixed_gain_amplitude_p={amplitude_p} fixed_gain_amplitude_i={amplitude_i} "
+                "fixed_gain_amplitude_amplitudes={amplitude_count} "
+                "fixed_gain_amplitude_outcome={amplitude_outcome} "
+                "fixed_gain_amplitude_cause={amplitude_cause} "
                 "recoveries={recoveries} contained_recoveries={contained_recoveries} "
                 "current_records={current_records} current_contacts={current_contacts} "
                 "clip_uncertain={clip_uncertain}".format(
@@ -280,18 +280,18 @@ class LiveSummary:
                         if item.velocity_integral_rest_boundary is None
                         else ":".join(str(value) for value in item.velocity_integral_rest_boundary)
                     ),
-                    matrix_p=item.acceptance_matrix_p,
-                    matrix_i=item.acceptance_matrix_i,
-                    matrix_amplitudes=item.acceptance_matrix_amplitudes,
-                    matrix_outcome=(
+                    amplitude_p=item.fixed_gain_amplitude_p,
+                    amplitude_i=item.fixed_gain_amplitude_i,
+                    amplitude_count=item.fixed_gain_amplitude_amplitudes,
+                    amplitude_outcome=(
                         "none"
-                        if item.acceptance_matrix_outcome is None
-                        else item.acceptance_matrix_outcome
+                        if item.fixed_gain_amplitude_outcome is None
+                        else item.fixed_gain_amplitude_outcome
                     ),
-                    matrix_cause=(
+                    amplitude_cause=(
                         "none"
-                        if item.acceptance_matrix_cause is None
-                        else item.acceptance_matrix_cause
+                        if item.fixed_gain_amplitude_cause is None
+                        else item.fixed_gain_amplitude_cause
                     ),
                     recoveries=item.rung_origin_recoveries,
                     contained_recoveries=item.contained_recoveries,

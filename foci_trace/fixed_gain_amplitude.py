@@ -1,4 +1,4 @@
-"""Bit-exact replay and derived comparison for velocity confidence matrices."""
+"""Bit-exact replay and derived comparison for fixed-gain amplitude validation runs."""
 
 from __future__ import annotations
 
@@ -40,8 +40,8 @@ def robust_rate_location(means: list[int | None]) -> int | None:
     return None
 
 
-def matrix_plan_digest(plan: dict[str, Any]) -> int:
-    """Recompute the immutable matrix-plan digest in firmware field order."""
+def amplitude_plan_digest(plan: dict[str, Any]) -> int:
+    """Recompute the immutable amplitude-plan digest in firmware field order."""
     encoded = bytearray()
     _append(encoded, int(plan["schema_revision"]), 2)
     _append(encoded, int(plan["channel"]), 1)
@@ -106,20 +106,20 @@ def matrix_plan_digest(plan: dict[str, Any]) -> int:
     return _fnv1a64(bytes(encoded))
 
 
-def assemble_matrix_plan(fragments: list[dict[str, Any]]) -> dict[str, Any]:
+def assemble_amplitude_plan(fragments: list[dict[str, Any]]) -> dict[str, Any]:
     """Join the three exact plan fragments and reject identity disagreement."""
     if sorted(int(fragment["fragment"]) for fragment in fragments) != [0, 1, 2]:
-        raise ValueError("matrix plan requires fragments 0, 1, and 2 exactly once")
+        raise ValueError("amplitude plan requires fragments 0, 1, and 2 exactly once")
     ordered = sorted(fragments, key=lambda fragment: int(fragment["fragment"]))
     identity = ("run_sequence", "plan_digest")
     if any(
         any(fragment[name] != ordered[0][name] for name in identity) for fragment in ordered[1:]
     ):
-        raise ValueError("matrix plan fragments disagree on identity")
+        raise ValueError("amplitude plan fragments disagree on identity")
     plan: dict[str, Any] = {}
     for fragment in ordered:
         plan.update(fragment)
-    plan["record_kind"] = "acceptance_matrix_plan"
+    plan["record_kind"] = "fixed_gain_amplitude_plan"
     plan["fragment"] = None
     return plan
 
@@ -135,7 +135,7 @@ def reconstruct_direction(
     for observation in observations:
         index = int(observation["slot"]) // 2
         if index in by_index or not 0 <= index < 4:
-            raise ValueError("matrix direction has duplicate or invalid observation slot")
+            raise ValueError("amplitude direction has duplicate or invalid observation slot")
         by_index[index] = observation
     collected_mask = sum(1 << index for index in by_index)
     classes = [
@@ -209,7 +209,7 @@ def reconstruct_amplitude(
     target_rpm = int(report["target_rpm"])
     expected_target = int(plan["target_rpm"][amplitude_index])
     if target_rpm != expected_target:
-        raise ValueError("matrix amplitude target differs from immutable plan")
+        raise ValueError("amplitude target differs from immutable plan")
     target_rate_q = target_rpm * int(plan["encoder_counts_per_rev"]) * 1_000 // 60
     precision_floor = target_rpm == min(int(value) for value in plan["target_rpm"])
     return {
@@ -289,19 +289,19 @@ def _compare_fields(
             )
 
 
-def audit_acceptance_matrix(
+def audit_fixed_gain_amplitude(
     evidence_records: list[tuple[bytes, dict[str, Any]]],
 ) -> dict[str, Any]:
-    """Replay one matrix run from canonical records and verify its terminal."""
+    """Replay one amplitude run from canonical records and verify its terminal."""
     plans = [
         value
         for _raw, value in evidence_records
-        if value.get("record_kind") == "acceptance_matrix_plan"
+        if value.get("record_kind") == "fixed_gain_amplitude_plan"
     ]
     terminals = [
         value
         for _raw, value in evidence_records
-        if value.get("record_kind") == "acceptance_matrix_terminal"
+        if value.get("record_kind") == "fixed_gain_amplitude_terminal"
     ]
     identities = plans or terminals or [value for _raw, value in evidence_records]
     if len(plans) != 3 or len(terminals) != 1:
@@ -313,13 +313,13 @@ def audit_acceptance_matrix(
             "complete": False,
             "matches_firmware": False,
             "mismatches": [
-                "partial acceptance-matrix capture: three plan fragments and one "
+                "partial fixed-gain-amplitude capture: three plan fragments and one "
                 "terminal are required"
             ],
-            "caveats": ["partial velocity confidence matrix capture"],
+            "caveats": ["partial fixed-gain amplitude validation capture"],
         }
     mismatches: list[str] = []
-    plan = assemble_matrix_plan(plans)
+    plan = assemble_amplitude_plan(plans)
     slot_order = int(plan.get("slot_order", 0))
     terminal = terminals[0]
     expected_duration = (63_041, 66_456) if int(plan["schema_revision"]) >= 3 else (60_541, 66_456)
@@ -327,30 +327,31 @@ def audit_acceptance_matrix(
         int(plan["nominal_workflow_ms"]),
         int(plan["maximum_workflow_ms"]),
     ) != expected_duration:
-        mismatches.append("matrix schema and duration pair differ")
-    recomputed_plan_digest = matrix_plan_digest(plan)
+        mismatches.append("amplitude schema and duration pair differ")
+    recomputed_plan_digest = amplitude_plan_digest(plan)
     if recomputed_plan_digest != int(plan["plan_digest"]):
         mismatches.append(
-            f"matrix plan digest: firmware=0x{int(plan['plan_digest']):016x} "
+            f"amplitude plan digest: firmware=0x{int(plan['plan_digest']):016x} "
             f"offline=0x{recomputed_plan_digest:016x}"
         )
     nonterminal = [
         (raw, value)
         for raw, value in evidence_records
-        if value.get("record_kind") not in ("acceptance_matrix_plan", "acceptance_matrix_terminal")
+        if value.get("record_kind")
+        not in ("fixed_gain_amplitude_plan", "fixed_gain_amplitude_terminal")
     ]
     sequences = [
         int(value["evidence_sequence"]) if "evidence_sequence" in value else None
         for _raw, value in nonterminal
     ]
     if sequences != list(range(1, len(sequences) + 1)):
-        mismatches.append(f"acceptance matrix evidence sequence is not contiguous: {sequences}")
+        mismatches.append(f"fixed-gain amplitude evidence sequence is not contiguous: {sequences}")
     if (
         "evidence_sequence" in terminal
         and int(terminal["evidence_sequence"]) != len(nonterminal) + 1
     ):
         mismatches.append(
-            "acceptance matrix terminal sequence does not follow the final evidence record"
+            "fixed-gain amplitude terminal sequence does not follow the final evidence record"
         )
     mismatches.extend(
         audit_scored_rest_grammar(
@@ -363,7 +364,7 @@ def audit_acceptance_matrix(
             recovery_owners=(8,),
             observation_kind="integral_observation",
             plan_digest=int(plan["plan_digest"]),
-            label="acceptance matrix",
+            label="fixed-gain amplitude",
             stabilized_recovery_rest=True,
             ordinary_rejection_tail=("velocity_primitive_current",),
         )
@@ -373,7 +374,7 @@ def audit_acceptance_matrix(
         digest = _fnv1a64(raw, digest)
     if digest != int(terminal["digest"]):
         mismatches.append(
-            f"matrix terminal digest: firmware=0x{int(terminal['digest']):016x} "
+            f"amplitude terminal digest: firmware=0x{int(terminal['digest']):016x} "
             f"offline=0x{digest:016x}"
         )
     observation_records = [
@@ -382,7 +383,7 @@ def audit_acceptance_matrix(
     amplitude_records = [
         value
         for _raw, value in nonterminal
-        if value.get("record_kind") == "acceptance_matrix_amplitude"
+        if value.get("record_kind") == "fixed_gain_amplitude_amplitude"
     ]
     recovery_records = [
         value for _raw, value in nonterminal if value.get("record_kind") == "rung_origin_recovery"
@@ -392,9 +393,9 @@ def audit_acceptance_matrix(
     ]
     recovery_rest_rungs = [int(record["rung_index"]) for record in recovery_rest_records]
     if len(recovery_rest_rungs) != len(set(recovery_rest_rungs)):
-        mismatches.append("matrix carries duplicate recovery rest diagnostics")
+        mismatches.append("amplitude carries duplicate recovery rest diagnostics")
     if int(plan["schema_revision"]) < 3 and recovery_rest_records:
-        mismatches.append("historical matrix carries recovery-wide rest evidence")
+        mismatches.append("historical amplitude carries recovery-wide rest evidence")
     for record in recovery_rest_records:
         mismatches.extend(
             f"recovery rest rung {record['rung_index']}: {item}"
@@ -407,10 +408,10 @@ def audit_acceptance_matrix(
         previous_offset = 2 if int(plan["schema_revision"]) >= 4 else 1
         previous = nonterminal[index - previous_offset][1] if index >= previous_offset else {}
         if (
-            previous.get("record_kind") != "acceptance_matrix_amplitude"
+            previous.get("record_kind") != "fixed_gain_amplitude_amplitude"
             or int(previous.get("amplitude_index", -1)) != rung_index
         ):
-            mismatches.append("matrix recovery rest lacks its causal amplitude")
+            mismatches.append("amplitude recovery rest lacks its causal amplitude")
         successor = nonterminal[index + 1][1] if index + 1 < len(nonterminal) else None
         if int(record["disposition"]) == 0 and (
             successor is None
@@ -418,11 +419,11 @@ def audit_acceptance_matrix(
             or int(successor.get("rung_index", -1)) != rung_index
             or int(successor.get("outcome", -1)) not in (1, 5)
         ):
-            mismatches.append("confirmed matrix recovery rest lacks its moving recovery")
+            mismatches.append("confirmed amplitude recovery rest lacks its moving recovery")
         if int(record["disposition"]) == 1 and (
             successor is not None or int(terminal["cause"]) != 2
         ):
-            mismatches.append("unconfirmed matrix recovery rest has the wrong successor")
+            mismatches.append("unconfirmed amplitude recovery rest has the wrong successor")
     if int(plan["schema_revision"]) >= 3:
         diagnostic_rungs = set(recovery_rest_rungs)
         for recovery in recovery_records:
@@ -430,7 +431,7 @@ def audit_acceptance_matrix(
                 int(recovery["outcome"]) in (1, 5)
                 and int(recovery["rung_index"]) not in diagnostic_rungs
             ):
-                mismatches.append("moving matrix recovery lacks recovery rest evidence")
+                mismatches.append("moving amplitude recovery lacks recovery rest evidence")
     amplitudes: list[dict[str, Any]] = []
     attempted = [0, 0]
     eligible = [0, 0]
@@ -482,7 +483,7 @@ def audit_acceptance_matrix(
         terminal,
         tuple(expected_masks),
         mismatches,
-        "matrix terminal",
+        "amplitude terminal",
     )
     sufficient = all(mask.bit_count() >= 3 for mask in eligible)
     expected_outcome = 0 if sufficient else 1
@@ -493,7 +494,7 @@ def audit_acceptance_matrix(
             terminal,
             ("outcome", "cause"),
             mismatches,
-            "matrix terminal",
+            "amplitude terminal",
         )
     _compare_fields(
         {
@@ -516,7 +517,7 @@ def audit_acceptance_matrix(
             "qualifier_bits",
         ),
         mismatches,
-        "matrix terminal",
+        "amplitude terminal",
     )
     return {
         "run_sequence": int(plan["run_sequence"]),
@@ -531,7 +532,7 @@ def audit_acceptance_matrix(
         "matches_firmware": not mismatches,
         "mismatches": mismatches,
         "caveats": [
-            "foci-trace matrix replay is a decode-integrity replica, not independent "
+            "foci-trace amplitude replay is a decode-integrity replica, not independent "
             "selection authority"
         ],
     }
@@ -545,7 +546,7 @@ def _closed_interval_relation(previous: list[int], current: list[int]) -> tuple[
     return True, 0
 
 
-def compare_matrix_runs(previous: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+def compare_amplitude_runs(previous: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
     """Compare two fixed plans without converting observed spread into tolerance."""
     comparisons = []
     observed_bound = 0

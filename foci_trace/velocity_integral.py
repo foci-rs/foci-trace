@@ -115,7 +115,7 @@ _U128_MAX = (1 << 128) - 1
 #         as the breakaway range, so the breakaway predicates below admit both;
 #         what differs is the evidence grammar, since every recovery that
 #         completes a scored rest now emits its rest record where the earlier
-#         range emitted one only for acceptance-matrix runs. A grammar change
+#         range emitted one only for fixed-gain-amplitude runs. A grammar change
 #         cannot widen a range -- that is exactly the distinction a range is
 #         supposed to preserve -- so this is a new one, and it is not
 #         contiguous with the breakaway range it continues because the
@@ -227,7 +227,7 @@ def stage_c_stabilized_recovery_rest(schema_revision: int) -> bool:
 
     Firmware picked the schedule per plan until it unified rung-origin recovery
     onto the stabilized one. Before that, `integral_recovery_rest_schedule`
-    returned `Stabilized` for a combined workflow (and for acceptance-matrix
+    returned `Stabilized` for a combined workflow (and for fixed-gain-amplitude
     runs, which never reach this caller) and `ImmediateScored` otherwise, so a
     breakaway or standalone capture carries no rest record at all. From the
     unified-rest revision on, every completed scored rest emits one.
@@ -1054,11 +1054,11 @@ def _compact_plan_marker(plan: dict[str, object], run_sequence: int) -> bytes:
     # combined-workflow suffix, not a schema-8 suffix.
     # `encode_velocity_integral_plan_marker` (`integral_reporting.rs:454-471`)
     # appends the byte only inside
-    # `if plan.combined_workflow || acquisition_kind is Acceptance*`, so a
+    # `if plan.combined_workflow || acquisition_kind is FixedGainAmplitude*`, so a
     # non-combined plan's marker simply ends after `usable_torque_limit`.
     # Emitting a zero byte for a schema-14 breakaway plan hashed one byte
     # firmware never hashed and made every such capture's terminal digest
-    # disagree. Acceptance-matrix plans -- the other arm of that condition,
+    # disagree. Fixed-gain-amplitude plans -- the other arm of that condition,
     # which also hashes `recovery_lower_rate_q` -- never reach this function:
     # `_velocity_integral_audits` (analyze.py) filters their run sequences out
     # before the audit sees them.

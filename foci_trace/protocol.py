@@ -113,10 +113,10 @@ EVENT_COMMISSION_RESTORE_DISPOSITION = 142
 EVENT_COMMISSION_RUNG_ORIGIN_RECOVERY = 143
 EVENT_COMMISSION_OUTER_SAFETY_TIMING = 144
 EVENT_COMMISSION_VELOCITY_LIMIT_LATCH_TEST = 145
-EVENT_COMMISSION_ACCEPTANCE_MATRIX_PLAN = 146
-EVENT_COMMISSION_ACCEPTANCE_MATRIX_OBSERVATION = 147
-EVENT_COMMISSION_ACCEPTANCE_MATRIX_AMPLITUDE = 148
-EVENT_COMMISSION_ACCEPTANCE_MATRIX_TERMINAL = 149
+EVENT_COMMISSION_FIXED_GAIN_AMPLITUDE_PLAN = 146
+EVENT_COMMISSION_FIXED_GAIN_AMPLITUDE_OBSERVATION = 147
+EVENT_COMMISSION_FIXED_GAIN_AMPLITUDE_AMPLITUDE = 148
+EVENT_COMMISSION_FIXED_GAIN_AMPLITUDE_TERMINAL = 149
 EVENT_COMMISSION_REST_SELECTION_DIAGNOSTIC = 151
 EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN = 152
 EVENT_COMMISSION_BREAKAWAY_PROBE_RESULT = 153
@@ -203,10 +203,12 @@ _COMMISSIONING_EVENT_NAMES = {
     EVENT_COMMISSION_RUNG_ORIGIN_RECOVERY: "commission_rung_origin_recovery",
     EVENT_COMMISSION_OUTER_SAFETY_TIMING: "commission_outer_safety_timing",
     EVENT_COMMISSION_VELOCITY_LIMIT_LATCH_TEST: "commission_velocity_limit_latch_test",
-    EVENT_COMMISSION_ACCEPTANCE_MATRIX_PLAN: "commission_acceptance_matrix_plan",
-    EVENT_COMMISSION_ACCEPTANCE_MATRIX_OBSERVATION: "commission_acceptance_matrix_observation",
-    EVENT_COMMISSION_ACCEPTANCE_MATRIX_AMPLITUDE: "commission_acceptance_matrix_amplitude",
-    EVENT_COMMISSION_ACCEPTANCE_MATRIX_TERMINAL: "commission_acceptance_matrix_terminal",
+    EVENT_COMMISSION_FIXED_GAIN_AMPLITUDE_PLAN: "commission_fixed_gain_amplitude_plan",
+    EVENT_COMMISSION_FIXED_GAIN_AMPLITUDE_OBSERVATION: (
+        "commission_fixed_gain_amplitude_observation"
+    ),
+    EVENT_COMMISSION_FIXED_GAIN_AMPLITUDE_AMPLITUDE: "commission_fixed_gain_amplitude_amplitude",
+    EVENT_COMMISSION_FIXED_GAIN_AMPLITUDE_TERMINAL: "commission_fixed_gain_amplitude_terminal",
     EVENT_COMMISSION_REST_SELECTION_DIAGNOSTIC: "commission_rest_selection_diagnostic",
     EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN: "commission_breakaway_probe_plan",
     EVENT_COMMISSION_BREAKAWAY_PROBE_RESULT: "commission_breakaway_probe_result",
@@ -581,18 +583,18 @@ def _take_build_identity(cursor: _EvidenceCursor) -> dict[str, int]:
 def _take_optional_interval(cursor: _EvidenceCursor) -> list[int] | None:
     present = cursor.take("B")
     if present not in (0, 1):
-        raise DecodeError("matrix optional interval marker is invalid")
+        raise DecodeError("amplitude optional interval marker is invalid")
     return [cursor.take("i"), cursor.take("i")] if present else None
 
 
 def _take_optional_i32(cursor: _EvidenceCursor) -> int | None:
     present = cursor.take("B")
     if present not in (0, 1):
-        raise DecodeError("matrix optional value marker is invalid")
+        raise DecodeError("amplitude optional value marker is invalid")
     return cursor.take("i") if present else None
 
 
-def _take_acceptance_direction(cursor: _EvidenceCursor) -> dict[str, Any]:
+def _take_fixed_gain_amplitude_direction(cursor: _EvidenceCursor) -> dict[str, Any]:
     direction = {
         "availability": cursor.take("B"),
         "classification": cursor.take("B"),
@@ -604,12 +606,12 @@ def _take_acceptance_direction(cursor: _EvidenceCursor) -> dict[str, Any]:
         "signed_target_rate_q": cursor.take("i"),
     }
     if direction["availability"] > 6 or direction["classification"] > 3:
-        raise DecodeError("matrix direction taxonomy is invalid")
+        raise DecodeError("amplitude direction taxonomy is invalid")
     if direction["component_count"] > 2:
-        raise DecodeError("matrix direction has too many components")
+        raise DecodeError("amplitude direction has too many components")
     for name in ("collected_mask", "eligible_mask", "included_mask"):
         if direction[name] & ~0xF:
-            raise DecodeError("matrix observation mask exceeds four slots")
+            raise DecodeError("amplitude observation mask exceeds four slots")
     direction["components"] = direction["components"][: direction["component_count"]]
     direction["response_interval_q"] = _take_optional_interval(cursor)
     direction["robust_location_q"] = _take_optional_i32(cursor)
@@ -622,7 +624,7 @@ def _take_acceptance_direction(cursor: _EvidenceCursor) -> dict[str, Any]:
     return direction
 
 
-def _try_decode_acceptance_amplitude(payload: bytes) -> dict[str, Any] | None:
+def _try_decode_fixed_gain_amplitude(payload: bytes) -> dict[str, Any] | None:
     if not 84 <= len(payload) <= 124:
         return None
     try:
@@ -642,14 +644,14 @@ def _try_decode_acceptance_amplitude(payload: bytes) -> dict[str, Any] | None:
         if decoded["amplitude_index"] >= 5 or decoded["target_rpm"] <= 0:
             return None
         decoded["directions"] = [
-            _take_acceptance_direction(cursor),
-            _take_acceptance_direction(cursor),
+            _take_fixed_gain_amplitude_direction(cursor),
+            _take_fixed_gain_amplitude_direction(cursor),
         ]
         cursor.finish()
     except DecodeError:
         return None
-    decoded["namespace"] = "acceptance_matrix"
-    decoded["record_kind"] = "acceptance_matrix_amplitude"
+    decoded["namespace"] = "fixed_gain_amplitude"
+    decoded["record_kind"] = "fixed_gain_amplitude_amplitude"
     return decoded
 
 
@@ -758,7 +760,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 )
             )
         else:
-            raise DecodeError("matrix plan fragment shape is invalid")
+            raise DecodeError("amplitude plan fragment shape is invalid")
         if "order" in decoded:
             # Slot order rides in the high nibble of the amplitude-order byte, so
             # forward-first runs keep the byte they had before it was recorded.
@@ -767,13 +769,13 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             amplitude_order = packed & 0x0F
             slot_order = packed >> 4
             if amplitude_order not in (1, 2):
-                raise DecodeError("matrix plan amplitude order is invalid")
+                raise DecodeError("amplitude plan amplitude order is invalid")
             if slot_order not in (0, 1):
-                raise DecodeError("matrix plan slot order is invalid")
+                raise DecodeError("amplitude plan slot order is invalid")
             decoded["amplitude_order"] = amplitude_order
             decoded["slot_order"] = slot_order
-        decoded["namespace"] = "acceptance_matrix"
-        decoded["record_kind"] = "acceptance_matrix_plan"
+        decoded["namespace"] = "fixed_gain_amplitude"
+        decoded["record_kind"] = "fixed_gain_amplitude_plan"
     elif kind == 0 and len(payload) in (65, 82, 98):
         decoded = _take_fields(
             cursor,
@@ -1022,8 +1024,8 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 decoded["plan_digest_high"] << 32
             )
         decoded["record_kind"] = "plan"
-    elif kind == 2 and (matrix := _try_decode_acceptance_amplitude(payload)) is not None:
-        return matrix
+    elif kind == 2 and (amplitude := _try_decode_fixed_gain_amplitude(payload)) is not None:
+        return amplitude
     elif kind == 2 and len(payload) in (
         *_STAGE_C_OBSERVATION_LEGACY_LENGTHS,
         *_STAGE_C_OBSERVATION_LENGTHS_WITH_DRIFT,
@@ -1226,12 +1228,12 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             2: "RecoveryUnavailable",
             3: "MissingAcceptancePoint",
             4: "AcceptancePointIdentityMismatch",
-            5: "MatrixOrderMismatch",
+            5: "AmplitudeOrderMismatch",
             6: "EvidenceCapacity",
             7: "EvidenceIntegrity",
         }.get(decoded["cause"], "Unknown")
-        decoded["namespace"] = "acceptance_matrix"
-        decoded["record_kind"] = "acceptance_matrix_terminal"
+        decoded["namespace"] = "fixed_gain_amplitude"
+        decoded["record_kind"] = "fixed_gain_amplitude_terminal"
     elif kind == 3 and len(payload) in (70, 71, 83, 84):
         decoded = _take_fields(
             cursor,
