@@ -809,8 +809,8 @@ def _f32(value: float | int) -> float:
 
 FNV1A64_OFFSET = 0xCBF29CE484222325
 FNV1A64_PRIME = 0x100000001B3
-PROPORTIONAL_OUTCOME_COMPLETE_CANDIDATE = 0
-PROPORTIONAL_OUTCOME_COMPLETE = 1
+PROPORTIONAL_OUTCOME_FIRST_RUN_RETAINED = 0
+PROPORTIONAL_OUTCOME_REPEATABILITY_CONFIRMED = 1
 PROPORTIONAL_OUTCOME_INCONCLUSIVE = 2
 PROPORTIONAL_OUTCOME_FAULT = 3
 PROPORTIONAL_CAUSE_NO_DIRECTIONAL_MODEL = 1
@@ -3982,7 +3982,7 @@ def audit_proportional_reproduction_pair(
         mismatches.append("reproduction outcome differs from independent comparison")
     terminal_outcome = int(current["terminal"]["outcome"])
     expected_terminal_outcome = (
-        PROPORTIONAL_OUTCOME_COMPLETE
+        PROPORTIONAL_OUTCOME_REPEATABILITY_CONFIRMED
         if expected_outcome == 1
         else PROPORTIONAL_OUTCOME_INCONCLUSIVE
     )
@@ -4042,7 +4042,7 @@ def replay_proportional_regions(
     ) == (282_923, 298_632)
     combined_response_selected = recovery_rest_present or (
         int(terminal.get("outcome", PROPORTIONAL_OUTCOME_INCONCLUSIVE))
-        == PROPORTIONAL_OUTCOME_COMPLETE
+        == PROPORTIONAL_OUTCOME_REPEATABILITY_CONFIRMED
         and any(
             value["record_kind"] == "directional_region" and int(value["closure"]) == 5
             for _raw, value in evidence_records
@@ -4103,7 +4103,7 @@ def replay_proportional_regions(
             for _raw, value in evidence_records
         )
         or int(terminal.get("outcome", PROPORTIONAL_OUTCOME_INCONCLUSIVE))
-        in (PROPORTIONAL_OUTCOME_COMPLETE_CANDIDATE, PROPORTIONAL_OUTCOME_COMPLETE)
+        in (PROPORTIONAL_OUTCOME_FIRST_RUN_RETAINED, PROPORTIONAL_OUTCOME_REPEATABILITY_CONFIRMED)
         and int(terminal.get("model_direction_mask", 3)) != 3
         else 7
     )
@@ -5095,7 +5095,7 @@ def _audit_proportional_velocity_sweep(
         expected_outcome = (
             PROPORTIONAL_OUTCOME_INCONCLUSIVE
             if selected_unconfirmed
-            else PROPORTIONAL_OUTCOME_COMPLETE
+            else PROPORTIONAL_OUTCOME_REPEATABILITY_CONFIRMED
         )
         expected_cause = PROPORTIONAL_CAUSE_RECOVERY_UNAVAILABLE if selected_unconfirmed else 0
         if int(terminal["outcome"]) != expected_outcome or int(terminal["cause"]) != expected_cause:
@@ -5133,7 +5133,7 @@ def _audit_proportional_velocity_sweep(
         if value["record_kind"] in ("reproduction", "reproduction_v3", "reproduction_v4")
     ]
     if (
-        int(terminal["outcome"]) == PROPORTIONAL_OUTCOME_COMPLETE
+        int(terminal["outcome"]) == PROPORTIONAL_OUTCOME_REPEATABILITY_CONFIRMED
         and not combined_response_selected
         and len(reproduction) != 1
     ):
@@ -5170,7 +5170,7 @@ def _audit_proportional_velocity_sweep(
         if int(current["outcome"]) != expected_reproduction_outcome:
             mismatches.append("reproduction outcome differs from independent comparison")
         expected_terminal = (
-            PROPORTIONAL_OUTCOME_COMPLETE
+            PROPORTIONAL_OUTCOME_REPEATABILITY_CONFIRMED
             if expected_reproduction_outcome == 1
             else PROPORTIONAL_OUTCOME_INCONCLUSIVE
         )
@@ -5206,7 +5206,7 @@ def _audit_proportional_velocity_sweep(
         if pre_reproduction_digest != reported_current_digest:
             mismatches.append("reproduction current digest differs from canonical prefix")
         expected_terminal = (
-            PROPORTIONAL_OUTCOME_COMPLETE
+            PROPORTIONAL_OUTCOME_REPEATABILITY_CONFIRMED
             if projection["outcome"] == "complete"
             else PROPORTIONAL_OUTCOME_INCONCLUSIVE
         )
@@ -5236,7 +5236,7 @@ def _audit_proportional_velocity_sweep(
         if pre_reproduction_digest != reported_current_digest:
             mismatches.append("schema-8 current digest differs from canonical prefix")
         expected_terminal = (
-            PROPORTIONAL_OUTCOME_COMPLETE
+            PROPORTIONAL_OUTCOME_REPEATABILITY_CONFIRMED
             if projection["outcome"] == "complete"
             else PROPORTIONAL_OUTCOME_INCONCLUSIVE
         )
