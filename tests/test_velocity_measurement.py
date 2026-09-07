@@ -479,7 +479,7 @@ def test_excluded_observation_zeros_unavailable_suffix_metrics() -> None:
     assert result["tested_suffixes"] == 0
 
 
-def test_excluded_observation_uses_drift_bound_at_stage_b_schema_fourteen_and_above() -> None:
+def test_excluded_observation_uses_drift_bound_at_proportional_schema_fourteen_and_above() -> None:
     """The same ramp, replayed at/above PROPORTIONAL_DRIFT_BOUND_MIN_SCHEMA_REVISION
     (14), takes the drift bound instead: its bound suffix drifts far more than
     200,000 ppm of its settled rate, so it rejects as ExcessiveDrift
@@ -506,7 +506,7 @@ def test_excluded_observation_uses_drift_bound_at_stage_b_schema_fourteen_and_ab
     assert result["tested_suffixes"] == 0
 
 
-def test_stage_b_schema_thirteen_still_uses_the_legacy_gate() -> None:
+def test_proportional_schema_thirteen_still_uses_the_legacy_gate() -> None:
     """Stage B revision 13 predates the drift bound -- it was live firmware
     until Task 7 bumped COMBINED_PROPORTIONAL_SCHEMA_REVISION to 14 -- even though
     13 is Stage C's post-bump floor. This pins the namespace split: if Stage
@@ -999,7 +999,7 @@ def test_scored_rest_grammar_accepts_an_ordinary_selection_after_its_observation
     assert audit_scored_rest_grammar(records, terminal, **arguments) == []
 
 
-def test_scored_rest_grammar_accepts_stage_c_ordinary_rejection_current_tail() -> None:
+def test_scored_rest_grammar_accepts_integral_ordinary_rejection_current_tail() -> None:
     records = [
         _grammar_observation(2, 3),
         _grammar_selection(owner=3, rung_index=2, slot=3, disposition=2),
@@ -1015,7 +1015,7 @@ def test_scored_rest_grammar_accepts_stage_c_ordinary_rejection_current_tail() -
     assert audit_scored_rest_grammar(records, terminal, **arguments) == []
 
 
-def test_scored_rest_grammar_accepts_stage_b_ordinary_rejection_without_current() -> None:
+def test_scored_rest_grammar_accepts_proportional_ordinary_rejection_without_current() -> None:
     records = [
         _grammar_observation(2, 3),
         _grammar_selection(owner=3, rung_index=2, slot=3, disposition=2),
@@ -1093,7 +1093,7 @@ def test_scored_rest_grammar_rejects_a_stabilized_recovery_missing_event_150() -
     ]
 
 
-def test_scored_rest_grammar_rejects_stage_c_rejection_missing_its_current_record() -> None:
+def test_scored_rest_grammar_rejects_integral_rejection_missing_its_current_record() -> None:
     """The disposition-2 tail is enforced, not merely exempted: a Stage-C
     rejection missing its Current record must be reported, not silently
     accepted the way the pre-fix grammar accepted any rejection."""
@@ -1634,7 +1634,7 @@ def test_sweep_audit_reconstructs_observations_rung_band_and_terminal() -> None:
     assert report["directions"][0]["eligible_rungs"] == 1
 
 
-def test_stage_b_replay_uses_eight_slots_and_four_k_confidence() -> None:
+def test_proportional_replay_uses_eight_slots_and_four_k_confidence() -> None:
     from foci_trace.velocity_measurement import (
         _reconstruct_observation,
         replay_proportional_regions,
@@ -1698,7 +1698,7 @@ def test_stage_b_replay_uses_eight_slots_and_four_k_confidence() -> None:
     assert replay["directional_rungs"][1][0]["operable_count"] == 4
 
 
-def _stage_b_single_rung_evidence(
+def _proportional_single_rung_evidence(
     drift_ratio_ppm: int | None,
 ) -> tuple[list[object], list[tuple[bytes, dict[str, object]]]]:
     """Build one four-slot Stage B stream whose records report a drift ratio or not."""
@@ -1758,7 +1758,7 @@ def _stage_b_single_rung_evidence(
     return raw_observations, evidence
 
 
-def test_stage_b_replay_derives_the_drift_bound_schema_from_the_reported_ratio() -> None:
+def test_proportional_replay_derives_the_drift_bound_schema_from_the_reported_ratio() -> None:
     """A reported drift ratio is the only wire signal that a capture is schema 14.
 
     Stage B's plan record carries no schema revision, so replay derives one
@@ -1772,8 +1772,8 @@ def test_stage_b_replay_derives_the_drift_bound_schema_from_the_reported_ratio()
         replay_proportional_regions,
     )
 
-    reported = replay_proportional_regions(*_stage_b_single_rung_evidence(1_234))
-    absent = replay_proportional_regions(*_stage_b_single_rung_evidence(None))
+    reported = replay_proportional_regions(*_proportional_single_rung_evidence(1_234))
+    absent = replay_proportional_regions(*_proportional_single_rung_evidence(None))
 
     assert reported["schema_revision"] == PROPORTIONAL_DRIFT_BOUND_MIN_SCHEMA_REVISION
     assert absent["schema_revision"] < PROPORTIONAL_DRIFT_BOUND_MIN_SCHEMA_REVISION
@@ -1798,7 +1798,7 @@ def test_drift_excluded_observations_reproduce_as_excluded_not_faulted() -> None
     assert _rung_class(wrong_direction, drift)[0] == 7
 
 
-def test_stage_b_recovery_is_statistically_excluded_at_partial_terminus() -> None:
+def test_proportional_recovery_is_statistically_excluded_at_partial_terminus() -> None:
     from foci_trace.velocity_measurement import (
         _reconstruct_observation,
         replay_proportional_regions,
@@ -1926,7 +1926,7 @@ def test_stage_b_recovery_is_statistically_excluded_at_partial_terminus() -> Non
     assert with_recovery == without_recovery
 
 
-def test_stage_b_recovery_failure_owns_the_inconclusive_cause() -> None:
+def test_proportional_recovery_failure_owns_the_inconclusive_cause() -> None:
     from foci_trace.velocity_measurement import _proportional_inconclusive_cause
 
     assert _proportional_inconclusive_cause(0, recovery_failure=False) == 1
@@ -2108,7 +2108,7 @@ def test_sweep_audit_reports_partial_capture_without_raising(
     assert any(expected_caveat in caveat for caveat in report["caveats"])
 
 
-def test_stage_b_first_fit_reseeds_boundary_and_preserves_counterexample() -> None:
+def test_proportional_first_fit_reseeds_boundary_and_preserves_counterexample() -> None:
     from foci_trace.velocity_measurement import _segment_directional_regions
 
     rungs = [
@@ -2125,7 +2125,7 @@ def test_stage_b_first_fit_reseeds_boundary_and_preserves_counterexample() -> No
     assert regions[0]["boundary_rung"] == 2
 
 
-def test_stage_b_segments_multiple_regions_and_joint_nomination_ties() -> None:
+def test_proportional_segments_multiple_regions_and_joint_nomination_ties() -> None:
     from foci_trace.velocity_measurement import (
         _joint_operable_regions,
         _nominate_joint_region,
@@ -2169,7 +2169,7 @@ def test_stage_b_segments_multiple_regions_and_joint_nomination_ties() -> None:
     assert exact_tie["member_mask"] == 0b0001100
 
 
-def test_stage_b_handoff_prefers_full_then_nearest_and_compares_candidates() -> None:
+def test_proportional_handoff_prefers_full_then_nearest_and_compares_candidates() -> None:
     from foci_trace.velocity_measurement import (
         _compare_proportional_candidates_schema2,
         _select_directional_region,
@@ -2207,7 +2207,7 @@ def test_stage_b_handoff_prefers_full_then_nearest_and_compares_candidates() -> 
     )
 
 
-def test_stage_b_core_projection_accepts_shared_membership_and_renominates() -> None:
+def test_proportional_core_projection_accepts_shared_membership_and_renominates() -> None:
     from foci_trace.velocity_measurement import project_proportional_core_pair
 
     previous = {
@@ -2250,7 +2250,7 @@ def test_stage_b_core_projection_accepts_shared_membership_and_renominates() -> 
     assert projected["firmware_conservative_common"][0] == [112, 115]
 
 
-def test_stage_b_core_projection_reports_all_mismatch_reasons() -> None:
+def test_proportional_core_projection_reports_all_mismatch_reasons() -> None:
     from foci_trace.velocity_measurement import project_proportional_core_pair
 
     previous = {
@@ -2276,7 +2276,7 @@ def test_stage_b_core_projection_reports_all_mismatch_reasons() -> None:
     assert projected["fixed_p"] == 0
 
 
-def test_stage_b_core_projection_preserves_reduced_and_transferred_coverage() -> None:
+def test_proportional_core_projection_preserves_reduced_and_transferred_coverage() -> None:
     from foci_trace.velocity_measurement import project_proportional_core_pair
 
     previous = {
@@ -2377,7 +2377,7 @@ def test_schema8_candidate_terminal_uses_joint_union_membership() -> None:
     ]
 
 
-def test_stage_b_core_projection_derives_exact_core_common_offline() -> None:
+def test_proportional_core_projection_derives_exact_core_common_offline() -> None:
     from foci_trace.velocity_measurement import project_proportional_core_pair
 
     previous = {
@@ -2410,7 +2410,7 @@ def test_stage_b_core_projection_derives_exact_core_common_offline() -> None:
     assert projected["offline_derived"]["provenance"] == "per_rung_cross_run"
 
 
-def test_stage_b_core_projection_does_not_gate_on_empty_conservative_common() -> None:
+def test_proportional_core_projection_does_not_gate_on_empty_conservative_common() -> None:
     from foci_trace.velocity_measurement import project_proportional_core_pair
 
     previous = {
@@ -2443,7 +2443,7 @@ def test_stage_b_core_projection_does_not_gate_on_empty_conservative_common() ->
     assert projected["offline_derived"]["core_restricted_common"] == [[2, 8], [-8, -2]]
 
 
-def test_stage_b_reproduction_v3_group_requires_exact_fragment_order() -> None:
+def test_proportional_reproduction_v3_group_requires_exact_fragment_order() -> None:
     from foci_trace.velocity_measurement import _assemble_proportional_reproduction_v3
 
     header = {
@@ -2506,7 +2506,7 @@ def test_stage_b_reproduction_v3_group_requires_exact_fragment_order() -> None:
         _assemble_proportional_reproduction_v3([records[0], records[2], records[1], *records[3:]])
 
 
-def test_stage_b_reproduction_v4_group_accepts_shared_fragment_names() -> None:
+def test_proportional_reproduction_v4_group_accepts_shared_fragment_names() -> None:
     from foci_trace.velocity_measurement import _assemble_proportional_reproduction
 
     identity = {"run_sequence": 7, "evidence_sequence": 34}
@@ -2562,7 +2562,7 @@ def test_stage_b_reproduction_v4_group_accepts_shared_fragment_names() -> None:
     assert len(assembled["memberships"]) == 3
 
 
-def test_stage_b_causal_order_rejects_reordered_directional_closures() -> None:
+def test_proportional_causal_order_rejects_reordered_directional_closures() -> None:
     from foci_trace.velocity_measurement import _compare_proportional_causal_order
 
     replay = {
@@ -2591,7 +2591,7 @@ def test_stage_b_causal_order_rejects_reordered_directional_closures() -> None:
     assert "causal order" in mismatch
 
 
-def test_stage_b_causal_order_places_recovery_after_each_complete_rung() -> None:
+def test_proportional_causal_order_places_recovery_after_each_complete_rung() -> None:
     from foci_trace.velocity_measurement import _compare_proportional_causal_order
 
     replay = {
@@ -2615,7 +2615,7 @@ def test_stage_b_causal_order_places_recovery_after_each_complete_rung() -> None
     assert "causal order" in _compare_proportional_causal_order(records, replay)
 
 
-def test_stage_b_causal_order_places_selected_rest_before_final_recovery() -> None:
+def test_proportional_causal_order_places_selected_rest_before_final_recovery() -> None:
     from foci_trace.velocity_measurement import _compare_proportional_causal_order
 
     replay = {
@@ -2640,7 +2640,7 @@ def test_stage_b_causal_order_places_selected_rest_before_final_recovery() -> No
     assert "causal order" in _compare_proportional_causal_order(records, replay)
 
 
-def test_stage_b_causal_order_allows_failed_selected_rest_without_recovery() -> None:
+def test_proportional_causal_order_allows_failed_selected_rest_without_recovery() -> None:
     from foci_trace.velocity_measurement import _compare_proportional_causal_order
 
     replay = {
@@ -2662,7 +2662,7 @@ def test_stage_b_causal_order_allows_failed_selected_rest_without_recovery() -> 
     assert _compare_proportional_causal_order(records, replay) == ""
 
 
-def test_stage_b_causal_order_omits_handoff_for_insufficient_run() -> None:
+def test_proportional_causal_order_omits_handoff_for_insufficient_run() -> None:
     from foci_trace.velocity_measurement import _compare_proportional_causal_order
 
     replay = {
@@ -2689,7 +2689,7 @@ def test_stage_b_causal_order_omits_handoff_for_insufficient_run() -> None:
     assert _compare_proportional_causal_order(records, replay) == ""
 
 
-def test_stage_b_partial_current_headroom_closes_active_regions() -> None:
+def test_proportional_partial_current_headroom_closes_active_regions() -> None:
     from foci_trace.velocity_measurement import (
         _joint_operable_regions,
         _segment_directional_regions,
@@ -2720,7 +2720,7 @@ def test_stage_b_partial_current_headroom_closes_active_regions() -> None:
     assert joint_regions[-1]["closure"] == "current_headroom"
 
 
-def test_stage_b_braking_contact_marks_partial_current_headroom_boundary() -> None:
+def test_proportional_braking_contact_marks_partial_current_headroom_boundary() -> None:
     from foci_trace.velocity_measurement import _proportional_terminal_boundary
 
     closure, boundary_rung, partial_rungs = _proportional_terminal_boundary(
@@ -2740,7 +2740,7 @@ def test_stage_b_braking_contact_marks_partial_current_headroom_boundary() -> No
     assert partial_rungs == [21]
 
 
-def test_stage_b_complete_retains_partial_current_headroom_boundary() -> None:
+def test_proportional_complete_retains_partial_current_headroom_boundary() -> None:
     from foci_trace.velocity_measurement import _proportional_terminal_boundary
 
     closure, boundary_rung, partial_rungs = _proportional_terminal_boundary(
@@ -2764,7 +2764,7 @@ def test_stage_b_complete_retains_partial_current_headroom_boundary() -> None:
     assert partial_rungs == [21]
 
 
-def test_stage_b_current_headroom_regions_follow_partial_rung() -> None:
+def test_proportional_current_headroom_regions_follow_partial_rung() -> None:
     from foci_trace.velocity_measurement import _compare_proportional_causal_order
 
     replay = {
@@ -2888,7 +2888,7 @@ def test_schema_six_projection_keeps_complete_boundary_rung_in_all_folds() -> No
     ]
 
 
-def test_stage_b_handoff_sufficiency_is_schema_aware() -> None:
+def test_proportional_handoff_sufficiency_is_schema_aware() -> None:
     from foci_trace.velocity_measurement import _proportional_handoff_sufficient
 
     nomination = {"member_mask": 1}
@@ -2967,7 +2967,7 @@ def test_schema8_terminal_model_mask_uses_reproduced_validity() -> None:
     assert _proportional_model_mask_from_validity([0, 2]) == 0
 
 
-def test_stage_b_reproduction_pair_joins_previous_digest_and_candidate() -> None:
+def test_proportional_reproduction_pair_joins_previous_digest_and_candidate() -> None:
     from foci_trace.velocity_measurement import audit_proportional_reproduction_pair
 
     previous = {
@@ -3067,7 +3067,7 @@ def test_schema2_reproduction_captures_keep_historical_parity() -> None:
         assert historical["terminal"]["outcome"] == 2
 
 
-def test_stage_b_audit_accepts_exact_zero_rung_fault_terminal() -> None:
+def test_proportional_audit_accepts_exact_zero_rung_fault_terminal() -> None:
     from foci_trace.velocity_measurement import FNV1A64_OFFSET, FNV1A64_PRIME, audit_velocity_sweep
 
     plan_raw = b"stage-b-plan"
@@ -3121,7 +3121,7 @@ def test_stage_b_audit_accepts_exact_zero_rung_fault_terminal() -> None:
     assert report["nominated_p"] == 0
 
 
-def _stage_b_recovery_prefix_report(
+def _proportional_recovery_prefix_report(
     *, outcome: int = 3, rung_count: int = 2, recovered_rungs: tuple[int, ...] = (0,)
 ) -> dict[str, object]:
     from foci_trace.velocity_measurement import (
@@ -3294,20 +3294,20 @@ def _stage_b_recovery_prefix_report(
     return audit_velocity_sweep(raw_observations, evidence)
 
 
-def test_stage_b_fault_accepts_one_missing_final_recovery() -> None:
-    report = _stage_b_recovery_prefix_report()
+def test_proportional_fault_accepts_one_missing_final_recovery() -> None:
+    report = _proportional_recovery_prefix_report()
 
     assert not any("recovery rungs" in item for item in report["mismatches"])
 
 
-def test_stage_b_non_fault_rejects_one_missing_final_recovery() -> None:
-    report = _stage_b_recovery_prefix_report(outcome=2)
+def test_proportional_non_fault_rejects_one_missing_final_recovery() -> None:
+    report = _proportional_recovery_prefix_report(outcome=2)
 
     assert any("recovery rungs" in item for item in report["mismatches"])
 
 
-def test_stage_b_fault_rejects_two_missing_recovery_records() -> None:
-    report = _stage_b_recovery_prefix_report(
+def test_proportional_fault_rejects_two_missing_recovery_records() -> None:
+    report = _proportional_recovery_prefix_report(
         rung_count=3,
         recovered_rungs=(0,),
     )
@@ -3315,16 +3315,16 @@ def test_stage_b_fault_rejects_two_missing_recovery_records() -> None:
     assert any("recovery rungs" in item for item in report["mismatches"])
 
 
-def test_stage_b_fault_rejects_missing_intermediate_recovery() -> None:
-    report = _stage_b_recovery_prefix_report(recovered_rungs=(1,))
+def test_proportional_fault_rejects_missing_intermediate_recovery() -> None:
+    report = _proportional_recovery_prefix_report(recovered_rungs=(1,))
 
     assert any("recovery rungs" in item for item in report["mismatches"])
 
 
-def test_stage_b_fault_terminal_evidence_comparison_matches_a_complete_terminal() -> None:
+def test_proportional_fault_terminal_evidence_comparison_matches_a_complete_terminal() -> None:
     """A fault terminal can
     preserve real, nonempty evidence instead of resetting it: dispatch-level
-    fault promotion (`apply_stage_b_terminal`'s `EvidenceIntegrityFault` arm,
+    fault promotion (`apply_proportional_terminal`'s `EvidenceIntegrityFault` arm,
     `commission_dispatch/proportional.rs:248-252`) overwrites only `outcome`/`cause`
     on an already-built terminal, leaving `model_direction_mask`,
     `coverage_mask`, `nominated_p`, `selected_memberships`, and
@@ -3350,8 +3350,8 @@ def test_stage_b_fault_terminal_evidence_comparison_matches_a_complete_terminal(
             or "selected intervals" in item
         )
 
-    complete = _stage_b_recovery_prefix_report(outcome=0, rung_count=10, recovered_rungs=())
-    fault = _stage_b_recovery_prefix_report(outcome=3, rung_count=10, recovered_rungs=())
+    complete = _proportional_recovery_prefix_report(outcome=0, rung_count=10, recovered_rungs=())
+    fault = _proportional_recovery_prefix_report(outcome=3, rung_count=10, recovered_rungs=())
 
     complete_mismatches = evidence_mismatches(complete)
     assert complete_mismatches, "the construction must produce real, nonzero evidence to compare"
@@ -3470,7 +3470,7 @@ def test_corrected_y_capture_projects_combined_p_1024(capture_name: str) -> None
     assert audit["proportional_replay"]["combined_selection_projection"]["selected_p"] == 1_024
 
 
-def test_schema_nine_combined_capture_replays_response_selected_stage_b() -> None:
+def test_schema_nine_combined_capture_replays_response_selected_proportional() -> None:
     from foci_trace.analyze import analyze_capture
 
     capture = (
@@ -5435,7 +5435,7 @@ def test_audit_breakaway_campaign_rejects_a_second_candidate_after_failure() -> 
         audit_breakaway_campaign(ticks)
 
 
-def test_audit_breakaway_campaign_rejects_stage_c_after_unsuccessful_confirmation() -> None:
+def test_audit_breakaway_campaign_rejects_integral_after_unsuccessful_confirmation() -> None:
     builder = _BreakawayCampaignBuilder()
     ticks = [
         builder.probe_plan_tick(),
@@ -5452,7 +5452,7 @@ def test_audit_breakaway_campaign_rejects_stage_c_after_unsuccessful_confirmatio
         audit_breakaway_campaign(ticks)
 
 
-def test_audit_breakaway_campaign_allows_a_confirmed_stage_c_refusal() -> None:
+def test_audit_breakaway_campaign_allows_a_confirmed_integral_refusal() -> None:
     """A confirmed acceptance whose Stage-C plan build was refused is a
     legitimate outcome, not a validator error."""
     builder = _BreakawayCampaignBuilder()
