@@ -34,7 +34,7 @@ def test_summary_tracks_gaps_and_error_maxima() -> None:
     assert "voltage_limited=1" in text
 
 
-def test_summary_tracks_stage_b_regions_nomination_and_terminal() -> None:
+def test_summary_tracks_proportional_regions_nomination_and_terminal() -> None:
     summary = LiveSummary()
     payloads = [
         {"record_kind": "directional_region", "region_kind": 0},

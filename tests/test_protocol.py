@@ -314,7 +314,7 @@ def test_decodes_canonical_velocity_sweep_plan() -> None:
     assert frame.payload["usable_torque_limit"] == 900
 
 
-def test_decodes_stage_b_recovery_plan_geometry() -> None:
+def test_decodes_proportional_recovery_plan_geometry() -> None:
     payload = bytearray([1])
     payload.extend(struct.pack("<IHII", 7, 0, 1, 2))
     payload.extend(
@@ -794,7 +794,7 @@ def test_breakaway_discovery_terminal_reports_the_discovery_stop_rung() -> None:
     assert new["stop_rung_index"] == 17
 
 
-def test_decodes_a_breakaway_stage_c_plan_core_without_a_combined_response() -> None:
+def test_decodes_a_breakaway_integral_plan_core_without_a_combined_response() -> None:
     """A breakaway Stage-C plan has `combined_selected_response: None`, and the
     encoder writes the flag byte only in the `Some` branch -- so the record
     simply ends. Reading a flag unconditionally at schema >= 8 runs off the end
@@ -855,7 +855,7 @@ def test_schema_seventeen_core_record_decodes_i_top_cap() -> None:
 def test_schema_sixteen_core_record_decodes_i_top_cap() -> None:
     # Breakaway plans (schema 16) now also carry the trailing i_top_cap u16
     # -- the rung participates in the live gain search, not only schema 17's
-    # ReproducedStageB/standalone characterization path.
+    # ReproducedProportional/standalone characterization path.
     core = bytearray([0])
     core.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
     core.append(0)
@@ -1641,7 +1641,7 @@ def test_decodes_schema_five_velocity_integral_rest_boundary() -> None:
     assert frame.payload["cleanup_confirmed"] == 1
 
 
-def test_decodes_stage_b_canonical_records_and_plan_identity() -> None:
+def test_decodes_proportional_canonical_records_and_plan_identity() -> None:
     plan_values = (
         7,
         0,
@@ -1837,7 +1837,7 @@ def test_decodes_stage_b_canonical_records_and_plan_identity() -> None:
     assert decoded[6]["current_intervals"][1] == [-17, -13]
 
 
-def test_decodes_compact_stage_b_rung_from_hardware_capture() -> None:
+def test_decodes_compact_proportional_rung_from_hardware_capture() -> None:
     payload = bytes.fromhex("030100000005000001000000000000000000000000000000000001010400000000")
 
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
@@ -1895,7 +1895,7 @@ def test_decodes_schema8_handoff_union_and_selected_component() -> None:
     assert frame.payload["joint_member_mask"] == 0b11100
 
 
-def test_decodes_stage_b_reproduction_schema_headers_and_shared_fragments() -> None:
+def test_decodes_proportional_reproduction_schema_headers_and_shared_fragments() -> None:
     fragments = [
         (
             struct.pack("<BIHBBHHHBH", 10, 7, 33, 1, 0, 1448, 1024, 1448, 0, 3),
@@ -2404,7 +2404,7 @@ def test_still_decodes_pre_rejection_excluded_observations() -> None:
     assert "rejection_present" not in frame.payload
 
 
-def _stage_c_observation_payload(
+def _integral_observation_payload(
     *,
     stationarity_code: int,
     rejection_variant: str | None = None,
@@ -2453,14 +2453,14 @@ def _stage_c_observation_payload(
         (3, "full", 96, 100),
     ],
 )
-def test_new_and_old_stage_c_observation_lengths_both_decode(
+def test_new_and_old_integral_observation_lengths_both_decode(
     stationarity_code: int, rejection_variant: str | None, old_length: int, new_length: int
 ) -> None:
     """A replaced length set would stop decoding every capture taken before the
     drift field existed, including the six exported for that design.
     A rejected length falls through silently rather than raising, so this is the
     only place the regression would show."""
-    old_payload = _stage_c_observation_payload(
+    old_payload = _integral_observation_payload(
         stationarity_code=stationarity_code, rejection_variant=rejection_variant
     )
     assert len(old_payload) == old_length
@@ -2468,7 +2468,7 @@ def test_new_and_old_stage_c_observation_lengths_both_decode(
     assert old_frame.payload["record_kind"] == "integral_observation"
     assert old_frame.payload["drift_ratio_ppm"] is None
 
-    new_payload = _stage_c_observation_payload(
+    new_payload = _integral_observation_payload(
         stationarity_code=stationarity_code,
         rejection_variant=rejection_variant,
         drift_ratio_ppm=38_503,
@@ -2479,16 +2479,16 @@ def test_new_and_old_stage_c_observation_lengths_both_decode(
     assert new_frame.payload["drift_ratio_ppm"] == 38_503
 
 
-def test_stage_c_drift_ratio_decodes_before_stationarity_encoding() -> None:
+def test_integral_drift_ratio_decodes_before_stationarity_encoding() -> None:
     """Length acceptance alone would pass while reading the four bytes from the
     wrong place. Assert the decoded value sits between predicted_torque_target_abs
     and stationarity_code, for both an accepted and an excluded observation."""
-    accepted = _stage_c_observation_payload(stationarity_code=0, drift_ratio_ppm=38_503)
+    accepted = _integral_observation_payload(stationarity_code=0, drift_ratio_ppm=38_503)
     accepted_frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, accepted) + accepted)
     assert accepted_frame.payload["drift_ratio_ppm"] == 38_503
     assert accepted_frame.payload["stationarity_code"] == 0
 
-    excluded = _stage_c_observation_payload(
+    excluded = _integral_observation_payload(
         stationarity_code=6, rejection_variant="absent", drift_ratio_ppm=412_009
     )
     excluded_frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, excluded) + excluded)
@@ -2496,7 +2496,7 @@ def test_stage_c_drift_ratio_decodes_before_stationarity_encoding() -> None:
     assert excluded_frame.payload["stationarity_code"] == 6
 
 
-def _stage_b_observation_payload(*, drift_ratio_ppm: int | None) -> bytes:
+def _proportional_observation_payload(*, drift_ratio_ppm: int | None) -> bytes:
     """Build a Stage-B ("observation") record byte-for-byte, mirroring
     `encode_observation` in sweep_reporting.rs. Unlike Stage C this record has
     no variable-length tail: the drift ratio, when present, is the last four
@@ -2520,17 +2520,17 @@ def _stage_b_observation_payload(*, drift_ratio_ppm: int | None) -> bytes:
     return bytes(payload)
 
 
-def test_new_and_old_stage_b_observation_lengths_both_decode() -> None:
+def test_new_and_old_proportional_observation_lengths_both_decode() -> None:
     """Stage B has no rejection diagnostic block at all, so extending only the
     Stage C length set would leave every Stage B capture undecoded for the new
     field while claiming the length-set change was complete."""
-    old_payload = _stage_b_observation_payload(drift_ratio_ppm=None)
+    old_payload = _proportional_observation_payload(drift_ratio_ppm=None)
     assert len(old_payload) == 104
     old_frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, old_payload) + old_payload)
     assert old_frame.payload["record_kind"] == "observation"
     assert old_frame.payload["drift_ratio_ppm"] is None
 
-    new_payload = _stage_b_observation_payload(drift_ratio_ppm=14_220)
+    new_payload = _proportional_observation_payload(drift_ratio_ppm=14_220)
     assert len(new_payload) == 108
     new_frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, new_payload) + new_payload)
     assert new_frame.payload["record_kind"] == "observation"

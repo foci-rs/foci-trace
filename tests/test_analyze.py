@@ -2344,7 +2344,7 @@ def test_capture_integrates_canonical_velocity_sweep_audit() -> None:
     ]
 
 
-def test_retained_foc_182_captures_replay_expected_stage_b_regions() -> None:
+def test_retained_foc_182_captures_replay_expected_proportional_regions() -> None:
     capture_dir = (
         Path(__file__).resolve().parents[4]
         / "docs/artifacts/trace-captures/2026-07-17-foc-182-characterization"
@@ -2784,7 +2784,7 @@ def test_recovery_records_route_to_their_owning_stage(monkeypatch) -> None:
     ]
 
 
-def test_amplitude_records_bypass_stage_b_and_stage_c_replay(monkeypatch) -> None:
+def test_amplitude_records_bypass_proportional_and_integral_replay(monkeypatch) -> None:
     from foci_trace import analyze
 
     state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
@@ -2845,7 +2845,7 @@ def test_amplitude_records_bypass_stage_b_and_stage_c_replay(monkeypatch) -> Non
     assert called == {"proportional": False, "integral": False, "amplitude": True}
 
 
-def test_stage_b_schema_ten_is_bound_by_its_companion_stage_c_plan(monkeypatch) -> None:
+def test_proportional_schema_ten_is_bound_by_its_companion_integral_plan(monkeypatch) -> None:
     from foci_trace import analyze
 
     state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
@@ -2876,7 +2876,7 @@ def test_stage_b_schema_ten_is_bound_by_its_companion_stage_c_plan(monkeypatch) 
     assert audit["proportional_replay"]["schema_revision"] == 10
 
 
-def test_selected_recovery_rest_binds_stage_b_schema_eleven(monkeypatch) -> None:
+def test_selected_recovery_rest_binds_proportional_schema_eleven(monkeypatch) -> None:
     from foci_trace import analyze
 
     state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
@@ -2916,7 +2916,7 @@ def test_selected_recovery_rest_binds_stage_b_schema_eleven(monkeypatch) -> None
     assert audit["matches_firmware"] is True
 
 
-def test_recovery_wide_stage_c_plan_binds_stage_b_schema_twelve(monkeypatch) -> None:
+def test_recovery_wide_integral_plan_binds_proportional_schema_twelve(monkeypatch) -> None:
     from foci_trace import analyze
 
     state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
@@ -3020,7 +3020,7 @@ def test_rest_selection_audit_keys_the_walk_on_build_features(monkeypatch) -> No
     assert report["rest_selection_verified_count"] == 1
 
 
-def test_stage_b_rest_audit_falls_back_to_historical_grammar() -> None:
+def test_proportional_rest_audit_falls_back_to_historical_grammar() -> None:
     """A Stage B trace plan carries no rule-contract marker: protocol.py decodes
     neither build_features nor a schema_revision for the kind-1 Stage B plan. So
     the scored-rest audit cannot resolve the walk and uses the historical
