@@ -793,26 +793,91 @@ def test_motion_summary_can_include_phase_split() -> None:
 
     segment = reports[0].motion_segments[0]
     assert [phase.name for phase in segment.phase_reports] == [
-        "entry_0_50ms",
-        "cruise_mid",
-        "exit_last50ms",
+        "accel",
+        "cruise",
+        "decel",
         "post_0_500ms",
     ]
     assert segment.phase_reports[0].critical_samples == 2
     assert segment.phase_reports[1].critical_samples == 2
     assert segment.phase_reports[2].critical_samples == 2
     assert segment.phase_reports[3].critical_samples == 2
+    assert segment.phase_reports[0].kinematic_fallback is True
+    assert segment.phase_reports[1].kinematic_fallback is True
+    assert segment.phase_reports[2].kinematic_fallback is True
+    assert segment.phase_reports[3].kinematic_fallback is False
 
     default_text = format_summary(reports)
-    assert "phase entry_0_50ms" not in default_text
+    assert "phase accel" not in default_text
 
     phase_text = format_summary(reports, include_phase_split=True)
-    assert "phase entry_0_50ms samples=2" in phase_text
-    assert "phase cruise_mid samples=2" in phase_text
-    assert "phase exit_last50ms samples=2" in phase_text
+    assert "phase accel samples=2" in phase_text
+    assert "phase cruise samples=2" in phase_text
+    assert "phase decel samples=2" in phase_text
     assert "phase post_0_500ms samples=2" in phase_text
     assert "actual/target=" in phase_text
     assert "uq/limit=" in phase_text
+
+
+def test_phase_split_follows_kinematics_not_a_fixed_window() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+
+    clock = 84_000_000
+    profile = [
+        (0, 0),
+        (5, 50),
+        (10, 150),
+        (15, 300),
+        (20, 500),
+        (25, 700),
+        (30, 900),
+        (35, 1100),
+        (40, 1300),
+        (45, 1500),
+        (50, 1700),
+        (55, 1900),
+        (60, 2100),
+        (65, 2300),
+        (70, 2500),
+        (75, 2650),
+        (80, 2750),
+        (85, 2800),
+        (200, 2800),
+        (450, 2800),
+    ]
+    for seq, (time_ms, step) in enumerate(profile, start=1):
+        timestamp = clock * time_ms // 1000
+        payload = _critical_motion_payload(step, step, torque_actual=0, uq_limited=0)
+        writer.write_firmware_frame(
+            0,
+            timestamp,
+            _header(FRAME_TYPE_CRITICAL, payload, seq, timestamp, 1, 0) + payload,
+        )
+
+    reports = summarize_capture(
+        io.BytesIO(output.getvalue()),
+        steady_after_s=0,
+        motion_gap_s=0.1,
+        motion_min_steps=1000,
+    )
+
+    segment = reports[0].motion_segments[0]
+    assert [phase.name for phase in segment.phase_reports] == [
+        "accel",
+        "cruise",
+        "decel",
+        "post_0_500ms",
+    ]
+    accel, cruise, decel, post = segment.phase_reports
+    assert accel.critical_samples == 3
+    assert cruise.critical_samples == 11
+    assert decel.critical_samples == 4
+    assert post.critical_samples == 2
+    assert accel.kinematic_fallback is False
+    assert cruise.kinematic_fallback is False
+    assert decel.kinematic_fallback is False
 
 
 def test_phase_summary_reports_velocity_loop_tracking() -> None:
@@ -851,7 +916,8 @@ def test_phase_summary_reports_velocity_loop_tracking() -> None:
     )
 
     phase = reports[0].motion_segments[0].phase_reports[0]
-    assert phase.name == "entry_0_50ms"
+    assert phase.name == "accel"
+    assert phase.kinematic_fallback is True
     assert phase.velocity_actual_range == (-90, 80)
     assert phase.velocity_effective_target_range == (-100, 100)
     assert round(phase.velocity_error_rms, 3) == 13.528
@@ -1462,7 +1528,7 @@ def test_feedforward_audit_uses_separate_current_path_frames() -> None:
     )
     text = format_summary(reports, include_phase_split=True, include_feedforward_audit=True)
 
-    assert "phase entry_0_50ms" in text
+    assert "phase accel" in text
     assert "iq/torque=2.00" in text
 
 

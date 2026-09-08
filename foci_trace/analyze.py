@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import itertools
 import json
 import math
 import struct
@@ -79,6 +80,8 @@ CURRENT_PATH_GAP_SUSPECT_S = 0.050
 PHASE_EDGE_WINDOW_S = 0.050
 PHASE_POST_WINDOW_S = 0.500
 PHASE_TARGET_MIN_ABS = 100
+PHASE_CRUISE_PLATEAU_FRACTION = 0.90
+PHASE_MIN_EDGE_SAMPLES = 3
 DEFAULT_DECOUPLING_F_PWM_HZ = 25_000.0
 DEFAULT_DECOUPLING_POLE_PAIRS = 50
 DEFAULT_DECOUPLING_POSITION_UNITS_PER_REV = 65_536
@@ -269,6 +272,7 @@ class MotionPhaseReport:
     phase_advance: PhaseAdvanceReport | None = None
     decoupling: DecouplingPhaseReport | None = None
     post_discriminator: str | None = None
+    kinematic_fallback: bool = False
 
 
 @dataclass
@@ -1441,6 +1445,71 @@ def _decoupling_phase_report(
     )
 
 
+def _segment_interval_speeds(
+    segment_samples: list[_CriticalObservation],
+) -> list[tuple[int, int, float]]:
+    speeds: list[tuple[int, int, float]] = []
+    for previous, current in itertools.pairwise(segment_samples):
+        dt = current.timestamp_ticks - previous.timestamp_ticks
+        if dt <= 0:
+            continue
+        speed = abs(current.step_position - previous.step_position) / dt
+        speeds.append((previous.timestamp_ticks, current.timestamp_ticks, speed))
+    return speeds
+
+
+def _longest_plateau_run(
+    interval_speeds: list[tuple[int, int, float]], threshold: float
+) -> tuple[int, int] | None:
+    longest_run: tuple[int, int] | None = None
+    longest_run_length = 0
+    run_start_tick: int | None = None
+    run_length = 0
+    run_end_tick = 0
+    for interval_start, interval_end, speed in interval_speeds:
+        if speed >= threshold:
+            if run_start_tick is None:
+                run_start_tick = interval_start
+            run_length += 1
+            run_end_tick = interval_end
+            continue
+        if run_length > longest_run_length:
+            assert run_start_tick is not None
+            longest_run = (run_start_tick, run_end_tick)
+            longest_run_length = run_length
+        run_start_tick = None
+        run_length = 0
+    if run_length > longest_run_length:
+        assert run_start_tick is not None
+        longest_run = (run_start_tick, run_end_tick)
+    return longest_run
+
+
+def _kinematic_phase_bounds(
+    segment_samples: list[_CriticalObservation],
+    start_tick: int,
+    end_tick: int,
+) -> tuple[int, int, bool]:
+    interval_speeds = _segment_interval_speeds(segment_samples)
+    peak_speed = max((speed for _, _, speed in interval_speeds), default=0.0)
+    if peak_speed <= 0:
+        return start_tick, end_tick, True
+
+    cruise_run = _longest_plateau_run(interval_speeds, peak_speed * PHASE_CRUISE_PLATEAU_FRACTION)
+    if cruise_run is None:
+        return start_tick, end_tick, True
+
+    cruise_start_tick, cruise_end_tick = cruise_run
+    accel_samples = sum(
+        1 for sample in segment_samples if sample.timestamp_ticks < cruise_start_tick
+    )
+    decel_samples = sum(
+        1 for sample in segment_samples if sample.timestamp_ticks >= cruise_end_tick
+    )
+    degraded = accel_samples < PHASE_MIN_EDGE_SAMPLES or decel_samples < PHASE_MIN_EDGE_SAMPLES
+    return cruise_start_tick, cruise_end_tick, degraded
+
+
 def _motion_phase_reports(
     observations: list[_CriticalObservation],
     current_paths: list[_CurrentPathObservation],
@@ -1460,30 +1529,39 @@ def _motion_phase_reports(
     end_tick = segment_samples[-1].timestamp_ticks
     edge_ticks = int(PHASE_EDGE_WINDOW_S * clock_hz)
     post_ticks = int(PHASE_POST_WINDOW_S * clock_hz)
+    cruise_start_tick, cruise_end_tick, degraded = _kinematic_phase_bounds(
+        segment_samples, start_tick, end_tick
+    )
+    if degraded:
+        cruise_start_tick = min(end_tick, start_tick + edge_ticks)
+        cruise_end_tick = max(start_tick, end_tick - edge_ticks)
     split_specs = [
         (
-            "entry_0_50ms",
+            "accel",
             segment_samples,
             start_tick,
-            min(end_tick, start_tick + edge_ticks),
+            cruise_start_tick,
             None,
             False,
+            degraded,
         ),
         (
-            "cruise_mid",
+            "cruise",
             segment_samples,
-            min(end_tick, start_tick + edge_ticks),
-            max(start_tick, end_tick - edge_ticks),
+            cruise_start_tick,
+            cruise_end_tick,
             None,
             False,
+            degraded,
         ),
         (
-            "exit_last50ms",
+            "decel",
             segment_samples,
-            max(start_tick, end_tick - edge_ticks),
+            cruise_end_tick,
             end_tick,
             None,
             True,
+            degraded,
         ),
     ]
     post_end_tick = end_tick + post_ticks
@@ -1497,11 +1575,12 @@ def _motion_phase_reports(
             post_end_tick,
             segment_samples[-1].step_position,
             True,
+            False,
         )
     )
 
     reports: list[MotionPhaseReport] = []
-    for name, source_samples, start, end, command_position, include_end in split_specs:
+    for name, source_samples, start, end, command_position, include_end, fallback in split_specs:
         if end < start:
             continue
         if include_end:
@@ -1686,6 +1765,7 @@ def _motion_phase_reports(
                 phase_advance=phase_advance,
                 decoupling=decoupling,
                 post_discriminator=post_discriminator,
+                kinematic_fallback=fallback,
             )
         )
     return reports
