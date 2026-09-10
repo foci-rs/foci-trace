@@ -3,8 +3,18 @@ use nusb::transfer::{Bulk, Direction, In};
 use nusb::{DeviceInfo, Interface, MaybeFuture};
 use thiserror::Error;
 
-pub const TRACE_PRODUCT: &str = "FOCI OpenFFBoard (trace)";
+pub const TRACE_VENDOR_ID: u16 = 0x1d50;
+pub const TRACE_PRODUCT_ID: u16 = 0x614e;
 pub const TRACE_INTERFACE_CLASS: u8 = 0xff;
+const TRACE_PRODUCT_PREFIX: &str = "FOCI ";
+const TRACE_PRODUCT_SUFFIX: &str = " (trace)";
+
+fn is_trace_product(vendor_id: u16, product_id: u16, product: &str) -> bool {
+    vendor_id == TRACE_VENDOR_ID
+        && product_id == TRACE_PRODUCT_ID
+        && product.starts_with(TRACE_PRODUCT_PREFIX)
+        && product.ends_with(TRACE_PRODUCT_SUFFIX)
+}
 
 #[derive(Debug, Error)]
 pub enum UsbTraceError {
@@ -69,7 +79,7 @@ fn open_if_trace_device(
     serial_filter: &[String],
 ) -> Result<Option<OpenTraceDevice>, UsbTraceError> {
     let product = device.product_string().unwrap_or_default().to_string();
-    if product != TRACE_PRODUCT {
+    if !is_trace_product(device.vendor_id(), device.product_id(), &product) {
         return Ok(None);
     }
 
@@ -116,4 +126,54 @@ fn find_trace_endpoint(interface: &Interface, path: &str) -> Result<(u8, usize),
 
 fn trace_device_path(device: &DeviceInfo) -> String {
     format!("{}-{}", device.bus_id(), device.device_address())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_openffboard_trace_product() {
+        assert!(is_trace_product(
+            TRACE_VENDOR_ID,
+            TRACE_PRODUCT_ID,
+            "FOCI OpenFFBoard (trace)"
+        ));
+    }
+
+    #[test]
+    fn accepts_ouroboros_trace_product() {
+        assert!(is_trace_product(
+            TRACE_VENDOR_ID,
+            TRACE_PRODUCT_ID,
+            "FOCI Ouroboros (trace)"
+        ));
+    }
+
+    #[test]
+    fn rejects_non_trace_product() {
+        assert!(!is_trace_product(
+            TRACE_VENDOR_ID,
+            TRACE_PRODUCT_ID,
+            "FOCI Ouroboros"
+        ));
+    }
+
+    #[test]
+    fn rejects_mismatched_vendor_id() {
+        assert!(!is_trace_product(
+            0x0000,
+            TRACE_PRODUCT_ID,
+            "FOCI Ouroboros (trace)"
+        ));
+    }
+
+    #[test]
+    fn rejects_mismatched_product_id() {
+        assert!(!is_trace_product(
+            TRACE_VENDOR_ID,
+            0x0000,
+            "FOCI Ouroboros (trace)"
+        ));
+    }
 }
