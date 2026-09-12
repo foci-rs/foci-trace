@@ -2206,10 +2206,10 @@ def _breakaway_terminal_cause_is_valid(cause: object, protocol_version: int) -> 
 
 # `CommissionError::status_code()` values reachable from a breakaway terminal.
 # Deliberately a subset, not a copy of the host's full table: klipper-foci's
-# `COMMISSION_ERROR_NAMES` is authoritative and duplicating all of it here would
+# `COMMISSION_REASON_NAMES` is authoritative and duplicating all of it here would
 # drift. An unlisted code decodes with `error_code` set and `error_code_name`
 # `None`, so nothing is lost.
-COMMISSION_ERROR_NAMES = {
+COMMISSION_REASON_NAMES = {
     3: "spi",
     11: "velocity_validation_failed",
     17: "safety_envelope_violation",
@@ -2669,7 +2669,7 @@ def decode_breakaway_record(
         # Present from protocol 17. Absent records report `None` rather than 0,
         # so "no error" and "this capture predates the field" stay distinct.
         decoded["error_code"] = cursor.take("B") if len(payload) >= 29 else None
-        decoded["error_code_name"] = COMMISSION_ERROR_NAMES.get(decoded["error_code"])
+        decoded["error_code_name"] = COMMISSION_REASON_NAMES.get(decoded["error_code"])
         # Present from protocol 21. Absent records report `None` rather than 0,
         # so "stopped at rung zero" and "this capture predates the field"
         # stay distinct.
@@ -2809,7 +2809,7 @@ def decode_breakaway_record(
         # Present from protocol 19. Absent records report `None` rather than 0,
         # so "no error" and "this capture predates the field" stay distinct.
         decoded["error_code"] = cursor.take("B") if len(payload) == 19 else None
-        decoded["error_code_name"] = COMMISSION_ERROR_NAMES.get(decoded["error_code"])
+        decoded["error_code_name"] = COMMISSION_REASON_NAMES.get(decoded["error_code"])
         decoded["record_kind"] = "breakaway_campaign_terminal"
     elif tag == BREAKAWAY_TAG_PROBE_DECISION and protocol_version >= 14 and len(payload) == 18:
         decoded = _take_fields(
