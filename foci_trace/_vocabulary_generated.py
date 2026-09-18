@@ -16,6 +16,7 @@ PHASE_NAMES: dict[int, str] = {
     16: "EncoderAlign",
     17: "ClosedLoopActivation",
     26: "GainFloorMeasurement",
+    27: "PositionTune",
 }
 
 BREAKAWAY_PHASE_NAMES: dict[int, str] = {
