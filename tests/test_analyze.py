@@ -36,8 +36,15 @@ from foci_trace.protocol import (
     FRAME_TYPE_VELOCITY_OBSERVATION,
     FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
     PROTOCOL_VERSION,
+    SOURCE_KIND_BOARD,
     SUBSYSTEM_COMMISSIONING,
 )
+
+# FOCI-source status frames never populate dropped_event_log_count on the
+# firmware side; only board/USB carry the real counter. Not exported from
+# protocol.py (see SOURCE_KIND_BOARD/SOURCE_KIND_USB there) -- used here only
+# to construct an untrustworthy status observation for the regression tests.
+_SOURCE_KIND_FOCI = 1
 
 _BREAKAWAY_PROBE_CONTEXT = {
     "workflow_digest": 0xA1B2_C3D4_E5F6_0718,
@@ -3842,9 +3849,11 @@ def _pb(tick: int, channel: int, old_class: int, new_class: int):
     )
 
 
-def _so(tick: int, count: int, channel: int = 1):
+def _so(tick: int, count: int, channel: int = 1, source_kind: int = SOURCE_KIND_BOARD):
     return _StatusObservation(
-        timestamp_ticks=tick, source_key=(1, channel), dropped_event_log_count=count
+        timestamp_ticks=tick,
+        source_key=(source_kind, channel),
+        dropped_event_log_count=count,
     )
 
 
@@ -3998,4 +4007,44 @@ def test_marker_based_bounds_none_on_single_no_op_marker() -> None:
 def test_marker_based_bounds_none_on_no_op_marker_within_a_chain() -> None:
     observations = [_pb(300, 0, 0, 1), _pb(500, 0, 1, 1), _pb(700, 0, 1, 2)]
     status = [_so(0, 0), _so(1000, 0)]
+    assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
+
+
+def test_marker_based_bounds_ignores_zero_valued_foci_source_confirming_frame() -> None:
+    # A FOCI-source status frame (source_kind 1) never carries a real
+    # dropped_event_log_count -- the firmware builds it with
+    # ..StatusSample::default(), so it always reads 0 regardless of the
+    # actual drop count. A same-time board-source frame shows the real
+    # counter incremented. The FOCI-source zero must not be picked as the
+    # confirming observation and must not mask the real board-source drop.
+    observations = [_pb(300, 0, 0, 1), _pb(700, 0, 1, 2)]
+    status = [
+        _so(0, 0),
+        _so(1000, 0, source_kind=_SOURCE_KIND_FOCI),
+        _so(1000, 1),  # board-source: the real counter actually incremented
+    ]
+    assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
+
+
+def test_marker_based_bounds_skips_foci_source_baseline_for_earlier_board_baseline() -> None:
+    # A FOCI-source status frame closer to the window start must not be
+    # chosen as the baseline over an earlier, authoritative board-source
+    # frame -- both report 0 here, so the outcome only differs if the
+    # filter is applied; this pins that the filtered board-source frame is
+    # the one actually used.
+    observations = [_pb(300, 0, 0, 1), _pb(700, 0, 1, 2)]
+    status = [
+        _so(0, 0),
+        _so(50, 0, source_kind=_SOURCE_KIND_FOCI),
+        _so(1000, 0),
+    ]
+    assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) == (300, 700)
+
+
+def test_marker_based_bounds_none_when_only_foci_source_baseline_available() -> None:
+    # No board/USB status frame precedes the window at all -- only a
+    # FOCI-source frame does. Must fail closed (no baseline) rather than
+    # fall back to using the untrustworthy FOCI-source frame as a baseline.
+    observations = [_pb(300, 0, 0, 1), _pb(700, 0, 1, 2)]
+    status = [_so(0, 0, source_kind=_SOURCE_KIND_FOCI), _so(1000, 0)]
     assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None

@@ -81,6 +81,12 @@ FRAME_TYPE_PHASE_ADVANCE = 7
 FRAME_TYPE_VELOCITY_OBSERVATION = 8
 FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE = 9
 
+# FOCI and Klipper status samples never populate dropped_event_log_count
+# (firmware builds them with ..StatusSample::default()); only board and USB
+# carry the real counter, so only those two are exposed here.
+SOURCE_KIND_BOARD = 0
+SOURCE_KIND_USB = 2
+
 FLAG_DROP_GAP_BEFORE_THIS_FRAME = 1 << 0
 
 VELOCITY_OBSERVATION_FLAG_PID_VELOCITY_ACTUAL_VALID = 1 << 1

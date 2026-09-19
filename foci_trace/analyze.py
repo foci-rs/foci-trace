@@ -46,6 +46,8 @@ from .protocol import (
     FRAME_TYPE_VELOCITY_OBSERVATION,
     FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
     PROTOCOL_VERSION,
+    SOURCE_KIND_BOARD,
+    SOURCE_KIND_USB,
     VELOCITY_OBSERVATION_FLAG_PID_VELOCITY_ACTUAL_VALID,
     VELOCITY_OBSERVATION_FLAG_PPTM_ACTUAL_VALID,
     DecodeError,
@@ -1554,10 +1556,19 @@ def _marker_based_phase_bounds(
         if previous.new_class != current.old_class:
             return None
 
+    # FOCI- and Klipper-source status frames never populate
+    # dropped_event_log_count on the firmware side (built with
+    # ..StatusSample::default()), so they always read 0 regardless of the
+    # actual drop count. Only board and USB sources carry the real counter.
+    authoritative_status = [
+        status
+        for status in status_observations
+        if status.source_key[0] in (SOURCE_KIND_BOARD, SOURCE_KIND_USB)
+    ]
     baseline = next(
         (
             status
-            for status in sorted(status_observations, key=lambda s: -s.timestamp_ticks)
+            for status in sorted(authoritative_status, key=lambda s: -s.timestamp_ticks)
             if status.timestamp_ticks <= start_tick
         ),
         None,
@@ -1571,7 +1582,7 @@ def _marker_based_phase_bounds(
     confirming = next(
         (
             status
-            for status in sorted(status_observations, key=lambda s: s.timestamp_ticks)
+            for status in sorted(authoritative_status, key=lambda s: s.timestamp_ticks)
             if status.timestamp_ticks > end_tick
         ),
         None,
