@@ -1585,9 +1585,9 @@ def _marker_based_phase_bounds(
     DECEL = 2
 
     # _motion_phase_reports's buckets are structurally fixed in
-    # accel-then-decel order (see Task 7): an accel bucket before
-    # cruise_start, a cruise bucket between cruise_start and cruise_end, a
-    # decel bucket after. That order can represent a class sequence if and
+    # accel-then-decel order: an accel bucket before cruise_start, a cruise
+    # bucket between cruise_start and cruise_end, a decel bucket after.
+    # That order can represent a class sequence if and
     # only if it never decreases -- PhaseClass's numeric encoding
     # (Accel=0 < Cruise=1 < Decel=2) is chosen so "never decreases" is a
     # plain numeric comparison. Any decrease (Decel -> Accel,

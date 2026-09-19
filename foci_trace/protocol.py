@@ -147,7 +147,7 @@ EVENT_COMMISSION_BREAKAWAY_RECOVERY_ORIGIN_MISMATCH = 164
 EVENT_COMMISSION_DIAGNOSTIC_WARNING = 200
 
 # Emitted from the step-queue ISR on an accel/cruise/decel phase-class
-# transition (foci-343). subsystem_id is SUBSYSTEM_STEP_TIMER, not
+# transition. subsystem_id is SUBSYSTEM_STEP_TIMER, not
 # SUBSYSTEM_COMMISSIONING.
 EVENT_PHASE_BOUNDARY = 12
 
