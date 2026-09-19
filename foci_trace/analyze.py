@@ -35,6 +35,7 @@ from .contour import (
 from .fixed_gain_amplitude import audit_fixed_gain_amplitude, compare_amplitude_runs
 from .protocol import (
     EVENT_COMMISSION_OUTER_SAFETY_TIMING,
+    FLAG_DROP_GAP_BEFORE_THIS_FRAME,
     FRAME_TYPE_CONTROL_DETAIL,
     FRAME_TYPE_CRITICAL,
     FRAME_TYPE_CURRENT_PATH,
@@ -273,6 +274,7 @@ class MotionPhaseReport:
     decoupling: DecouplingPhaseReport | None = None
     post_discriminator: str | None = None
     kinematic_fallback: bool = False
+    phase_boundary_source: str = "kinematic"
 
 
 @dataclass
@@ -489,6 +491,9 @@ class _DeviceState:
     critical_observations: list[_CriticalObservation] = field(default_factory=list)
     current_path_observations: list[_CurrentPathObservation] = field(default_factory=list)
     phase_advance_observations: list[_PhaseAdvanceObservation] = field(default_factory=list)
+    phase_boundary_observations: list[_PhaseBoundaryObservation] = field(default_factory=list)
+    status_observations: list[_StatusObservation] = field(default_factory=list)
+    event_drop_gap_ticks: list[int] = field(default_factory=list)
     control_detail_observations: list[_ControlDetailObservation] = field(default_factory=list)
     velocity_observations: list[_VelocityFrameObservation] = field(default_factory=list)
     velocity_sweep_evidence: list[_VelocitySweepEvidenceFrame] = field(default_factory=list)
@@ -605,11 +610,18 @@ def _observe_metadata(state: _DeviceState, payload: dict[str, object]) -> None:
 
 
 def _observe_status(
-    state: _DeviceState, source: tuple[int, int], payload: dict[str, object]
+    state: _DeviceState, source: tuple[int, int], payload: dict[str, object], timestamp_ticks: int
 ) -> None:
     status = {name: int(value) for name, value in payload.items()}
     state.first_status_by_source.setdefault(source, status)
     state.last_status_by_source[source] = status
+    state.status_observations.append(
+        _StatusObservation(
+            timestamp_ticks=timestamp_ticks,
+            source_key=source,
+            dropped_event_log_count=int(payload["dropped_event_log_count"]),
+        )
+    )
 
 
 def _observe_critical(
@@ -1639,6 +1651,10 @@ def _motion_phase_reports(
     next_segment_start_tick: int | None,
     velocity_tracking_available: bool,
     decoupling_config: DecouplingConfig | None,
+    boundary_observations: list[_PhaseBoundaryObservation],
+    status_observations: list[_StatusObservation],
+    event_drop_gap_ticks: list[int],
+    channel: int,
 ) -> list[MotionPhaseReport]:
     if transform is None or clock_hz <= 0:
         return []
@@ -1646,9 +1662,23 @@ def _motion_phase_reports(
     end_tick = segment_samples[-1].timestamp_ticks
     edge_ticks = int(PHASE_EDGE_WINDOW_S * clock_hz)
     post_ticks = int(PHASE_POST_WINDOW_S * clock_hz)
-    cruise_start_tick, cruise_end_tick, degraded = _kinematic_phase_bounds(
-        segment_samples, start_tick, end_tick
+    marker_bounds = _marker_based_phase_bounds(
+        boundary_observations,
+        status_observations,
+        event_drop_gap_ticks,
+        channel,
+        start_tick,
+        end_tick,
     )
+    if marker_bounds is not None:
+        cruise_start_tick, cruise_end_tick = marker_bounds
+        degraded = False
+        boundary_source = "firmware_marker"
+    else:
+        cruise_start_tick, cruise_end_tick, degraded = _kinematic_phase_bounds(
+            segment_samples, start_tick, end_tick
+        )
+        boundary_source = "kinematic"
     if degraded:
         cruise_start_tick = min(end_tick, start_tick + edge_ticks)
         cruise_end_tick = max(start_tick, end_tick - edge_ticks)
@@ -1661,6 +1691,7 @@ def _motion_phase_reports(
             None,
             False,
             degraded,
+            boundary_source,
         ),
         (
             "cruise",
@@ -1670,6 +1701,7 @@ def _motion_phase_reports(
             None,
             False,
             degraded,
+            boundary_source,
         ),
         (
             "decel",
@@ -1679,6 +1711,7 @@ def _motion_phase_reports(
             None,
             True,
             degraded,
+            boundary_source,
         ),
     ]
     post_end_tick = end_tick + post_ticks
@@ -1693,11 +1726,21 @@ def _motion_phase_reports(
             segment_samples[-1].step_position,
             True,
             False,
+            "kinematic",
         )
     )
 
     reports: list[MotionPhaseReport] = []
-    for name, source_samples, start, end, command_position, include_end, fallback in split_specs:
+    for (
+        name,
+        source_samples,
+        start,
+        end,
+        command_position,
+        include_end,
+        fallback,
+        phase_source,
+    ) in split_specs:
         if end < start:
             continue
         if include_end:
@@ -1883,6 +1926,7 @@ def _motion_phase_reports(
                 decoupling=decoupling,
                 post_discriminator=post_discriminator,
                 kinematic_fallback=fallback,
+                phase_boundary_source=phase_source,
             )
         )
     return reports
@@ -2005,6 +2049,10 @@ def _finalize_motion_segments(
             motion_group.next_start_tick,
             velocity_tracking_available,
             decoupling_config,
+            state.phase_boundary_observations,
+            state.status_observations,
+            state.event_drop_gap_ticks,
+            source_key[1],
         )
         state.report.motion_segments.append(
             MotionSegmentReport(
@@ -2791,7 +2839,12 @@ def analyze_capture(
         if header.frame_type == FRAME_TYPE_METADATA:
             _observe_metadata(state, frame.payload)
         elif header.frame_type == FRAME_TYPE_STATUS:
-            _observe_status(state, (header.source_kind, header.source_index), frame.payload)
+            _observe_status(
+                state,
+                (header.source_kind, header.source_index),
+                frame.payload,
+                header.timestamp_ticks,
+            )
         elif header.frame_type == FRAME_TYPE_CRITICAL:
             _observe_critical(
                 state,
@@ -2891,6 +2944,20 @@ def analyze_capture(
                     frame.payload,
                 )
             )
+            if header.flags & FLAG_DROP_GAP_BEFORE_THIS_FRAME:
+                state.event_drop_gap_ticks.append(header.timestamp_ticks)
+            if (
+                frame.payload.get("event_name") == "phase_boundary"
+                and "phase_boundary_channel" in frame.payload
+            ):
+                state.phase_boundary_observations.append(
+                    _PhaseBoundaryObservation(
+                        timestamp_ticks=header.timestamp_ticks,
+                        channel=int(frame.payload["phase_boundary_channel"]),
+                        old_class=int(frame.payload["args"][1]),
+                        new_class=int(frame.payload["args"][2]),
+                    )
+                )
             commissioning.observe_event(record.device_index, header, frame.payload)
 
     decoupling_config = (

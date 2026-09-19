@@ -172,6 +172,7 @@ def _header(
     ts: int,
     source_kind: int,
     source_index: int,
+    flags: int = 0,
     version: int = PROTOCOL_VERSION,
 ) -> bytes:
     return struct.pack(
@@ -180,7 +181,7 @@ def _header(
         version,
         32,
         frame_type,
-        0,
+        flags,
         len(payload),
         source_kind,
         source_index,
@@ -881,6 +882,232 @@ def test_phase_split_follows_kinematics_not_a_fixed_window() -> None:
     assert accel.kinematic_fallback is False
     assert cruise.kinematic_fallback is False
     assert decel.kinematic_fallback is False
+
+
+def test_motion_phase_report_prefers_firmware_markers_when_reliable() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI Ouroboros (trace)", "ABC", b"")
+
+    clock = 84_000_000
+    samples = [
+        (1, 0, 0, 0, 500, 2200, 1000),
+        (2, clock * 25 // 1000, 2000, 1800, 600, 2600, 1600),
+        (3, clock * 75 // 1000, 5000, 5100, 700, 500, 1200),
+        (4, clock * 125 // 1000, 8000, 7900, 650, 400, 1000),
+        (5, clock * 175 // 1000, 11000, 10800, -500, -2500, -1800),
+        (6, clock * 225 // 1000, 14000, 13600, -550, -2600, -1700),
+        (7, clock * 300 // 1000, 14000, 13700, 100, 0, 100),
+        (8, clock * 450 // 1000, 14000, 13800, 50, 0, 80),
+    ]
+    for seq, timestamp, step, actual, torque_actual, torque_target, uq_limited in samples:
+        payload = _critical_motion_payload(
+            step,
+            actual,
+            torque_actual=torque_actual,
+            torque_target=torque_target,
+            uq_limited=uq_limited,
+        )
+        writer.write_firmware_frame(
+            0, timestamp, _header(FRAME_TYPE_CRITICAL, payload, seq, timestamp, 1, 0) + payload
+        )
+
+    # Firmware markers: Accel->Cruise between the first and second samples,
+    # Cruise->Decel at the fourth sample's tick -- deliberately different
+    # split points than the kinematic reconstruction would pick, so the test
+    # can tell which path produced the report. The first marker must land
+    # strictly after start_tick (sample 1's tick, 0): the accel bucket is the
+    # half-open interval [start_tick, cruise_start_tick), so a marker AT
+    # start_tick would make that interval empty.
+    marker_accel_cruise_tick = clock * 10 // 1000
+    marker_accel_cruise = struct.pack("<BBHBxxxiiii", 1, 2, 12, 3, 0, 0, 1, 0)
+    writer.write_firmware_frame(
+        0,
+        marker_accel_cruise_tick,
+        _header(FRAME_TYPE_EVENT, marker_accel_cruise, 100, marker_accel_cruise_tick, 0, 0xFF)
+        + marker_accel_cruise,
+    )
+    marker_cruise_decel_tick = clock * 125 // 1000
+    marker_cruise_decel = struct.pack("<BBHBxxxiiii", 1, 2, 12, 3, 0, 1, 2, 0)
+    writer.write_firmware_frame(
+        0,
+        marker_cruise_decel_tick,
+        _header(FRAME_TYPE_EVENT, marker_cruise_decel, 101, marker_cruise_decel_tick, 0, 0xFF)
+        + marker_cruise_decel,
+    )
+
+    # Confirming status frames straddling the window, both with zero drops.
+    # version=21 keeps the payload at _status_payload's pre-v22 40-byte
+    # shape; PROTOCOL_VERSION's default (23) would otherwise require the
+    # trace-deadline-pressure/max-spi-cycle fields this helper doesn't emit.
+    status_before = _status_payload(drops=0, endpoint_pressure=0)
+    writer.write_firmware_frame(
+        0, 0, _header(FRAME_TYPE_STATUS, status_before, 102, 0, 0, 0, version=21) + status_before
+    )
+    status_after_tick = clock * 500 // 1000
+    status_after = _status_payload(drops=0, endpoint_pressure=0)
+    writer.write_firmware_frame(
+        0,
+        status_after_tick,
+        _header(FRAME_TYPE_STATUS, status_after, 103, status_after_tick, 0, 0, version=21)
+        + status_after,
+    )
+
+    reports = summarize_capture(
+        io.BytesIO(output.getvalue()), steady_after_s=0, motion_gap_s=0.1, motion_min_steps=1000
+    )
+
+    segment = reports[0].motion_segments[0]
+    accel = next(p for p in segment.phase_reports if p.name == "accel")
+    cruise = next(p for p in segment.phase_reports if p.name == "cruise")
+    decel = next(p for p in segment.phase_reports if p.name == "decel")
+    assert accel.phase_boundary_source == "firmware_marker"
+    assert cruise.phase_boundary_source == "firmware_marker"
+    assert decel.phase_boundary_source == "firmware_marker"
+    assert accel.kinematic_fallback is False
+    assert cruise.kinematic_fallback is False
+    assert decel.kinematic_fallback is False
+    # The marker-derived split lands exactly at sample 1 -> cruise, so accel
+    # has only the first sample.
+    assert accel.critical_samples == 1
+
+
+def test_motion_phase_report_falls_back_to_kinematic_when_markers_missing() -> None:
+    # Re-run test_phase_split_follows_kinematics_not_a_fixed_window's capture
+    # (no EVENT_PHASE_BOUNDARY frames at all) and confirm the new field
+    # defaults to "kinematic" without changing any prior assertion.
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+    clock = 84_000_000
+    samples = [
+        (1, 0, 0, 0, 500, 2200, 1000),
+        (2, clock * 25 // 1000, 2000, 1800, 600, 2600, 1600),
+        (3, clock * 75 // 1000, 5000, 5100, 700, 500, 1200),
+        (4, clock * 125 // 1000, 8000, 7900, 650, 400, 1000),
+        (5, clock * 175 // 1000, 11000, 10800, -500, -2500, -1800),
+        (6, clock * 225 // 1000, 14000, 13600, -550, -2600, -1700),
+        (7, clock * 300 // 1000, 14000, 13700, 100, 0, 100),
+        (8, clock * 450 // 1000, 14000, 13800, 50, 0, 80),
+    ]
+    for seq, timestamp, step, actual, torque_actual, torque_target, uq_limited in samples:
+        payload = _critical_motion_payload(
+            step,
+            actual,
+            torque_actual=torque_actual,
+            torque_target=torque_target,
+            uq_limited=uq_limited,
+        )
+        writer.write_firmware_frame(
+            0, timestamp, _header(FRAME_TYPE_CRITICAL, payload, seq, timestamp, 1, 0) + payload
+        )
+    reports = summarize_capture(
+        io.BytesIO(output.getvalue()), steady_after_s=0, motion_gap_s=0.1, motion_min_steps=1000
+    )
+    segment = reports[0].motion_segments[0]
+    for name in ("accel", "cruise", "decel"):
+        phase = next(p for p in segment.phase_reports if p.name == name)
+        assert phase.phase_boundary_source == "kinematic"
+
+
+def test_unreliable_markers_in_one_motion_window_do_not_affect_another() -> None:
+    # Two independent moves (separated by a gap exceeding motion_gap_s) on the
+    # same channel: window 1 has a clean, reliable marker pair; window 2's
+    # markers carry a drop-gap flag. Window 1 must still use firmware markers
+    # even though window 2 falls back.
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI Ouroboros (trace)", "ABC", b"")
+
+    clock = 84_000_000
+    # Move 1's last sample lands at 175ms; move 2 must start more than
+    # motion_gap_s (0.1s) later for _ordered_motion_groups to split them into
+    # two segments, so gap_ticks (move 2's base tick) needs a healthy margin
+    # past 175ms rather than sitting close to it.
+    gap_ticks = int(0.5 * clock)
+
+    def _write_move(base_tick: int, base_seq: int) -> None:
+        samples = [
+            (0, 0, 0, 500, 2200, 1000),
+            (clock * 25 // 1000, 2000, 1800, 600, 2600, 1600),
+            (clock * 75 // 1000, 5000, 5100, 700, 500, 1200),
+            (clock * 125 // 1000, 8000, 7900, 650, 400, 1000),
+            (clock * 175 // 1000, 11000, 10800, -500, -2500, -1800),
+        ]
+        for offset, (rel_tick, step, actual, torque_actual, torque_target, uq_limited) in enumerate(
+            samples
+        ):
+            payload = _critical_motion_payload(
+                step,
+                actual,
+                torque_actual=torque_actual,
+                torque_target=torque_target,
+                uq_limited=uq_limited,
+            )
+            tick = base_tick + rel_tick
+            writer.write_firmware_frame(
+                0,
+                tick,
+                _header(FRAME_TYPE_CRITICAL, payload, base_seq + offset, tick, 1, 0) + payload,
+            )
+
+    _write_move(0, 1)
+    _write_move(gap_ticks, 10)
+
+    # Window 1 markers: clean, no drop-gap flag.
+    m1 = struct.pack("<BBHBxxxiiii", 1, 2, 12, 3, 0, 0, 1, 0)
+    writer.write_firmware_frame(0, 0, _header(FRAME_TYPE_EVENT, m1, 100, 0, 0, 0xFF) + m1)
+    m2 = struct.pack("<BBHBxxxiiii", 1, 2, 12, 3, 0, 1, 2, 0)
+    writer.write_firmware_frame(
+        0,
+        clock * 125 // 1000,
+        _header(FRAME_TYPE_EVENT, m2, 101, clock * 125 // 1000, 0, 0xFF) + m2,
+    )
+    status_before_1 = _status_payload(drops=0, endpoint_pressure=0)
+    writer.write_firmware_frame(
+        0,
+        0,
+        _header(FRAME_TYPE_STATUS, status_before_1, 102, 0, 0, 0, version=21) + status_before_1,
+    )
+    status_after_1 = _status_payload(drops=0, endpoint_pressure=0)
+    writer.write_firmware_frame(
+        0,
+        clock * 190 // 1000,
+        _header(FRAME_TYPE_STATUS, status_after_1, 103, clock * 190 // 1000, 0, 0, version=21)
+        + status_after_1,
+    )
+
+    # Window 2 markers: the first one's frame carries the drop-gap flag.
+    m3 = struct.pack("<BBHBxxxiiii", 1, 2, 12, 3, 0, 0, 1, 0)
+    writer.write_firmware_frame(
+        0, gap_ticks, _header(FRAME_TYPE_EVENT, m3, 104, gap_ticks, 0, 0xFF, flags=1) + m3
+    )
+    m4_tick = gap_ticks + clock * 125 // 1000
+    m4 = struct.pack("<BBHBxxxiiii", 1, 2, 12, 3, 0, 1, 2, 0)
+    writer.write_firmware_frame(
+        0, m4_tick, _header(FRAME_TYPE_EVENT, m4, 105, m4_tick, 0, 0xFF) + m4
+    )
+    status_after_2_tick = gap_ticks + clock * 190 // 1000
+    status_after_2 = _status_payload(drops=0, endpoint_pressure=0)
+    writer.write_firmware_frame(
+        0,
+        status_after_2_tick,
+        _header(FRAME_TYPE_STATUS, status_after_2, 106, status_after_2_tick, 0, 0, version=21)
+        + status_after_2,
+    )
+
+    reports = summarize_capture(
+        io.BytesIO(output.getvalue()), steady_after_s=0, motion_gap_s=0.1, motion_min_steps=1000
+    )
+
+    window_1_cruise = next(
+        p for p in reports[0].motion_segments[0].phase_reports if p.name == "cruise"
+    )
+    window_2_cruise = next(
+        p for p in reports[0].motion_segments[1].phase_reports if p.name == "cruise"
+    )
+    assert window_1_cruise.phase_boundary_source == "firmware_marker"
+    assert window_2_cruise.phase_boundary_source == "kinematic"
 
 
 def test_phase_summary_reports_velocity_loop_tracking() -> None:
