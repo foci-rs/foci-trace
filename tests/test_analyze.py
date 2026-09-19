@@ -7,6 +7,9 @@ import pytest
 
 from foci_trace.analyze import (
     CaptureAnalysis,
+    _marker_based_phase_bounds,
+    _PhaseBoundaryObservation,
+    _StatusObservation,
     analysis_to_json,
     analyze_capture,
     audit_outer_safety_timing,
@@ -3604,3 +3607,168 @@ def test_analyze_capture_reports_tracking_lag_and_budget() -> None:
     assert analysis_to_json(analysis)["tracking_lag"]["segments"][0]["lag_ms"] == pytest.approx(
         -1.7578, abs=0.01
     )
+
+
+def _pb(tick: int, channel: int, old_class: int, new_class: int):
+    return _PhaseBoundaryObservation(
+        timestamp_ticks=tick, channel=channel, old_class=old_class, new_class=new_class
+    )
+
+
+def _so(tick: int, count: int, channel: int = 1):
+    return _StatusObservation(
+        timestamp_ticks=tick, source_key=(1, channel), dropped_event_log_count=count
+    )
+
+
+def test_marker_based_bounds_none_when_no_markers_in_window() -> None:
+    assert _marker_based_phase_bounds([], [_so(0, 0), _so(1000, 0)], [], 0, 100, 900) is None
+
+
+def test_marker_based_bounds_accel_cruise_decel() -> None:
+    observations = [_pb(300, 0, 0, 1), _pb(700, 0, 1, 2)]
+    status = [_so(0, 0), _so(1000, 0)]
+    assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) == (300, 700)
+
+
+def test_marker_based_bounds_no_decel_in_window_extends_cruise_to_window_end() -> None:
+    observations = [_pb(300, 0, 0, 1)]
+    status = [_so(0, 0), _so(1000, 0)]
+    assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) == (300, 900)
+
+
+def test_marker_based_bounds_uses_zero_width_cruise_when_cruise_never_entered() -> None:
+    # A triangular Accel -> Decel move with no plateau -- the case most in
+    # need of firmware markers, since it is the shortest and least sampled by
+    # the critical-frame stream. Must NOT fall back to kinematic.
+    observations = [_pb(500, 0, 0, 2)]
+    status = [_so(0, 0), _so(1000, 0)]
+    assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) == (500, 500)
+
+
+def test_marker_based_bounds_falls_back_on_reverse_triangular_transition() -> None:
+    # Decel -> Accel with no Cruise (e.g. an overshoot correction) cannot be
+    # represented by _motion_phase_reports's fixed accel-then-decel bucket
+    # order -- the zero-width-cruise shortcut only applies to Accel -> Decel.
+    # Must fall back rather than mislabel the report.
+    observations = [_pb(500, 0, 2, 0)]
+    status = [_so(0, 0), _so(1000, 0)]
+    assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
+
+
+def test_marker_based_bounds_falls_back_on_multi_transition_no_cruise_chain() -> None:
+    # Accel -> Decel -> Accel, never touching Cruise: more than one
+    # transition with no Cruise has no single split point the three-bucket
+    # model can represent. Must fall back rather than pick one arbitrarily.
+    observations = [_pb(400, 0, 0, 2), _pb(600, 0, 2, 0)]
+    status = [_so(0, 0), _so(1000, 0)]
+    assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
+
+
+def test_marker_based_bounds_falls_back_on_accel_cruise_accel() -> None:
+    # A reliable, internally consistent chain that revisits Accel after
+    # Cruise -- the class sequence decreases (Cruise=1 -> Accel=0), so the
+    # fixed accel-then-decel bucket order would mislabel the second accel
+    # run as decel. Must fall back.
+    observations = [_pb(300, 0, 0, 1), _pb(700, 0, 1, 0)]
+    status = [_so(0, 0), _so(1000, 0)]
+    assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
+
+
+def test_marker_based_bounds_falls_back_on_decel_cruise_accel() -> None:
+    observations = [_pb(300, 0, 2, 1), _pb(700, 0, 1, 0)]
+    status = [_so(0, 0), _so(1000, 0)]
+    assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
+
+
+def test_marker_based_bounds_window_starting_in_cruise() -> None:
+    # The window's first segment (no marker of its own -- load_move reports
+    # no transition for the first segment after reset/idle) was already
+    # Cruise; a single Cruise -> Decel transition is a valid, representable
+    # non-decreasing sequence.
+    observations = [_pb(700, 0, 1, 2)]
+    status = [_so(0, 0), _so(1000, 0)]
+    assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) == (100, 700)
+
+
+def test_marker_based_bounds_none_on_drop_gap_flag_on_a_non_marker_event() -> None:
+    # The drop-gap flag on ANY event frame in the window is disqualifying,
+    # not just one on a phase-boundary frame -- PENDING_EVENTS is a shared
+    # queue across every event kind.
+    observations = [_pb(300, 0, 0, 1), _pb(700, 0, 1, 2)]
+    status = [_so(0, 0), _so(1000, 0)]
+    assert _marker_based_phase_bounds(observations, status, [500], 0, 100, 900) is None
+
+
+def test_marker_based_bounds_ignores_drop_gap_outside_the_window() -> None:
+    observations = [_pb(300, 0, 0, 1), _pb(700, 0, 1, 2)]
+    status = [_so(0, 0), _so(1000, 0)]
+    assert _marker_based_phase_bounds(observations, status, [50], 0, 100, 900) == (300, 700)
+
+
+def test_marker_based_bounds_none_on_broken_chain() -> None:
+    observations = [_pb(300, 0, 0, 1), _pb(700, 0, 0, 2)]  # chain break: expected old=1
+    status = [_so(0, 0), _so(1000, 0)]
+    assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
+
+
+def test_marker_based_bounds_none_on_drop_counter_change() -> None:
+    observations = [_pb(300, 0, 0, 1), _pb(700, 0, 1, 2)]
+    status = [_so(0, 0), _so(1000, 1)]  # a drop happened somewhere in the window
+    assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
+
+
+def test_marker_based_bounds_none_when_final_marker_dropped_before_status_confirms() -> None:
+    # Only the accel->cruise marker is present; the cruise->decel marker was
+    # dropped. A later status frame reveals the drop.
+    observations = [_pb(300, 0, 0, 1)]
+    status = [_so(0, 0), _so(1000, 1)]
+    assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
+
+
+def test_marker_based_bounds_none_when_capture_ends_before_a_confirming_status_frame() -> None:
+    observations = [_pb(300, 0, 0, 1), _pb(700, 0, 1, 2)]
+    status = [_so(0, 0)]  # nothing observed after the window
+    assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
+
+
+def test_marker_based_bounds_none_when_no_status_precedes_the_window() -> None:
+    # No baseline to compare the post-window count against, even though a
+    # confirming frame exists -- fail closed rather than guess.
+    observations = [_pb(300, 0, 0, 1), _pb(700, 0, 1, 2)]
+    status = [_so(1000, 0)]
+    assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
+
+
+def test_marker_based_bounds_isolates_other_channels() -> None:
+    observations = [_pb(300, 1, 0, 1), _pb(700, 1, 1, 2)]  # channel 1, we ask for channel 0
+    status = [_so(0, 0), _so(1000, 0)]
+    assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
+
+
+def test_marker_based_bounds_none_on_invalid_new_class() -> None:
+    # Untrusted wire data (malformed capture, bit flip, future
+    # decoder/firmware mismatch) can carry a class code outside 0/1/2. Must
+    # fail closed rather than let it reach the monotonicity/lookup logic.
+    observations = [_pb(300, 0, 0, 4)]
+    status = [_so(0, 0), _so(1000, 0)]
+    assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
+
+
+def test_marker_based_bounds_none_on_invalid_old_class() -> None:
+    observations = [_pb(300, 0, 5, 1)]
+    status = [_so(0, 0), _so(1000, 0)]
+    assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
+
+
+def test_marker_based_bounds_none_on_single_no_op_marker() -> None:
+    # old_class == new_class: a malformed "transition" that changes nothing.
+    observations = [_pb(300, 0, 0, 0)]
+    status = [_so(0, 0), _so(1000, 0)]
+    assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
+
+
+def test_marker_based_bounds_none_on_no_op_marker_within_a_chain() -> None:
+    observations = [_pb(300, 0, 0, 1), _pb(500, 0, 1, 1), _pb(700, 0, 1, 2)]
+    status = [_so(0, 0), _so(1000, 0)]
+    assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None

@@ -406,6 +406,21 @@ class _PhaseAdvanceObservation:
 
 
 @dataclass(frozen=True)
+class _PhaseBoundaryObservation:
+    timestamp_ticks: int
+    channel: int
+    old_class: int
+    new_class: int
+
+
+@dataclass(frozen=True)
+class _StatusObservation:
+    timestamp_ticks: int
+    source_key: tuple[int, int]
+    dropped_event_log_count: int
+
+
+@dataclass(frozen=True)
 class _ControlDetailObservation:
     timestamp_ticks: int
     source_key: tuple[int, int]
@@ -1483,6 +1498,108 @@ def _longest_plateau_run(
         assert run_start_tick is not None
         longest_run = (run_start_tick, run_end_tick)
     return longest_run
+
+
+def _marker_based_phase_bounds(
+    boundary_observations: list[_PhaseBoundaryObservation],
+    status_observations: list[_StatusObservation],
+    event_drop_gap_ticks: list[int],
+    channel: int,
+    start_tick: int,
+    end_tick: int,
+) -> tuple[int, int] | None:
+    window = sorted(
+        (
+            obs
+            for obs in boundary_observations
+            if obs.channel == channel and start_tick <= obs.timestamp_ticks <= end_tick
+        ),
+        key=lambda obs: obs.timestamp_ticks,
+    )
+    if not window:
+        return None
+    valid_classes = {0, 1, 2}
+    if any(
+        obs.old_class not in valid_classes
+        or obs.new_class not in valid_classes
+        or obs.old_class == obs.new_class
+        for obs in window
+    ):
+        # Untrusted wire data, decoded from a capture file, not an internal
+        # invariant: a malformed capture, a bit flip, or a future
+        # firmware/decoder mismatch could produce an old_class/new_class
+        # outside the known PhaseClass range, or a no-op "transition" whose
+        # old_class equals its new_class. The algorithm assumes every
+        # transition actually changes class -- a no-op has no Cruise or
+        # Decel lookup of its own, would return a None timestamp despite the
+        # tuple[int, int] | None contract, and a repeated no-op could
+        # overwrite a real phase's transition_tick entry. Fail closed rather
+        # than let either case reach the monotonicity/lookup logic below.
+        return None
+    if any(start_tick <= tick <= end_tick for tick in event_drop_gap_ticks):
+        return None
+    for previous, current in itertools.pairwise(window):
+        if previous.new_class != current.old_class:
+            return None
+
+    baseline = next(
+        (
+            status
+            for status in sorted(status_observations, key=lambda s: -s.timestamp_ticks)
+            if status.timestamp_ticks <= start_tick
+        ),
+        None,
+    )
+    if baseline is None:
+        # No status frame at all preceded the window: there is no baseline
+        # to compare a post-window count against, so a nonzero confirming
+        # count cannot be attributed specifically to this window. Fail
+        # closed rather than guess.
+        return None
+    confirming = next(
+        (
+            status
+            for status in sorted(status_observations, key=lambda s: s.timestamp_ticks)
+            if status.timestamp_ticks > end_tick
+        ),
+        None,
+    )
+    if confirming is None:
+        return None
+    if confirming.dropped_event_log_count != baseline.dropped_event_log_count:
+        return None
+
+    CRUISE = 1
+    DECEL = 2
+
+    # _motion_phase_reports's buckets are structurally fixed in
+    # accel-then-decel order (see Task 7): an accel bucket before
+    # cruise_start, a cruise bucket between cruise_start and cruise_end, a
+    # decel bucket after. That order can represent a class sequence if and
+    # only if it never decreases -- PhaseClass's numeric encoding
+    # (Accel=0 < Cruise=1 < Decel=2) is chosen so "never decreases" is a
+    # plain numeric comparison. Any decrease (Decel -> Accel,
+    # Accel -> Cruise -> Accel, Decel -> Cruise -> Accel, etc.) is a
+    # topology the fixed bucket order cannot represent without mislabeling
+    # samples, so it falls back to kinematic reconstruction instead.
+    classes = [window[0].old_class, *(obs.new_class for obs in window)]
+    if any(classes[i] > classes[i + 1] for i in range(len(classes) - 1)):
+        return None
+
+    # Each transition's `new_class` is reached at most once in a
+    # non-decreasing sequence (a transition always changes class, so a
+    # repeated value would itself be a decrease caught above), so this map
+    # has at most one entry per class.
+    transition_tick = {obs.new_class: obs.timestamp_ticks for obs in window}
+    if classes[0] == CRUISE:
+        cruise_start = start_tick
+    else:
+        # Cruise's own transition tick if the window passes through Cruise;
+        # otherwise (a direct Accel -> Decel skip) Decel's transition tick,
+        # giving the zero-width cruise interval that case requires.
+        cruise_start = transition_tick.get(CRUISE, transition_tick.get(DECEL))
+    cruise_end = transition_tick.get(DECEL, end_tick)
+    return cruise_start, cruise_end
 
 
 def _kinematic_phase_bounds(
