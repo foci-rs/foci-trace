@@ -239,11 +239,11 @@ def test_decodes_version_nine_pptm_velocity_diagnostic() -> None:
 
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_OBSERVATION, payload) + payload)
 
-    assert PROTOCOL_VERSION == 22
+    assert PROTOCOL_VERSION == 23
     assert 13 in SUPPORTED_PROTOCOL_VERSIONS
     assert 14 in SUPPORTED_PROTOCOL_VERSIONS
     assert 20 in SUPPORTED_PROTOCOL_VERSIONS
-    assert 22 in SUPPORTED_PROTOCOL_VERSIONS
+    assert 23 in SUPPORTED_PROTOCOL_VERSIONS
     assert frame.payload["pid_velocity_actual"] is None
     assert frame.payload["actual_velocity_pptm"] == 176
 
@@ -252,8 +252,8 @@ def test_decode_frame_rejects_a_version_beyond_the_supported_range() -> None:
     # A version past the supported range is rejected; historical versions stay
     # decodable so committed captures still replay.
     payload = bytes(88)
-    with pytest.raises(DecodeError, match="unsupported protocol version 23"):
-        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=23) + payload)
+    with pytest.raises(DecodeError, match="unsupported protocol version 24"):
+        decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=24) + payload)
 
 
 def test_rejects_velocity_observation_with_both_diagnostic_kinds() -> None:
@@ -2213,6 +2213,35 @@ def test_decode_commissioning_event_names() -> None:
     assert frame.payload["level_name"] == "info"
     assert frame.payload["engine_kind_name"] == "commission"
     assert frame.payload["args"] == [0, 1, 17, 3]
+
+
+def test_decode_phase_boundary_event() -> None:
+    payload = struct.pack("<BBHBxxxiiii", 1, 2, 12, 3, 1, 0, 2, 0)
+
+    frame = decode_frame(_header(FRAME_TYPE_EVENT, payload) + payload)
+
+    assert frame.payload["subsystem_name"] == "step_timer"
+    assert frame.payload["event_name"] == "phase_boundary"
+    assert frame.payload["args"] == [1, 0, 2]
+    assert frame.payload["phase_boundary_channel"] == 1
+    assert frame.payload["phase_boundary_old_class_name"] == "accel"
+    assert frame.payload["phase_boundary_new_class_name"] == "decel"
+
+
+def test_phase_boundary_constants_match_the_firmware_trace_events_table() -> None:
+    from foci_trace.protocol import EVENT_PHASE_BOUNDARY, SUBSYSTEM_STEP_TIMER
+
+    assert SUBSYSTEM_STEP_TIMER == 2
+    assert EVENT_PHASE_BOUNDARY == 12
+
+
+def test_protocol_23_is_supported_and_22_still_decodes_unchanged() -> None:
+    assert PROTOCOL_VERSION == 23
+    assert 23 in SUPPORTED_PROTOCOL_VERSIONS
+
+    payload = struct.pack("<BBHBxxxiiii", 1, 7, 101, 4, 0, 1, 17, 3)
+    frame = decode_frame(_header(FRAME_TYPE_EVENT, payload, version=22) + payload)
+    assert frame.payload["event_name"] == "commission_phase_start"
 
 
 @pytest.mark.parametrize(

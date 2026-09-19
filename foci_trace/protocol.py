@@ -17,6 +17,10 @@ from .velocity_integral import (
 __all__ = ["BREAKAWAY_PHASE_NAMES", "PHASE_NAMES"]
 
 FRAME_MAGIC = 0x43525446
+# Version 23 adds EVENT_PHASE_BOUNDARY (event id 12, subsystem
+# SUBSYSTEM_STEP_TIMER): a one-shot marker for an accel/cruise/decel
+# phase-class transition, detected in the step-queue ISR independent of
+# the critical-frame sampler's rate.
 # Version 22 appends `trace_deadline_pressure_count` and `max_spi_sample_cycles`
 # to the status payload, and repurposes the critical payload's `position_error`
 # to the TMC4671 chip's own PID_POSITION_ERROR register read (byte layout
@@ -39,7 +43,7 @@ FRAME_MAGIC = 0x43525446
 # the open-loop model term or to measured demand.
 # Version 15 replaced the productive-boundary probe with physical excursion.
 # Historical versions remain readable through their versioned record shapes.
-PROTOCOL_VERSION = 22
+PROTOCOL_VERSION = 23
 SUPPORTED_PROTOCOL_VERSIONS = (
     1,
     2,
@@ -63,6 +67,7 @@ SUPPORTED_PROTOCOL_VERSIONS = (
     20,
     21,
     22,
+    23,
 )
 HEADER_LEN = 32
 
@@ -76,10 +81,13 @@ FRAME_TYPE_PHASE_ADVANCE = 7
 FRAME_TYPE_VELOCITY_OBSERVATION = 8
 FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE = 9
 
+FLAG_DROP_GAP_BEFORE_THIS_FRAME = 1 << 0
+
 VELOCITY_OBSERVATION_FLAG_PID_VELOCITY_ACTUAL_VALID = 1 << 1
 VELOCITY_OBSERVATION_FLAG_PPTM_ACTUAL_VALID = 1 << 2
 
 SUBSYSTEM_COMMISSIONING = 7
+SUBSYSTEM_STEP_TIMER = 2
 
 EVENT_COMMISSION_ENGINE_START = 100
 EVENT_COMMISSION_PHASE_START = 101
@@ -138,6 +146,11 @@ EVENT_COMMISSION_BREAKAWAY_RECOVERY_REST_REJECTED = 163
 EVENT_COMMISSION_BREAKAWAY_RECOVERY_ORIGIN_MISMATCH = 164
 EVENT_COMMISSION_DIAGNOSTIC_WARNING = 200
 
+# Emitted from the step-queue ISR on an accel/cruise/decel phase-class
+# transition (foci-343). subsystem_id is SUBSYSTEM_STEP_TIMER, not
+# SUBSYSTEM_COMMISSIONING.
+EVENT_PHASE_BOUNDARY = 12
+
 # Every breakaway-campaign marker event id (152-162), in phase-emission order.
 # The FTRC marker granularity is one `CommissionTraceEvent` per tick -- these
 # ids are what the offline assembler uses to claim the raw velocity-sweep-
@@ -167,8 +180,11 @@ _LEVEL_NAMES = {
     3: "error",
 }
 
+_PHASE_CLASS_NAMES = {0: "accel", 1: "cruise", 2: "decel"}
+
 _SUBSYSTEM_NAMES = {
     SUBSYSTEM_COMMISSIONING: "commissioning",
+    SUBSYSTEM_STEP_TIMER: "step_timer",
 }
 
 _COMMISSIONING_EVENT_NAMES = {
@@ -3130,6 +3146,16 @@ def _decode_event(payload: bytes) -> dict[str, Any]:
             engine_kind = decoded_args[1]
             decoded["engine_kind_name"] = _ENGINE_KIND_NAMES.get(
                 engine_kind, f"unknown_{engine_kind}"
+            )
+    elif subsystem_id == SUBSYSTEM_STEP_TIMER and event_id == EVENT_PHASE_BOUNDARY:
+        decoded["event_name"] = "phase_boundary"
+        if len(decoded_args) >= 3:
+            decoded["phase_boundary_channel"] = decoded_args[0]
+            decoded["phase_boundary_old_class_name"] = _PHASE_CLASS_NAMES.get(
+                decoded_args[1], f"unknown_{decoded_args[1]}"
+            )
+            decoded["phase_boundary_new_class_name"] = _PHASE_CLASS_NAMES.get(
+                decoded_args[2], f"unknown_{decoded_args[2]}"
             )
     else:
         decoded["event_name"] = f"unknown_{event_id}"
