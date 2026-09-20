@@ -15,6 +15,7 @@ PHASE_NAMES: dict[int, str] = {
     21: "ReversalStandstillRobustnessGate",
     16: "EncoderAlign",
     17: "ClosedLoopActivation",
+    26: "GainFloorMeasurement",
 }
 
 BREAKAWAY_PHASE_NAMES: dict[int, str] = {
