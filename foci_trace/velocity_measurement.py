@@ -742,7 +742,9 @@ def audit_selected_recovery_rest(
             and int(terminal.get("recovery_unavailable", 0)) == 1
         )
         if not selected_terminal and not (recovery_wide and int(terminal["cause"]) == 53):
-            mismatches.append("unconfirmed selected recovery rest has the wrong Proportional terminal")
+            mismatches.append(
+                "unconfirmed selected recovery rest has the wrong Proportional terminal"
+            )
 
     return {
         "matches_firmware": not mismatches,
@@ -3377,7 +3379,9 @@ def _assemble_proportional_reproduction(
         for value in fragments
     ]
     if actual != expected:
-        raise ValueError("Proportional reproduction fragments are missing, duplicated, or out of order")
+        raise ValueError(
+            "Proportional reproduction fragments are missing, duplicated, or out of order"
+        )
     identity = (int(fragments[0]["run_sequence"]), int(fragments[0]["evidence_sequence"]))
     if any(
         (int(value["run_sequence"]), int(value["evidence_sequence"])) != identity
@@ -4505,7 +4509,9 @@ def _audit_proportional_velocity_sweep(
                 ("recovery_slot_count", int(plan["rung_count"])),
             ):
                 if int(plan[name]) != expected:
-                    mismatches.append(f"Proportional {name}: firmware={plan[name]} offline={expected}")
+                    mismatches.append(
+                        f"Proportional {name}: firmware={plan[name]} offline={expected}"
+                    )
         recovery_rungs = [int(record["rung_index"]) for record in recovery_records]
         emitted_recovery_rungs = sorted(
             {
@@ -4592,7 +4598,9 @@ def _audit_proportional_velocity_sweep(
     if sequences != list(range(len(sequences))):
         mismatches.append(f"Proportional evidence sequence is not contiguous: {sequences}")
     if int(terminal["evidence_sequence"]) != len(main_records):
-        mismatches.append("Proportional terminal sequence does not follow the final evidence record")
+        mismatches.append(
+            "Proportional terminal sequence does not follow the final evidence record"
+        )
     previous: dict[str, object] | None = None
     for _raw, value in nonterminal:
         if value["record_kind"] == "structured_boundary":
