@@ -2263,14 +2263,14 @@ def _attach_rest_selection_audit(
     known) falls back to the historical grammar, matching a capture that offers
     no rule signal.
 
-    A Stage C plan record states build_features on the wire (protocol decodes
-    it there), so a Stage C rest selection reads the bit directly. A Stage B
+    An Integral plan record states build_features on the wire (protocol decodes
+    it there), so an Integral rest selection reads the bit directly. A Proportional
     trace plan record carries no rule-contract marker at all -- neither
-    build_features nor a schema_revision -- so a Stage B rest selection always
+    build_features nor a schema_revision -- so a Proportional rest selection always
     falls back to the historical grammar. That is correct for the combined flow,
-    whose Stage B runs at COMBINED_PROPORTIONAL_SCHEMA_REVISION (14), below the
-    rest-walk floor of 17, so it never walks. Resolving a breakaway Stage B walk
-    would require build_features on the Stage B plan record, which the wire does
+    whose Proportional runs at COMBINED_PROPORTIONAL_SCHEMA_REVISION (14), below the
+    rest-walk floor of 17, so it never walks. Resolving a breakaway Proportional walk
+    would require build_features on the Proportional plan record, which the wire does
     not carry; that gap is tracked separately and is not what the combined
     captures this change targets need.
     """

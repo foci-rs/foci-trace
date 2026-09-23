@@ -33,7 +33,7 @@ FRAME_MAGIC = 0x43525446
 # payload.
 # Version 19 adds `error_code` to the breakaway campaign terminal and a new
 # ConfirmationIntegralPlanRefused (26) terminal cause, so a confirmed
-# acceptance whose Stage-C plan build was refused is attributable instead of
+# acceptance whose Integral plan build was refused is attributable instead of
 # reporting a self-contradictory Accepted cause.
 # Version 17 adds `error_code` to the breakaway discovery terminal, so a
 # `*_internal_fault` terminal names the CommissionError behind it instead of
@@ -682,7 +682,7 @@ def _try_decode_fixed_gain_amplitude(payload: bytes) -> dict[str, Any] | None:
     return decoded
 
 
-# Lengths of the Stage C ("integral_observation") record from before the drift
+# Lengths of the Integral ("integral_observation") record from before the drift
 # ratio field existed. These must keep decoding: replacing this set instead of
 # extending it would silently stop decoding every capture taken before the
 # field was added, including the six exported as design evidence.
@@ -900,7 +900,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             if decoded["schema_revision"] >= 3 or len(payload) == 88:
                 decoded["limit_evidence_capability"] = cursor.take("B")
             # The encoder writes this block only when the plan actually carries
-            # a combined selected response; a breakaway Stage-C plan has none
+            # a combined selected response; a breakaway Integral plan has none
             # and its record simply ends here. Presence is therefore signalled
             # by remaining bytes, not by the schema revision alone.
             decoded["combined_selected_response"] = False
@@ -2215,7 +2215,7 @@ def _breakaway_terminal_cause_is_valid(cause: object, protocol_version: int) -> 
     if not isinstance(cause, int):
         return False
     if protocol_version >= 19:
-        # 26 is the confirmed-but-Stage-C-refused cause.
+        # 26 is the confirmed-but-Integral-refused cause.
         return cause in (0, 1) or 5 <= cause <= 26
     if protocol_version >= 16:
         # 23-25 split the non-safety internal faults out of the `*_safety_fault`
@@ -2371,7 +2371,7 @@ def decode_breakaway_record(
     `integral_plan_marker` shape decoded by `_decode_velocity_sweep_evidence`,
     and tag 3 (`discovery_planned`, 45 bytes since `schema_revision` was added)
     collides byte-for-byte with the legacy non-compact
-    Stage-B `rung` shape, which also happens to be 45 bytes; a caller that
+    Proportional `rung` shape, which also happens to be 45 bytes; a caller that
     already knows (from marker adjacency) that a raw payload belongs to a
     breakaway bundle must call this function directly on `Frame.raw_payload`
     rather than trust `Frame.payload`.

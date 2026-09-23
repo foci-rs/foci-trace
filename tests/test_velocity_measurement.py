@@ -472,7 +472,7 @@ def test_excluded_observation_zeros_unavailable_suffix_metrics() -> None:
     # No schema_revision is passed here, so this takes the legacy (schema < 14,
     # or unknown) gate: the significance test, unchanged from before Task 9.
     # This linear ramp's fitted slope is large and unambiguous, so it still
-    # rejects with ResolvedSlope (discriminant 2), giving Stage B's historical
+    # rejects with ResolvedSlope (discriminant 2), giving Proportional's historical
     # `4 + 2 = 6` -- not 12, which only an at-or-above-schema-fourteen capture
     # (asserted separately below) would produce.
     assert result["classification"] == 6
@@ -483,7 +483,7 @@ def test_excluded_observation_uses_drift_bound_at_proportional_schema_fourteen_a
     """The same ramp, replayed at/above PROPORTIONAL_DRIFT_BOUND_MIN_SCHEMA_REVISION
     (14), takes the drift bound instead: its bound suffix drifts far more than
     200,000 ppm of its settled rate, so it rejects as ExcessiveDrift
-    (discriminant 5), which Stage B's explicit map sends to wire code 12."""
+    (discriminant 5), which Proportional's explicit map sends to wire code 12."""
     from foci_trace.velocity_measurement import (
         PROPORTIONAL_DRIFT_BOUND_MIN_SCHEMA_REVISION,
         _reconstruct_observation,
@@ -507,10 +507,10 @@ def test_excluded_observation_uses_drift_bound_at_proportional_schema_fourteen_a
 
 
 def test_proportional_schema_thirteen_still_uses_the_legacy_gate() -> None:
-    """Stage B revision 13 predates the drift bound -- it was live firmware
+    """Proportional revision 13 predates the drift bound -- it was live firmware
     until Task 7 bumped COMBINED_PROPORTIONAL_SCHEMA_REVISION to 14 -- even though
-    13 is Stage C's post-bump floor. This pins the namespace split: if Stage
-    B's and Stage C's thresholds were ever collapsed back into one shared
+    13 is Integral's post-bump floor. This pins the namespace split: if Stage
+    B's and Integral's thresholds were ever collapsed back into one shared
     constant of 13, this would incorrectly take the drift bound (classification
     12) instead of the legacy gate (classification 6)."""
     from foci_trace.velocity_measurement import _reconstruct_observation
@@ -789,7 +789,7 @@ def test_capture_rule_features_prefers_explicit_bits_then_reconstructs() -> None
     # at any schema revision -- this is the case schema gating got wrong.
     assert capture_rule_features({"build_features": 0xF, "schema_revision": 13}, stage="c") == 0xF
 
-    # A legacy Stage C capture reconstructs from its own plan schema_revision. At
+    # A legacy Integral capture reconstructs from its own plan schema_revision. At
     # the suffix-walk floor the drift and suffix bits are set but rest-walk (16)
     # is not, and no build_revision is needed to say so.
     features = capture_rule_features(
@@ -799,8 +799,8 @@ def test_capture_rule_features_prefers_explicit_bits_then_reconstructs() -> None
     assert features & BUILD_FEATURE_SUFFIX_WALK_CONTINUES
     assert not features & BUILD_FEATURE_REST_CHAIN_ON_EVIDENCE
 
-    # A legacy Stage B capture takes its schema from the caller (its wire plan
-    # record carries none); revision 13 is below every Stage B rule threshold.
+    # A legacy Proportional capture takes its schema from the caller (its wire plan
+    # record carries none); revision 13 is below every Proportional rule threshold.
     assert capture_rule_features({}, stage="b", schema_revision=13) == 0
 
     # No signal at all -- no build_features, no schema -- means the legacy gate,
@@ -907,7 +907,7 @@ def test_scored_rest_grammar_requires_fixed_observation_and_recovery_joins() -> 
         "recovery_owners": (1, 2),
         "observation_kind": "observation",
         "plan_digest": 11,
-        "label": "Stage B",
+        "label": "Proportional",
         "stabilized_recovery_rest": True,
         "ordinary_rejection_tail": (),
     }
@@ -993,7 +993,7 @@ def test_scored_rest_grammar_accepts_an_ordinary_selection_after_its_observation
     ]
     terminal = _grammar_terminal(kind="integral_terminal", cause=0)
     arguments = _grammar_arguments(
-        label="Stage C", stabilized_recovery_rest=False, ordinary_rejection_tail=()
+        label="Integral", stabilized_recovery_rest=False, ordinary_rejection_tail=()
     )
 
     assert audit_scored_rest_grammar(records, terminal, **arguments) == []
@@ -1007,7 +1007,7 @@ def test_scored_rest_grammar_accepts_integral_ordinary_rejection_current_tail() 
     ]
     terminal = _grammar_terminal(kind="integral_terminal", cause=53)
     arguments = _grammar_arguments(
-        label="Stage C",
+        label="Integral",
         stabilized_recovery_rest=False,
         ordinary_rejection_tail=("velocity_primitive_current",),
     )
@@ -1022,7 +1022,7 @@ def test_scored_rest_grammar_accepts_proportional_ordinary_rejection_without_cur
     ]
     terminal = _grammar_terminal(kind="proportional_terminal", cause=53)
     arguments = _grammar_arguments(
-        label="Stage B", stabilized_recovery_rest=False, ordinary_rejection_tail=()
+        label="Proportional", stabilized_recovery_rest=False, ordinary_rejection_tail=()
     )
 
     assert audit_scored_rest_grammar(records, terminal, **arguments) == []
@@ -1035,7 +1035,7 @@ def test_scored_rest_grammar_accepts_an_immediate_recovery_selection() -> None:
     ]
     terminal = _grammar_terminal(kind="integral_terminal", cause=0)
     arguments = _grammar_arguments(
-        label="Stage C", stabilized_recovery_rest=False, ordinary_rejection_tail=()
+        label="Integral", stabilized_recovery_rest=False, ordinary_rejection_tail=()
     )
 
     assert audit_scored_rest_grammar(records, terminal, **arguments) == []
@@ -1045,7 +1045,7 @@ def test_scored_rest_grammar_accepts_an_immediate_recovery_rejection() -> None:
     records = [_grammar_selection(owner=5, rung_index=2, slot=0xFF, disposition=2)]
     terminal = _grammar_terminal(kind="integral_terminal", cause=53)
     arguments = _grammar_arguments(
-        label="Stage C", stabilized_recovery_rest=False, ordinary_rejection_tail=()
+        label="Integral", stabilized_recovery_rest=False, ordinary_rejection_tail=()
     )
 
     assert audit_scored_rest_grammar(records, terminal, **arguments) == []
@@ -1059,7 +1059,7 @@ def test_scored_rest_grammar_accepts_a_stabilized_recovery_selection() -> None:
     ]
     terminal = _grammar_terminal(kind="integral_terminal", cause=0)
     arguments = _grammar_arguments(
-        label="Stage C", stabilized_recovery_rest=True, ordinary_rejection_tail=()
+        label="Integral", stabilized_recovery_rest=True, ordinary_rejection_tail=()
     )
 
     assert audit_scored_rest_grammar(records, terminal, **arguments) == []
@@ -1072,7 +1072,7 @@ def test_scored_rest_grammar_accepts_a_stabilized_recovery_rejection() -> None:
     ]
     terminal = _grammar_terminal(kind="integral_terminal", cause=53)
     arguments = _grammar_arguments(
-        label="Stage C", stabilized_recovery_rest=True, ordinary_rejection_tail=()
+        label="Integral", stabilized_recovery_rest=True, ordinary_rejection_tail=()
     )
 
     assert audit_scored_rest_grammar(records, terminal, **arguments) == []
@@ -1085,16 +1085,16 @@ def test_scored_rest_grammar_rejects_a_stabilized_recovery_missing_event_150() -
     ]
     terminal = _grammar_terminal(kind="integral_terminal", cause=0)
     arguments = _grammar_arguments(
-        label="Stage C", stabilized_recovery_rest=True, ordinary_rejection_tail=()
+        label="Integral", stabilized_recovery_rest=True, ordinary_rejection_tail=()
     )
 
     assert audit_scored_rest_grammar(records, terminal, **arguments) == [
-        "Stage C recovery selection does not precede Event 150"
+        "Integral recovery selection does not precede Event 150"
     ]
 
 
 def test_scored_rest_grammar_rejects_integral_rejection_missing_its_current_record() -> None:
-    """The disposition-2 tail is enforced, not merely exempted: a Stage-C
+    """The disposition-2 tail is enforced, not merely exempted: an Integral
     rejection missing its Current record must be reported, not silently
     accepted the way the pre-fix grammar accepted any rejection."""
     records = [
@@ -1103,13 +1103,13 @@ def test_scored_rest_grammar_rejects_integral_rejection_missing_its_current_reco
     ]
     terminal = _grammar_terminal(kind="integral_terminal", cause=53)
     arguments = _grammar_arguments(
-        label="Stage C",
+        label="Integral",
         stabilized_recovery_rest=False,
         ordinary_rejection_tail=("velocity_primitive_current",),
     )
 
     assert audit_scored_rest_grammar(records, terminal, **arguments) == [
-        "Stage C rejected scored-rest selection lacks its causal terminal tail"
+        "Integral rejected scored-rest selection lacks its causal terminal tail"
     ]
 
 
@@ -1121,11 +1121,11 @@ def test_scored_rest_grammar_rejects_a_rejection_tail_with_an_extra_record() -> 
     ]
     terminal = _grammar_terminal(kind="proportional_terminal", cause=53)
     arguments = _grammar_arguments(
-        label="Stage B", stabilized_recovery_rest=False, ordinary_rejection_tail=()
+        label="Proportional", stabilized_recovery_rest=False, ordinary_rejection_tail=()
     )
 
     assert audit_scored_rest_grammar(records, terminal, **arguments) == [
-        "Stage B rejected scored-rest selection lacks its causal terminal tail"
+        "Proportional rejected scored-rest selection lacks its causal terminal tail"
     ]
 
 
@@ -1136,11 +1136,11 @@ def test_scored_rest_grammar_rejects_an_ordinary_rejection_with_the_wrong_cause(
     ]
     terminal = _grammar_terminal(kind="proportional_terminal", cause=0)
     arguments = _grammar_arguments(
-        label="Stage B", stabilized_recovery_rest=False, ordinary_rejection_tail=()
+        label="Proportional", stabilized_recovery_rest=False, ordinary_rejection_tail=()
     )
 
     assert audit_scored_rest_grammar(records, terminal, **arguments) == [
-        "Stage B rejected scored-rest selection lacks its causal terminal tail"
+        "Proportional rejected scored-rest selection lacks its causal terminal tail"
     ]
 
 
@@ -1153,11 +1153,11 @@ def test_scored_rest_grammar_rejects_an_immediate_recovery_rejection_with_a_reco
     ]
     terminal = _grammar_terminal(kind="integral_terminal", cause=53)
     arguments = _grammar_arguments(
-        label="Stage C", stabilized_recovery_rest=False, ordinary_rejection_tail=()
+        label="Integral", stabilized_recovery_rest=False, ordinary_rejection_tail=()
     )
 
     assert audit_scored_rest_grammar(records, terminal, **arguments) == [
-        "Stage C rejected recovery selection lacks its causal terminal"
+        "Integral rejected recovery selection lacks its causal terminal"
     ]
 
 
@@ -1168,11 +1168,11 @@ def test_scored_rest_grammar_rejects_a_stabilized_recovery_with_the_wrong_cause(
     ]
     terminal = _grammar_terminal(kind="integral_terminal", cause=0)
     arguments = _grammar_arguments(
-        label="Stage C", stabilized_recovery_rest=True, ordinary_rejection_tail=()
+        label="Integral", stabilized_recovery_rest=True, ordinary_rejection_tail=()
     )
 
     assert audit_scored_rest_grammar(records, terminal, **arguments) == [
-        "Stage C rejected recovery selection lacks its causal terminal"
+        "Integral rejected recovery selection lacks its causal terminal"
     ]
 
 
@@ -1701,7 +1701,7 @@ def test_proportional_replay_uses_eight_slots_and_four_k_confidence() -> None:
 def _proportional_single_rung_evidence(
     drift_ratio_ppm: int | None,
 ) -> tuple[list[object], list[tuple[bytes, dict[str, object]]]]:
-    """Build one four-slot Stage B stream whose records report a drift ratio or not."""
+    """Build one four-slot Proportional stream whose records report a drift ratio or not."""
     from foci_trace.velocity_measurement import _reconstruct_observation
 
     plan = {
@@ -1761,7 +1761,7 @@ def _proportional_single_rung_evidence(
 def test_proportional_replay_derives_the_drift_bound_schema_from_the_reported_ratio() -> None:
     """A reported drift ratio is the only wire signal that a capture is schema 14.
 
-    Stage B's plan record carries no schema revision, so replay derives one
+    Proportional's plan record carries no schema revision, so replay derives one
     from the stream. Before this arm existed the derivation topped out at 12
     and real schema-14 captures were replayed against the legacy significance
     gate, which reports `matches_firmware: False` on exactly the observations
@@ -1973,7 +1973,7 @@ def test_selected_recovery_rest_binds_schema11_and_terminal_disposition() -> Non
     wrong_stage_duration = dict(plan, nominal_workflow_ms=271_422)
     audit = audit_selected_recovery_rest(selected, wrong_stage_duration, terminal, [recovery])
     assert audit["matches_firmware"] is False
-    assert any("outside the Stage-B-11 duration pair" in item for item in audit["mismatches"])
+    assert any("outside the Proportional-11 duration pair" in item for item in audit["mismatches"])
 
     unconfirmed = dict(selected, disposition=1)
     terminal = {
@@ -3328,14 +3328,14 @@ def test_proportional_fault_terminal_evidence_comparison_matches_a_complete_term
     `commission_dispatch/proportional.rs:248-252`) overwrites only `outcome`/`cause`
     on an already-built terminal, leaving `model_direction_mask`,
     `coverage_mask`, `nominated_p`, `selected_memberships`, and
-    `selected_intervals` untouched. Stage-C's audit assumed fault implied
+    `selected_intervals` untouched. Integral's audit assumed fault implied
     reset and rejected the preserved case as a false mismatch until
     fixed. `_audit_proportional_velocity_sweep` was never written with that
     assumption -- its `_compare_fields` call for these evidence fields
     (`velocity_measurement.py:4838`) runs unconditionally, before any
     outcome-specific checks. Pin that: the same construction reports the
     identical evidence-comparison verdict whether its terminal says Complete
-    or Fault, so a future change cannot silently reintroduce the Stage-C
+    or Fault, so a future change cannot silently reintroduce the Integral
     mistake here.
     """
 
@@ -5453,7 +5453,7 @@ def test_audit_breakaway_campaign_rejects_integral_after_unsuccessful_confirmati
 
 
 def test_audit_breakaway_campaign_allows_a_confirmed_integral_refusal() -> None:
-    """A confirmed acceptance whose Stage-C plan build was refused is a
+    """A confirmed acceptance whose Integral plan build was refused is a
     legitimate outcome, not a validator error."""
     builder = _BreakawayCampaignBuilder()
     ticks = [

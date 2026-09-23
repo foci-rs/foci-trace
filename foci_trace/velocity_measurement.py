@@ -35,13 +35,13 @@ NO_REPORTABLE_DRIFT_RATIO_PPM = 0xFFFFFFFF
 # those captures rather than a gate that firmware itself never executed on
 # that data.
 #
-# Stage B and Stage C number their schema revisions on independent counters,
+# Proportional and Integral number their schema revisions on independent counters,
 # so there are two thresholds, not one: Task 7 bumped firmware's
 # COMBINED_PROPORTIONAL_SCHEMA_REVISION from 13 to 14 and COMBINED_INTEGRAL_SCHEMA_REVISION
-# from 12 to 13 in the same commit. Stage B revision 13 therefore predates the
+# from 12 to 13 in the same commit. Proportional revision 13 therefore predates the
 # drift bound -- it was live firmware until Task 7 -- even though it is the
-# same integer as Stage C's post-bump floor. Comparing a Stage B revision
-# against the Stage C threshold (or vice versa) would silently apply the
+# same integer as Integral's post-bump floor. Comparing a Proportional revision
+# against the Integral threshold (or vice versa) would silently apply the
 # wrong gate to real captures. Each call site must pass the threshold that
 # matches the schema namespace its `schema_revision` was drawn from.
 #
@@ -110,8 +110,8 @@ def _rule_features_from_schema(schema_revision: int, stage: str) -> int:
     This ignores the integral-representation bit and never consults
     `build_revision`: the stationarity gates read only the rule bits, so an
     archived capture with no representation signal must still resolve its gate
-    contract rather than raise. `stage` selects the namespace: "b" for Stage B,
-    "c" for Stage C.
+    contract rather than raise. `stage` selects the namespace: "b" for Proportional,
+    "c" for Integral.
     """
     try:
         drift, suffix, rest = _STAGE_RULE_THRESHOLDS[stage]
@@ -135,8 +135,8 @@ def reconstruct_build_features(
     Bit 0 (integral representation) comes from the crate-version
     `build_revision`; the three rule bits reconstruct from the per-namespace
     schema thresholds, so an archived capture is analysed under exactly the gate
-    that recorded it. `stage` selects the schema namespace: "b" for Stage B, "c"
-    for Stage C.
+    that recorded it. `stage` selects the schema namespace: "b" for Proportional, "c"
+    for Integral.
     """
     if stage not in _STAGE_RULE_THRESHOLDS:
         raise ValueError(f"unknown schema namespace {stage!r}")
@@ -168,10 +168,10 @@ def capture_rule_features(
     all (no `build_features` and no schema revision), which the gates treat as
     the legacy significance test.
 
-    `schema_revision` overrides the plan's own, for Stage B: its wire plan
+    `schema_revision` overrides the plan's own, for Proportional: its wire plan
     record carries no schema revision, so the caller derives one from the
     evidence stream and passes it here. `stage` selects the namespace: "b" for
-    Stage B, "c" for Stage C.
+    Proportional, "c" for Integral.
     """
     explicit = plan.get("build_features")
     if explicit is not None:
@@ -188,7 +188,7 @@ def capture_build_features(plan: dict[str, object], *, stage: str) -> int:
     A newer capture states `build_features` directly; a legacy capture
     carries only `build_revision`, from which the contract is reconstructed via
     the per-namespace schema thresholds. `stage` selects the namespace: "b" for
-    Stage B, "c" for Stage C.
+    Proportional, "c" for Integral.
     """
     explicit = plan.get("build_features")
     if explicit is not None:
@@ -207,7 +207,7 @@ def project_combined_response_selection(
     target_rpm: int,
     encoder_counts_per_rev: int,
 ) -> dict[str, object]:
-    """Project the combined selector over preserved Stage-B rung intervals."""
+    """Project the combined selector over preserved Proportional rung intervals."""
     if target_rpm <= 0 or encoder_counts_per_rev <= 0:
         raise ValueError("combined response target must be positive")
     target_numerator = target_rpm * encoder_counts_per_rev * RATE_Q_SCALE
@@ -720,7 +720,7 @@ def audit_selected_recovery_rest(
     )
     recovery_wide = duration == (282_923, 298_632)
     if duration not in ((271_423, 298_632), (282_923, 298_632)):
-        mismatches.append("selected recovery rest is outside the Stage-B-11 duration pair")
+        mismatches.append("selected recovery rest is outside the Proportional-11 duration pair")
     if not recovery_wide and rung_index != int(terminal["emitted_rungs"]) - 1:
         mismatches.append("selected recovery rest is not attached to the final emitted rung")
 
@@ -742,7 +742,7 @@ def audit_selected_recovery_rest(
             and int(terminal.get("recovery_unavailable", 0)) == 1
         )
         if not selected_terminal and not (recovery_wide and int(terminal["cause"]) == 53):
-            mismatches.append("unconfirmed selected recovery rest has the wrong Stage-B terminal")
+            mismatches.append("unconfirmed selected recovery rest has the wrong Proportional terminal")
 
     return {
         "matches_firmware": not mismatches,
@@ -1321,7 +1321,7 @@ def _classify_stationarity(
     `build_features` is the recording firmware's rule contract, resolved by the
     caller from the capture (see `capture_rule_features`): the drift-bound rule
     is read straight off the wire rather than dated by schema revision, so the
-    Stage B / Stage C schema-namespace ambiguity never reaches this gate.
+    Proportional / Integral schema-namespace ambiguity never reaches this gate.
     `None` means unknown -- an unidentified capture is far more likely to be an
     old one, so it defaults toward the legacy significance gate, failing safe
     toward preserving existing replay behavior.
@@ -2148,7 +2148,7 @@ def _compare_optional_drift_ratio(
         )
 
 
-# Stage B's wire classification namespace reserves 4..8 for the five
+# Proportional's wire classification namespace reserves 4..8 for the five
 # StationarityExclusion variants, but `4 + exclusion` collides once
 # ExcessiveDrift (discriminant 5) exists: `4 + 5 == 9`, which is
 # WrongDirectionFault. Mirrors the explicit map firmware's
@@ -2186,20 +2186,20 @@ def _reconstruct_observation(
     *,
     schema_revision: int | None = None,
 ) -> dict[str, int]:
-    """Reconstruct one Stage B observation from its raw moving samples.
+    """Reconstruct one Proportional observation from its raw moving samples.
 
-    Stage B's wire "plan" record never carries a schema revision (unlike Stage
+    Proportional's wire "plan" record never carries a schema revision (unlike Stage
     C's), so callers that know the replay's schema (derived from the evidence
     stream, e.g. `replay_proportional_regions`) must pass it explicitly as
-    `schema_revision`, using Stage B's own schema numbering. `None` defaults
+    `schema_revision`, using Proportional's own schema numbering. `None` defaults
     to the legacy significance-based moving gate, which is also correct for
     the oldest replay path that predates the `proportional_terminal` record kind
     entirely and so has no schema signal of its own to offer.
 
-    The rule contract is resolved with `stage="b"`, never Stage C's namespace:
-    every `schema_revision` reaching this function is a Stage B revision by
+    The rule contract is resolved with `stage="b"`, never Integral's namespace:
+    every `schema_revision` reaching this function is a Proportional revision by
     construction, so the namespace is fixed here rather than left for callers to
-    (mis)supply. A newer Stage B plan states `build_features` directly and
+    (mis)supply. A newer Proportional plan states `build_features` directly and
     the passed `schema_revision` is then unused.
     """
     build_features = capture_rule_features(plan, stage="b", schema_revision=schema_revision)
@@ -2989,7 +2989,7 @@ def _proportional_handoff_sufficient(
     *,
     schema_revision: int,
 ) -> bool:
-    """Return whether one run has the complete Stage B handoff for its schema."""
+    """Return whether one run has the complete Proportional handoff for its schema."""
     if schema_revision >= 8:
         return bool(nomination)
     has_directional_models = all(
@@ -3053,7 +3053,7 @@ def _compare_proportional_candidates_schema2(
 def _proportional_gain_at(p_start: int, p_top: int, rung_count: int, rung_index: int) -> int:
     """Regenerate one anchored, post-dedupe half-octave ladder gain."""
     if not 0 <= rung_index < rung_count or p_start <= 0 or p_start > p_top:
-        raise ValueError("invalid Stage B ladder geometry")
+        raise ValueError("invalid Proportional ladder geometry")
     previous = 0
     emitted = 0
     for octave in range(16):
@@ -3068,7 +3068,7 @@ def _proportional_gain_at(p_start: int, p_top: int, rung_count: int, rung_index:
             emitted += 1
     if previous != p_top and emitted == rung_index:
         return p_top
-    raise ValueError("rung is absent from the anchored Stage B ladder")
+    raise ValueError("rung is absent from the anchored Proportional ladder")
 
 
 def _contiguous_proportional_mask(mask: int, rung_count: int) -> bool:
@@ -3213,7 +3213,7 @@ def _schema8_run_candidate(report: dict[str, object]) -> dict[str, object]:
 def project_proportional_schema8_pair(
     previous_report: dict[str, object], current_report: dict[str, object]
 ) -> dict[str, object]:
-    """Project the schema-8 comparator over preserved per-run Stage-B evidence."""
+    """Project the schema-8 comparator over preserved per-run Proportional evidence."""
     return _project_proportional_schema8_candidates(
         _schema8_run_candidate(previous_report),
         _schema8_run_candidate(current_report),
@@ -3351,7 +3351,7 @@ def _normalized_reproduction_fragment_kind(kind: object) -> str:
 def _assemble_proportional_reproduction(
     records: list[dict[str, object]],
 ) -> dict[str, object] | None:
-    """Validate and assemble one ordered Stage-B reproduction record group."""
+    """Validate and assemble one ordered Proportional reproduction record group."""
     fragments = [
         value
         for value in records
@@ -3361,7 +3361,7 @@ def _assemble_proportional_reproduction(
         return None
     header_kind = str(fragments[0]["record_kind"])
     if header_kind not in ("reproduction_v3_header", "reproduction_v4_header"):
-        raise ValueError("Stage-B reproduction group does not start with a header")
+        raise ValueError("Proportional reproduction group does not start with a header")
     expected = [
         "header",
         *("membership" for _ in range(3)),
@@ -3377,18 +3377,18 @@ def _assemble_proportional_reproduction(
         for value in fragments
     ]
     if actual != expected:
-        raise ValueError("Stage-B reproduction fragments are missing, duplicated, or out of order")
+        raise ValueError("Proportional reproduction fragments are missing, duplicated, or out of order")
     identity = (int(fragments[0]["run_sequence"]), int(fragments[0]["evidence_sequence"]))
     if any(
         (int(value["run_sequence"]), int(value["evidence_sequence"])) != identity
         for value in fragments
     ):
-        raise ValueError("Stage-B reproduction fragment identity changed")
+        raise ValueError("Proportional reproduction fragment identity changed")
     if [int(value["object"]) for value in fragments[1:4]] != [0, 1, 2]:
-        raise ValueError("Stage-B reproduction membership fragments changed object order")
+        raise ValueError("Proportional reproduction membership fragments changed object order")
     for start in (4, 6, 8):
         if [int(value["direction"]) for value in fragments[start : start + 2]] != [0, 1]:
-            raise ValueError("Stage-B reproduction directional fragments changed order")
+            raise ValueError("Proportional reproduction directional fragments changed order")
     header = fragments[0]
     digest = fragments[-1]
     assembled = {
@@ -3439,12 +3439,12 @@ def _assemble_proportional_reproduction_v3(
     """Assemble one historical schema-3 through schema-7 reproduction group."""
     assembled = _assemble_proportional_reproduction(records)
     if assembled is not None and assembled["record_kind"] != "reproduction_v3":
-        raise ValueError("expected a historical Stage-B reproduction group")
+        raise ValueError("expected a historical Proportional reproduction group")
     return assembled
 
 
 def _proportional_record_identity(value: dict[str, object]) -> tuple[object, ...]:
-    """Return the causal identity of one canonical Stage B record."""
+    """Return the causal identity of one canonical Proportional record."""
     kind = str(value["record_kind"])
     if kind in ("observation", "structured_boundary"):
         return kind, int(value["rung_index"]), int(value["slot"])
@@ -3598,7 +3598,7 @@ def _compare_proportional_causal_order(
     observed = [_proportional_record_identity(value) for value in records]
     if observed == expected:
         return ""
-    return f"Stage B causal order differs: firmware={observed} offline={expected}"
+    return f"Proportional causal order differs: firmware={observed} offline={expected}"
 
 
 def _proportional_fault_prefix_replay(replay: dict[str, object]) -> dict[str, object]:
@@ -4032,7 +4032,7 @@ def replay_proportional_regions(
         if value["record_kind"] in ("terminal", "proportional_terminal")
     ]
     if len(plans) != 1 or len(terminals) != 1:
-        raise ValueError("one plan and one terminal are required for Stage B replay")
+        raise ValueError("one plan and one terminal are required for Proportional replay")
     plan, terminal = plans[0], terminals[0]
     recovery_rest_present = any(
         value["record_kind"] == "recovery_rest" for _raw, value in evidence_records
@@ -4053,7 +4053,7 @@ def replay_proportional_regions(
             for _raw, value in evidence_records
         )
     )
-    # Stage B's wire "plan" record carries no schema revision and firmware
+    # Proportional's wire "plan" record carries no schema revision and firmware
     # publishes PROPORTIONAL_EVIDENCE_SCHEMA_REVISION only in the Klipper constant
     # block, which trace captures do not contain -- so the revision has to be
     # derived from what the evidence stream itself shows, one wire marker per
@@ -4064,7 +4064,7 @@ def replay_proportional_regions(
     # absent, which bounds it from above by the next rung's threshold.
     #
     # The top rung has no such ceiling. The trailing drift_ratio_ppm u32 on the
-    # Stage B observation record was added by the same change that introduced
+    # Proportional observation record was added by the same change that introduced
     # the drift bound, one commit before COMBINED_PROPORTIONAL_SCHEMA_REVISION went
     # to 14, so a capture reporting it is schema 14 or newer -- and today,
     # "or newer" cannot happen, so the value is 14 in practice. Older captures
@@ -4075,7 +4075,7 @@ def replay_proportional_regions(
     #
     # `schema_revision_floor` is named for exactly this: it is the highest
     # schema revision this ladder can currently prove a lower bound for, not a
-    # confirmed exact revision. A future Stage B schema bump that changes
+    # confirmed exact revision. A future Proportional schema bump that changes
     # gating behavior (the way schema 14 did) needs its own new wire marker
     # added as a rung above this one. Simply bumping
     # PROPORTIONAL_DRIFT_BOUND_MIN_SCHEMA_REVISION to 15 without adding that marker
@@ -4124,7 +4124,7 @@ def replay_proportional_regions(
     observations_per_direction = int(plan["observations_per_direction"])
     slot_count = 2 * observations_per_direction
     if observations_per_direction not in (2, 4):
-        raise ValueError("Stage B replay supports two or four observations per direction")
+        raise ValueError("Proportional replay supports two or four observations per direction")
     reconstructed: dict[tuple[int, int], dict[str, int]] = {}
     for key, record in records.items():
         raw = by_stroke.get(key[0] * slot_count + key[1])
@@ -4387,8 +4387,8 @@ def _audit_proportional_velocity_sweep(
             "terminal": dict(terminals[0]) if len(terminals) == 1 else None,
             "complete": False,
             "matches_firmware": False,
-            "mismatches": ["partial Stage B capture: one plan and terminal are required"],
-            "caveats": ["partial Stage B capture"],
+            "mismatches": ["partial Proportional capture: one plan and terminal are required"],
+            "caveats": ["partial Proportional capture"],
         }
     plan, terminal = plans[0], terminals[0]
     observations_per_direction = int(plan["observations_per_direction"])
@@ -4449,7 +4449,7 @@ def _audit_proportional_velocity_sweep(
             recovery_owners=(1, 2),
             observation_kind="observation",
             plan_digest=plan_digest,
-            label="Stage B",
+            label="Proportional",
             stabilized_recovery_rest=(schema_revision_floor == 14 or combined_response_selected),
             ordinary_rejection_tail=(),
         )
@@ -4465,9 +4465,9 @@ def _audit_proportional_velocity_sweep(
     ]
     for record in current_records:
         if int(record["stage"]) != 0:
-            mismatches.append("Stage B current evidence carries the wrong stage")
+            mismatches.append("Proportional current evidence carries the wrong stage")
         if int(record["clamp_readback"]) != int(record["clamp_limit"]):
-            mismatches.append("Stage B current evidence clamp readback differs")
+            mismatches.append("Proportional current evidence clamp readback differs")
     if current_records and int(terminal["outcome"]) != PROPORTIONAL_OUTCOME_FAULT:
         observation_keys = {
             (int(value["rung_index"]), int(value["slot"]))
@@ -4476,7 +4476,7 @@ def _audit_proportional_velocity_sweep(
         }
         current_keys = {(int(value["rung_index"]), int(value["slot"])) for value in current_records}
         if current_keys != observation_keys:
-            mismatches.append("Stage B current evidence does not cover every observation")
+            mismatches.append("Proportional current evidence does not cover every observation")
     recovery_projections: list[dict[str, object]] = []
     recovery_wide = (
         int(plan.get("nominal_workflow_ms", -1)),
@@ -4493,7 +4493,7 @@ def _audit_proportional_velocity_sweep(
                 primitive_cap_us=int(plan["recovery_maximum_slot_us"]),
             )
         except ValueError as error:
-            mismatches.append(f"Stage B recovery plan reconstruction failed: {error}")
+            mismatches.append(f"Proportional recovery plan reconstruction failed: {error}")
         else:
             expected_nominal_slot_us = int(recovery_plan["nominal_slot_us"])
             if recovery_wide:
@@ -4505,7 +4505,7 @@ def _audit_proportional_velocity_sweep(
                 ("recovery_slot_count", int(plan["rung_count"])),
             ):
                 if int(plan[name]) != expected:
-                    mismatches.append(f"Stage B {name}: firmware={plan[name]} offline={expected}")
+                    mismatches.append(f"Proportional {name}: firmware={plan[name]} offline={expected}")
         recovery_rungs = [int(record["rung_index"]) for record in recovery_records]
         emitted_recovery_rungs = sorted(
             {
@@ -4536,24 +4536,24 @@ def _audit_proportional_velocity_sweep(
         )
         if recovery_rungs != expected_recovery_rungs:
             mismatches.append(
-                "Stage B recovery rungs differ from fully acquired rung sequence: "
+                "Proportional recovery rungs differ from fully acquired rung sequence: "
                 f"firmware={recovery_rungs} offline={expected_recovery_rungs}"
             )
         for record in recovery_records:
             if int(record["stage"]) != 0:
-                mismatches.append("Stage B recovery record carries the wrong stage")
+                mismatches.append("Proportional recovery record carries the wrong stage")
             recovery_audit = audit_rung_origin_recovery(record, plan)
             mismatches.extend(
                 f"recovery rung {record['rung_index']}: {item}"
                 for item in recovery_audit["mismatches"]
             )
     elif recovery_records:
-        mismatches.append("historical Stage B plan carries unexpected recovery records")
+        mismatches.append("historical Proportional plan carries unexpected recovery records")
     diagnostic_rungs = [int(record["rung_index"]) for record in selected_rest_records]
     if len(diagnostic_rungs) != len(set(diagnostic_rungs)):
-        mismatches.append("Stage B carries duplicate recovery rest diagnostics")
+        mismatches.append("Proportional carries duplicate recovery rest diagnostics")
     if not recovery_wide and len(selected_rest_records) > 1:
-        mismatches.append("Stage B carries more than one selected recovery rest diagnostic")
+        mismatches.append("Proportional carries more than one selected recovery rest diagnostic")
     if recovery_wide:
         diagnostic_rung_set = set(diagnostic_rungs)
         for recovery in recovery_records:
@@ -4561,7 +4561,7 @@ def _audit_proportional_velocity_sweep(
                 int(recovery["outcome"]) in (1, 5)
                 and int(recovery["rung_index"]) not in diagnostic_rung_set
             ):
-                mismatches.append("moving Stage B recovery lacks recovery rest evidence")
+                mismatches.append("moving Proportional recovery lacks recovery rest evidence")
     selected_rest_audit = None
     selected_scope = None
     recovery_rest_audits = [
@@ -4590,9 +4590,9 @@ def _audit_proportional_velocity_sweep(
     ]
     sequences = [int(value["evidence_sequence"]) for value in main_records]
     if sequences != list(range(len(sequences))):
-        mismatches.append(f"Stage B evidence sequence is not contiguous: {sequences}")
+        mismatches.append(f"Proportional evidence sequence is not contiguous: {sequences}")
     if int(terminal["evidence_sequence"]) != len(main_records):
-        mismatches.append("Stage B terminal sequence does not follow the final evidence record")
+        mismatches.append("Proportional terminal sequence does not follow the final evidence record")
     previous: dict[str, object] | None = None
     for _raw, value in nonterminal:
         if value["record_kind"] == "structured_boundary":
@@ -4942,9 +4942,9 @@ def _audit_proportional_velocity_sweep(
     handoffs = [value for _raw, value in evidence_records if value["record_kind"] == "handoff"]
     expects_handoff = _proportional_replay_expects_handoff(replay)
     if expects_handoff and len(handoffs) != 1:
-        mismatches.append(f"expected one Stage B handoff, found {len(handoffs)}")
+        mismatches.append(f"expected one Proportional handoff, found {len(handoffs)}")
     elif not expects_handoff and handoffs:
-        mismatches.append("Stage B handoff exists without complete directional model evidence")
+        mismatches.append("Proportional handoff exists without complete directional model evidence")
     elif expects_handoff:
         handoff = handoffs[0]
         nomination = replay["nomination"]
@@ -4977,7 +4977,7 @@ def _audit_proportional_velocity_sweep(
             )
         else:
             expected["joint_member_mask"] = nomination["member_mask"]
-        _compare_fields(mismatches, "Stage B handoff", handoff, expected, tuple(expected))
+        _compare_fields(mismatches, "Proportional handoff", handoff, expected, tuple(expected))
         for direction, selected in zip(handoff["directions"], replay["selected"], strict=True):
             expected_direction = {
                 "member_mask": selected["member_mask"],
@@ -4990,7 +4990,7 @@ def _audit_proportional_velocity_sweep(
             }
             _compare_fields(
                 mismatches,
-                "Stage B directional handoff",
+                "Proportional directional handoff",
                 direction,
                 expected_direction,
                 tuple(expected_direction),
@@ -5083,12 +5083,12 @@ def _audit_proportional_velocity_sweep(
         "emitted_rungs": len(rung_records),
     }
     _compare_fields(
-        mismatches, "Stage B terminal", terminal, terminal_expected, tuple(terminal_expected)
+        mismatches, "Proportional terminal", terminal, terminal_expected, tuple(terminal_expected)
     )
     if list(terminal["selected_memberships"]) != expected_memberships:
-        mismatches.append("Stage B terminal selected memberships differ from replay")
+        mismatches.append("Proportional terminal selected memberships differ from replay")
     if list(terminal["selected_intervals"]) != expected_intervals:
-        mismatches.append("Stage B terminal selected intervals differ from replay")
+        mismatches.append("Proportional terminal selected intervals differ from replay")
     if combined_response_selected:
         selected_unconfirmed = bool(
             selected_rest_records and int(selected_rest_records[0]["disposition"]) == 1
@@ -5100,9 +5100,9 @@ def _audit_proportional_velocity_sweep(
         )
         expected_cause = PROPORTIONAL_CAUSE_RECOVERY_UNAVAILABLE if selected_unconfirmed else 0
         if int(terminal["outcome"]) != expected_outcome or int(terminal["cause"]) != expected_cause:
-            mismatches.append("Stage B selected-response terminal differs from recovery rest")
+            mismatches.append("Proportional selected-response terminal differs from recovery rest")
         if int(terminal.get("recovery_unavailable", 0)) != int(selected_unconfirmed):
-            mismatches.append("Stage B selected-response recovery flag differs")
+            mismatches.append("Proportional selected-response recovery flag differs")
     if not replay["sufficient"] and int(terminal["outcome"]) == PROPORTIONAL_OUTCOME_INCONCLUSIVE:
         recovery_failure = any(
             int(record["outcome"]) in (2, 3)
@@ -5115,7 +5115,7 @@ def _audit_proportional_velocity_sweep(
         )
         if int(terminal["cause"]) != expected_cause:
             mismatches.append(
-                "Stage B terminal insufficiency cause differs from independent replay"
+                "Proportional terminal insufficiency cause differs from independent replay"
             )
     region_counts = [
         sum(region["kind"] == "valid" for region in regions) for regions in replay["directions"]
@@ -5124,9 +5124,9 @@ def _audit_proportional_velocity_sweep(
         sum(region["kind"] == "fragment" for region in regions) for regions in replay["directions"]
     ]
     if [terminal["forward_region_count"], terminal["reverse_region_count"]] != region_counts:
-        mismatches.append("Stage B terminal directional region counts differ from replay")
+        mismatches.append("Proportional terminal directional region counts differ from replay")
     if [terminal["forward_fragment_count"], terminal["reverse_fragment_count"]] != fragment_counts:
-        mismatches.append("Stage B terminal directional fragment counts differ from replay")
+        mismatches.append("Proportional terminal directional fragment counts differ from replay")
 
     reproduction = [
         value
@@ -5138,7 +5138,7 @@ def _audit_proportional_velocity_sweep(
         and not combined_response_selected
         and len(reproduction) != 1
     ):
-        mismatches.append("complete Stage B terminal lacks one reproduction record")
+        mismatches.append("complete Proportional terminal lacks one reproduction record")
     if len(reproduction) > 1:
         mismatches.append(f"expected at most one reproduction record, found {len(reproduction)}")
     if reproduction and reproduction[-1]["record_kind"] == "reproduction":
@@ -5821,7 +5821,7 @@ def _bw_discovery_inert_fraction(
 
     The denominator is completed discovery observations only. Callers pass the
     marker-160 records of the Discovery phase, so the upward breakaway probe,
-    the held-out confirmation, Stage C, and every recovery or hidden observation
+    the held-out confirmation, Integral, and every recovery or hidden observation
     are excluded by construction rather than by filtering here.
 
     `gross` includes the intentional predecessor floor rung. It is the honest
@@ -7468,10 +7468,10 @@ def audit_breakaway_campaign(
 
     campaign_terminal = _bw_single_record(ticks[-1], "breakaway_campaign_terminal")
     campaign_accepted = int(campaign_terminal["accepted"]) == 1
-    # A confirmed acceptance whose Stage-C plan build is later refused
+    # A confirmed acceptance whose Integral plan build is later refused
     # legitimately leaves campaign_accepted=False with confirmation_accepted=
-    # True -- confirmation and Stage-C admission are deliberately
-    # separate, stacked gates. Only the reverse direction (a Stage-C plan
+    # True -- confirmation and Integral admission are deliberately
+    # separate, stacked gates. Only the reverse direction (an Integral plan
     # materializing without a confirmed acceptance) is structurally
     # impossible and remains a genuine validator error.
     if campaign_accepted and not confirmation_accepted:

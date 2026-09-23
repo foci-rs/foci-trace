@@ -247,7 +247,7 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
     if schema_revision >= 14:
         # The breakaway-seeded campaign
         # (`plan_breakaway_velocity_integral_response`, integral_plan.rs:1387).
-        # It has no Stage-B sweep, so `IntegralAcquisitionAuthority::new_breakaway` zeroes
+        # It has no Proportional sweep, so `IntegralAcquisitionAuthority::new_breakaway` zeroes
         # every directional field; it passes `combined_selected_response: None`
         # and `probe_constrained_test_point: false`; and it passes
         # `append_exact_cap: false`, so the ladder is the plain
@@ -294,7 +294,7 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
             }
         )
     if schema_revision >= 17:
-        # schema_revision >= 14 (Breakaway) ran first and zeroed Stage-B
+        # schema_revision >= 14 (Breakaway) ran first and zeroed Proportional
         # authority, set fixed_p=951, and shrank the ladder back to 12
         # unaugmented rungs (see that tier's comment). Schema 17 is the
         # ReproducedProportional/standalone family, not Breakaway, so every field
@@ -350,7 +350,7 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
         )
     if schema_revision >= 18:
         # Back to the breakaway-seeded campaign: same builder as the schema-14
-        # tier, so every Stage-B authority field that tier zeroed is zeroed
+        # tier, so every Proportional authority field that tier zeroed is zeroed
         # again here, undoing the ReproducedProportional restoration the schema-17
         # tier applied. What schema 18 keeps from that tier is the half-octave
         # geometry (it is a response-ladder schema) and `build_features`, since
@@ -445,7 +445,7 @@ def test_schema_eight_plan_hashes_selected_response_and_appends_exact_cap() -> N
 def test_integral_workflow_follows_the_firmware_schema_ranges(
     schema_revision: int, combined: bool
 ) -> None:
-    """The four firmware constants that partition the Stage-C schema space:
+    """The four firmware constants that partition the Integral schema space:
     `INTEGRAL_EVIDENCE_SCHEMA_REVISION = 7` (integral_plan.rs:24),
     `FIRST_COMBINED_INTEGRAL_SCHEMA_REVISION = 8` and
     `COMBINED_INTEGRAL_SCHEMA_REVISION = 13` (combined_plan.rs:20,22), and
@@ -690,7 +690,7 @@ def test_schema_seven_transition_boundary_and_overflow_fail_closed() -> None:
 
     assert below["fixed_p"] == 979
     assert at_or_above["joint_membership"] == 0
-    with pytest.raises(ValueError, match="invalid Stage-C transition"):
+    with pytest.raises(ValueError, match="invalid Integral transition"):
         select_transition_capable_test_point(
             proportional_joint_membership=1,
             target_rpm=1 << 31,
@@ -847,7 +847,7 @@ def test_schema_seventeen_selects_transition_capable_prefix_independently() -> N
     # Mirrors the schema-7 standalone _validate_plan tests (e.g.
     # test_schema_four_plan_reconstructs_exact_counts_and_duration above) with
     # schema_revision=17 -- confirms _validate_plan runs the same independent
-    # Stage-B test-point reconstruction for the new standalone/ReproducedProportional
+    # Proportional test-point reconstruction for the new standalone/ReproducedProportional
     # schema that it already runs for schema 7.
     plan = _plan(schema_revision=17)
     plan["plan_digest"] = integral_plan_digest(plan)
@@ -1073,7 +1073,7 @@ def _recovery_record(
 def _moving_recovery_record(
     rung_index: int, sequence: int, plan: dict[str, object]
 ) -> tuple[bytes, dict[str, object]]:
-    """Build a completed moving (outcome 1) Stage-C recovery.
+    """Build a completed moving (outcome 1) Integral recovery.
 
     `_recovery_record` hardcodes `outcome: 0`, which cannot exercise the
     rest-presence rule (it only applies to outcomes 1 and 5). This carries
@@ -1504,7 +1504,7 @@ def _synthetic_complete_capture(
     forge_standalone: bool = False,
     overrides: dict[str, object] | None = None,
 ) -> tuple[list[VelocityObservation], list[tuple[bytes, dict[str, object]]]]:
-    """Build a complete, internally consistent Stage-C capture.
+    """Build a complete, internally consistent Integral capture.
 
     `forge_standalone` is a deliberate forgery switch used by exactly one
     rejection test. It strips a combined-schema plan's selected response and
@@ -2416,12 +2416,12 @@ def test_build_features_bit0_selects_integral_representation() -> None:
 def test_reconstruct_build_features_maps_legacy_captures_by_namespace() -> None:
     # The legacy Q8.8 build predates every rule bit.
     assert reconstruct_build_features(LEGACY_Q8_8_BUILD, 4, stage="c") == 0b0000
-    # Q4.12 combined Stage C (schema 13) had only the drift bound, not the
+    # Q4.12 combined Integral (schema 13) had only the drift bound, not the
     # suffix walk (>=15) or the rest walk (>=16).
     assert reconstruct_build_features(CURRENT_Q4_12_BUILD, 13, stage="c") == 0b0011
-    # Q4.12 breakaway Stage C (schema 16) had all four rules.
+    # Q4.12 breakaway Integral (schema 16) had all four rules.
     assert reconstruct_build_features(CURRENT_Q4_12_BUILD, 16, stage="c") == 0b1111
-    # Stage B numbers its own thresholds (14 drift / 16 suffix / 17 rest).
+    # Proportional numbers its own thresholds (14 drift / 16 suffix / 17 rest).
     assert reconstruct_build_features(CURRENT_Q4_12_BUILD, 14, stage="b") == 0b0011
     assert reconstruct_build_features(CURRENT_Q4_12_BUILD, 17, stage="b") == 0b1111
 
@@ -2823,9 +2823,9 @@ def test_integral_ladder_rejects_unsupported_schema(schema_revision: int) -> Non
     """Schema 17 -- the half-octave `ReproducedProportional` ladder
     (`INTEGRAL_EVIDENCE_SCHEMA_REVISION`, integral_plan.rs:21) -- is a real
     firmware schema, so the rejected boundary sits one above it. 18 does not
-    exist as a Stage-C revision in firmware.
+    exist as an Integral revision in firmware.
     """
-    with pytest.raises(ValueError, match="unsupported Stage-C evidence schema"):
+    with pytest.raises(ValueError, match="unsupported Integral evidence schema"):
         derive_integral_ladder(
             25_000,
             512_000,
@@ -2944,7 +2944,7 @@ def test_reconstruct_observation_applies_drift_bound_at_integral_schema_thirteen
 
 
 def test_reconstruct_observation_uses_significance_test_below_integral_schema_thirteen() -> None:
-    """The sibling of the test above, one schema revision below the Stage C
+    """The sibling of the test above, one schema revision below the Integral
     drift-bound floor: the identical raw samples take the legacy significance
     test instead and reject for a different reason (ResolvedSlope, not
     ExcessiveDrift)."""
@@ -3018,7 +3018,7 @@ def test_retained_slot_lifecycle_is_deterministic(
 
 
 def test_mirrored_slot_order_is_reported_and_hashed_only_when_set() -> None:
-    """Stage C records the mirrored slot order in bit 2 of the plan flags byte.
+    """Integral records the mirrored slot order in bit 2 of the plan flags byte.
 
     Firmware hashes the order only when mirrored, so forward-first plans keep the
     digest they had before slot order was recorded and every archived capture and
@@ -3035,7 +3035,7 @@ def test_mirrored_slot_order_is_reported_and_hashed_only_when_set() -> None:
     assert integral_plan_digest(reverse_first) != baseline
 
     # Unlike the older flag bits, the slot order is hashed at every schema,
-    # because firmware records it without moving the Stage-C schema revision.
+    # because firmware records it without moving the Integral schema revision.
     for schema_revision in (1, 7):
         unmirrored = _plan(schema_revision)
         unmirrored["flags"] = 0
@@ -3231,7 +3231,7 @@ def test_archived_schema_fourteen_capture_carrying_event_150_is_rejected() -> No
 
     audit = audit_velocity_integral(raw, records)
 
-    assert audit["mismatches"] == ["Stage C recovery selection does not precede its recovery"]
+    assert audit["mismatches"] == ["Integral recovery selection does not precede its recovery"]
 
 
 def test_unified_rest_capture_without_event_150_is_rejected() -> None:
@@ -3259,8 +3259,8 @@ def test_unified_rest_capture_without_event_150_is_rejected() -> None:
     audit = audit_velocity_integral(raw, records)
 
     assert audit["mismatches"] == [
-        "Stage C recovery selection does not precede Event 150",
-        "moving Stage C recovery lacks recovery rest evidence",
+        "Integral recovery selection does not precede Event 150",
+        "moving Integral recovery lacks recovery rest evidence",
     ]
 
 
@@ -3419,8 +3419,8 @@ def test_stabilized_integral_recovery_without_event_150_reports_both_validators(
     # The grammar (Task 5) runs before the presence check (Task 6) inside
     # `audit_velocity_integral`, so its message appears first.
     assert audit["mismatches"] == [
-        "Stage C recovery selection does not precede Event 150",
-        "moving Stage C recovery lacks recovery rest evidence",
+        "Integral recovery selection does not precede Event 150",
+        "moving Integral recovery lacks recovery rest evidence",
     ]
 
 
@@ -3868,7 +3868,7 @@ def test_combined_faulted_terminal_claiming_a_dense_target_is_rejected() -> None
 # --------------------------------------------------------------------------
 # Archived-capture regression corpus (spec R6).
 #
-# Tasks 5 and 6 corrected the offline replay grammar and the Stage-C audit,
+# Tasks 5 and 6 corrected the offline replay grammar and the Integral audit,
 # verified so far only against synthetic fixtures built above. The two
 # archived captures below are the recordings that originally exposed the
 # defect; this section points the corrected code at them directly. Both
@@ -3924,7 +3924,7 @@ def _analyze_complete_prefix(capture_path: Path) -> object:
     return analyze_capture(io.BytesIO(_complete_prefix_bytes(capture_path)))
 
 
-# The six Stage-C evidence record kinds `_velocity_integral_audits`
+# The six Integral evidence record kinds `_velocity_integral_audits`
 # (analyze.py) collects before handing them to `audit_velocity_integral`.
 # `integral_plan_marker` and `integral_terminal` are deliberately excluded:
 # Step 4 below needs the ordinary evidence stream only, a real terminal is
@@ -3943,7 +3943,7 @@ _INTEGRAL_EVIDENCE_KINDS = frozenset(
 
 
 def _integral_evidence_records(capture_path: Path) -> list[dict[str, object]]:
-    """Decode one capture's Stage-C evidence records in stream order.
+    """Decode one capture's Integral evidence records in stream order.
 
     `audit_velocity_integral` cannot run on `foc213-p18b`: its recorder
     stopped two rungs in, so the plan fragments and terminal are incomplete
@@ -3975,18 +3975,18 @@ def _integral_evidence_records(capture_path: Path) -> list[dict[str, object]]:
 _TARGETED_GRAMMAR_MESSAGES = frozenset(
     {
         # Task 5: `audit_scored_rest_grammar` ordering (velocity_measurement.py).
-        "Stage C scored-rest selection has the wrong successor",  # old wording, removed
-        "Stage C scored-rest selection has the wrong predecessor",  # new
-        "Stage C rejected scored-rest selection lacks its causal terminal tail",  # new
-        "Stage C observation lacks its causal scored-rest selection",
-        "Stage C recovery rest lacks its causal selection",
-        "Stage C scored-rest selection has the wrong identity",
-        "Stage C recovery selection does not precede Event 150",
-        "Stage C recovery selection does not precede its recovery",  # new
-        "Stage C rejected recovery selection lacks its causal terminal",  # new
-        "Stage C scored-rest selection has the wrong owner",
+        "Integral scored-rest selection has the wrong successor",  # old wording, removed
+        "Integral scored-rest selection has the wrong predecessor",  # new
+        "Integral rejected scored-rest selection lacks its causal terminal tail",  # new
+        "Integral observation lacks its causal scored-rest selection",
+        "Integral recovery rest lacks its causal selection",
+        "Integral scored-rest selection has the wrong identity",
+        "Integral recovery selection does not precede Event 150",
+        "Integral recovery selection does not precede its recovery",  # new
+        "Integral rejected recovery selection lacks its causal terminal",  # new
+        "Integral scored-rest selection has the wrong owner",
         # Task 6: combined-plan/terminal derivation (velocity_integral.py).
-        "combined plan lacks one selected Stage-B response",  # old wording, removed
+        "combined plan lacks one selected Proportional response",  # old wording, removed
         "combined terminal lacks its workflow flag",  # old wording, removed
         "terminal combined-workflow flag differs from the plan",  # new
         "terminal combined tail differs from the plan",  # new
@@ -4165,7 +4165,7 @@ def test_p18b_decoded_prefix_satisfies_the_scored_rest_grammar() -> None:
         recovery_owners=(5,),
         observation_kind="integral_observation",
         plan_digest=plan_digest,
-        label="Stage C",
+        label="Integral",
         stabilized_recovery_rest=False,
         ordinary_rejection_tail=("velocity_primitive_current",),
     )

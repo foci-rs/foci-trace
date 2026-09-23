@@ -80,13 +80,13 @@ _RECOVERY_STABILIZATION_US = 500_000
 _STABILIZED_RECOVERY_SCHEDULE_CODE = 1
 _U128_MAX = (1 << 128) - 1
 
-# Stage-C evidence schema revisions, mirrored from firmware. Every revision
+# Integral evidence schema revisions, mirrored from firmware. Every revision
 # belongs to exactly one acquisition workflow, and no two workflows share one.
 # The ranges are named by the constants below rather than by literals, so a
 # firmware bump widens a range without stranding this comment:
 #
 #   through _STANDALONE_INTEGRAL_SCHEMA_REVISION
-#         standalone Stage C, planned by `plan_velocity_integral_response`
+#         standalone Integral, planned by `plan_velocity_integral_response`
 #         with `combined_selected_response: None`. Decode-only mirror: this
 #         builder named the `IntegralAcquisition::ReproducedProportional` acquisition
 #         kind, removed once it was left with no live installer. Firmware no
@@ -213,7 +213,7 @@ def slot_for_observation(slot_order: int, observation: int, direction: int) -> i
 
 
 def plan_slot_order(plan: dict[str, object]) -> int:
-    """Return the observation slot order declared by one Stage-C plan.
+    """Return the observation slot order declared by one Integral plan.
 
     Captures taken before the field existed leave the bits clear, which is
     forward-first.
@@ -222,12 +222,12 @@ def plan_slot_order(plan: dict[str, object]) -> int:
 
 
 def integral_schema_is_known(schema_revision: int) -> bool:
-    """Return whether one Stage-C evidence schema revision exists in firmware."""
+    """Return whether one Integral evidence schema revision exists in firmware."""
     return 1 <= schema_revision <= _UNIFIED_REST_INTEGRAL_SCHEMA_REVISION
 
 
 def integral_stabilized_recovery_rest(schema_revision: int) -> bool:
-    """Return whether one Stage-C schema emits a rest record per recovery.
+    """Return whether one Integral schema emits a rest record per recovery.
 
     Firmware picked the schedule per plan until it unified rung-origin recovery
     onto the stabilized one. Before that, `integral_recovery_rest_schedule`
@@ -242,7 +242,7 @@ def integral_stabilized_recovery_rest(schema_revision: int) -> bool:
 
 
 def integral_combined_workflow(schema_revision: int) -> bool:
-    """Return whether one Stage-C schema revision is a combined P-then-I run.
+    """Return whether one Integral schema revision is a combined P-then-I run.
 
     Decode-only mirror: firmware deleted
     `VelocityIntegralExecutionPlan::combined_workflow` field and the
@@ -277,7 +277,7 @@ def integral_numerator_for_build(build_revision: int | None) -> int:
 
 
 def velocity_quantum_counts_per_minute(pwm_hz: int, build_features: int) -> int:
-    """Return the velocity-meter quantum the Stage-C transition gate modelled.
+    """Return the velocity-meter quantum the Integral transition gate modelled.
 
     A build declaring `BUILD_FEATURE_STANDARD_METER_QUANTUM` gates on the
     standard meter's fixed sample rate; earlier builds modelled one encoder count
@@ -307,7 +307,7 @@ def _append_integer(buffer: bytearray, value: int, size: int, *, signed: bool = 
 
 
 def integral_plan_digest(plan: dict[str, object]) -> int:
-    """Recompute the firmware Stage-C plan digest over every immutable input."""
+    """Recompute the firmware Integral plan digest over every immutable input."""
     schema_revision = int(plan["schema_revision"])
     combined_workflow = integral_combined_workflow(schema_revision)
     # A newer capture states build_features and, like the single-path
@@ -474,7 +474,7 @@ def derive_integral_ladder(
 ) -> dict[str, object]:
     """Reconstruct the cap-only whole-octave positive-I ladder."""
     if not integral_schema_is_known(schema_revision):
-        raise ValueError("unsupported Stage-C evidence schema")
+        raise ValueError("unsupported Integral evidence schema")
     if shortest_suffix_us < 2:
         raise ValueError("shortest suffix must contain at least two microseconds")
     numerator = integral_numerator_for_build_features(build_features)
@@ -573,13 +573,13 @@ def combined_target_status(
 
 def _checked_u128(value: int) -> int:
     if not 0 <= value <= _U128_MAX:
-        raise ValueError("Stage-C transition checked arithmetic overflow")
+        raise ValueError("Integral transition checked arithmetic overflow")
     return value
 
 
 def _proportional_ladder(p_start: int, p_top: int) -> list[int]:
     if not 0 < p_start <= p_top <= 0x7FFF:
-        raise ValueError("invalid Stage-B ladder geometry")
+        raise ValueError("invalid Proportional ladder geometry")
     gains: list[int] = []
     previous = 0
     for octave in range(16):
@@ -608,7 +608,7 @@ def select_transition_capable_test_point(
     p_start: int | None = None,
     p_top: int | None = None,
 ) -> dict[str, int | bool]:
-    """Independently filter and nominate the Stage-C proportional test point."""
+    """Independently filter and nominate the Integral proportional test point."""
     if (
         not 0 <= proportional_joint_membership <= 0xFFFF_FFFF
         or target_rpm == -(1 << 31)
@@ -618,10 +618,10 @@ def select_transition_capable_test_point(
         or not 0 < moving_stroke_us <= 0xFFFF_FFFF
         or not 0 < probe_limit <= 0xFFFF
     ):
-        raise ValueError("invalid Stage-C transition geometry")
+        raise ValueError("invalid Integral transition geometry")
     target_magnitude = abs(target_rpm)
     if target_magnitude == 0:
-        raise ValueError("invalid Stage-C transition target")
+        raise ValueError("invalid Integral transition target")
     if p_start is None:
         p_start = (256 + target_magnitude - 1) // target_magnitude
     if p_top is None:
@@ -629,7 +629,7 @@ def select_transition_capable_test_point(
     ladder = _proportional_ladder(p_start, p_top)
     valid_bits = (1 << len(ladder)) - 1
     if proportional_joint_membership & ~valid_bits:
-        raise ValueError("Stage-B joint membership exceeds its ladder")
+        raise ValueError("Proportional joint membership exceeds its ladder")
 
     stroke_cycles = _checked_u128(
         (_checked_u128(pwm_hz * moving_stroke_us) + _MICROS_PER_SECOND - 1) // _MICROS_PER_SECOND
@@ -766,7 +766,7 @@ def classify_observation(
     usable_torque_limit: int,
     hard_torque_limit: int,
 ) -> int:
-    """Classify one observation in the Stage-C intrinsic namespace."""
+    """Classify one observation in the Integral intrinsic namespace."""
     rate_low, rate_high = settled_rate_interval_q
     deficit_low, deficit_high = deficit_interval_q
     if (
@@ -808,10 +808,10 @@ def reconstruct_observation(
     rung_index = int(identity["rung_index"])
     slot = int(identity["slot"])
     direction = slot_direction_index(plan_slot_order(plan), slot)
-    # A newer Stage C plan states build_features directly; a legacy plan
-    # reconstructs its rule bits from schema_revision under Stage C's own
-    # namespace (schema_revision here is a Stage C revision by construction,
-    # never Stage B's). A partial test plan carrying neither resolves to None,
+    # A newer Integral plan states build_features directly; a legacy plan
+    # reconstructs its rule bits from schema_revision under Integral's own
+    # namespace (schema_revision here is an Integral revision by construction,
+    # never Proportional's). A partial test plan carrying neither resolves to None,
     # the fail-safe legacy gate, rather than raising.
     build_features = capture_rule_features(plan, stage="c")
     stationarity = _stationary_suffix(raw[-256:], build_features=build_features)
@@ -1028,7 +1028,7 @@ def compare_integral_runs(
 def integral_slot_transition(state: str, outcome: str, comparison: str | None = None) -> str:
     """Return the firmware-owned retained-slot state after one terminal."""
     if state not in {"authority_only", "candidate"}:
-        raise ValueError("Stage-C terminal requires retained authority")
+        raise ValueError("Integral terminal requires retained authority")
     if outcome == "plan_mismatch":
         return state
     if outcome == "fault":
@@ -1036,7 +1036,7 @@ def integral_slot_transition(state: str, outcome: str, comparison: str | None = 
     if outcome == "inconclusive":
         return "authority_only"
     if outcome != "sufficient":
-        raise ValueError("unknown Stage-C terminal outcome")
+        raise ValueError("unknown Integral terminal outcome")
     if state == "authority_only":
         return "candidate"
     if comparison == "complete":
@@ -1147,7 +1147,7 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
     build_features = capture_build_features(plan, stage="c")
     if not integral_schema_is_known(schema_revision):
         mismatches.append(
-            f"plan schema revision {schema_revision} is outside the firmware Stage-C range"
+            f"plan schema revision {schema_revision} is outside the firmware Integral range"
         )
         return
     # The schema revision, not the capture's own field, names the workflow that
@@ -1211,7 +1211,7 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
         if schema_revision >= 7:
             known_flags |= _PLAN_PROBE_CONSTRAINED_TEST_POINT
         if schema_revision >= 12:
-            # Mirrored and paired plans already exist at schema 12 (Stage C's
+            # Mirrored and paired plans already exist at schema 12 (Integral's
             # current revision is 13, one ahead of the slot-order rollout), so
             # every affected capture -- including the ones the drift-bound
             # replay depends on -- was taken at schema 12. Gating this at 13
@@ -1252,7 +1252,7 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
                 build_features=build_features,
             )
         except (KeyError, ValueError) as error:
-            mismatches.append(f"Stage-C test-point reconstruction failed: {error}")
+            mismatches.append(f"Integral test-point reconstruction failed: {error}")
         else:
             for field in ("joint_membership", "fixed_p", "reduced_margin"):
                 if plan[field] != selection[field]:
@@ -1312,9 +1312,9 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
             or len(validity) != 2
             or any(int(value) not in range(5) for value in validity)
         ):
-            mismatches.append("plan Stage-B directional validity is outside the typed domain")
+            mismatches.append("plan Proportional directional validity is outside the typed domain")
         if not isinstance(plan.get("reduced_margin"), bool):
-            mismatches.append("plan Stage-B reduced-margin field is not boolean")
+            mismatches.append("plan Proportional reduced-margin field is not boolean")
     if schema_revision >= 2:
         try:
             recovery = plan_rung_origin_recovery(
@@ -1439,7 +1439,7 @@ def _audit_failed_integral_admission(
         "complete": False,
         "matches_firmware": not mismatches,
         "mismatches": mismatches,
-        "caveats": ["zero-motion Stage-C admission failure; no plan or curve exists"],
+        "caveats": ["zero-motion Integral admission failure; no plan or curve exists"],
         "interpretation": "firmware-schema-7",
     }
 
@@ -1453,7 +1453,7 @@ def _retained_integral_evidence(
     list[list[tuple[int, int] | None]],
     list[int],
 ]:
-    """Apply firmware's Stage-C retention rules to reconstructed rung results."""
+    """Apply firmware's Integral retention rules to reconstructed rung results."""
     positive: list[list[tuple[int, int] | None]] = [[None] * positive_count for _ in range(2)]
     eligible_masks = [0, 0]
     opening: list[tuple[int, int] | None] = [None, None]
@@ -1584,7 +1584,7 @@ def audit_velocity_integral(
             and current_capabilities != {int(plan["limit_evidence_capability"])}
         ):
             fragment_mismatches.append(
-                "Stage C current evidence capability differs from the immutable plan"
+                "Integral current evidence capability differs from the immutable plan"
             )
     run_sequence = int(plan["run_sequence"])
     mismatches = fragment_mismatches
@@ -1633,7 +1633,7 @@ def audit_velocity_integral(
             recovery_owners=(5,),
             observation_kind="integral_observation",
             plan_digest=int(plan["plan_digest"]),
-            label="Stage C",
+            label="Integral",
             stabilized_recovery_rest=stabilized_recovery_rest,
             ordinary_rejection_tail=("velocity_primitive_current",),
         )
@@ -1821,9 +1821,9 @@ def audit_velocity_integral(
     ]
     recovery_rest_rungs = [int(record["rung_index"]) for record in recovery_rest_records]
     if len(recovery_rest_rungs) != len(set(recovery_rest_rungs)):
-        mismatches.append("Stage C carries duplicate recovery rest diagnostics")
+        mismatches.append("Integral carries duplicate recovery rest diagnostics")
     if schema_revision < 11 and recovery_rest_records:
-        mismatches.append("historical Stage C carries recovery-wide rest evidence")
+        mismatches.append("historical Integral carries recovery-wide rest evidence")
     for record in recovery_rest_records:
         mismatches.extend(
             f"recovery rest rung {record['rung_index']}: {item}"
@@ -1837,9 +1837,9 @@ def audit_velocity_integral(
         if int(record["disposition"]) == 0 and (
             len(matching) != 1 or int(matching[0]["outcome"]) not in (1, 5)
         ):
-            mismatches.append("confirmed Stage C recovery rest lacks one moving recovery")
+            mismatches.append("confirmed Integral recovery rest lacks one moving recovery")
         if int(record["disposition"]) == 1 and (matching or int(terminal["cause"]) != 53):
-            mismatches.append("unconfirmed Stage C recovery rest has the wrong successor")
+            mismatches.append("unconfirmed Integral recovery rest has the wrong successor")
     if schema_revision >= 6:
         recovery_flags = int(terminal.get("recovery_flags", -1))
         known_flags = (
@@ -1896,9 +1896,9 @@ def audit_velocity_integral(
                     mismatches.append("terminal probe constraint differs from the plan")
     for record in current_records:
         if int(record["stage"]) != 1:
-            mismatches.append("Stage C current evidence carries the wrong stage")
+            mismatches.append("Integral current evidence carries the wrong stage")
         if int(record["clamp_readback"]) != int(record["clamp_limit"]):
-            mismatches.append("Stage C current evidence clamp readback differs")
+            mismatches.append("Integral current evidence clamp readback differs")
     historical_attribution_caveat = False
     terminal_observation_without_current = (
         (
@@ -1924,7 +1924,7 @@ def audit_velocity_integral(
                 )
             )
         if current_keys != expected_current_keys:
-            mismatches.append("Stage C current evidence does not cover every observation")
+            mismatches.append("Integral current evidence does not cover every observation")
     if schema_revision >= 2:
         recovery_rungs = [int(record["rung_index"]) for record in recovery_records]
         emitted_recovery_rungs = sorted({int(record["rung_index"]) for record in rung_records})
@@ -1979,7 +1979,7 @@ def audit_velocity_integral(
                     int(recovery["outcome"]) in (1, 5)
                     and int(recovery["rung_index"]) not in diagnostic_rung_set
                 ):
-                    mismatches.append("moving Stage C recovery lacks recovery rest evidence")
+                    mismatches.append("moving Integral recovery lacks recovery rest evidence")
         if schema_revision >= 6 and "recovered_with_current_headroom" in terminal:
             recovered = any(int(record["outcome"]) == 5 for record in recovery_records)
             if bool(terminal["recovered_with_current_headroom"]) != recovered:
@@ -2171,7 +2171,7 @@ def audit_velocity_integral(
     # -- `apply_integral_terminal` (`commission_dispatch/integral.rs:273`, `:283`,
     # `:338`, `:358`) and the disarm-failure paths in
     # `commission_dispatch/mod.rs` (`:606`, `:1417`, `:1430`, `:1467`). A
-    # complete, fully sufficient run whose dispatcher found no Stage-C
+    # complete, fully sufficient run whose dispatcher found no Integral
     # authority is faulted this way with all of its evidence intact.
     #
     # Both a reset path and a preserved path report cause 4, so demanding the
@@ -2218,7 +2218,7 @@ def audit_velocity_integral(
         # `combined_selected_response.is_some()`, and which workflow built the
         # plan is fixed by the schema revision: 8 through 13 are combined, 16
         # is breakaway. Schema >= 8 alone therefore does *not* mean combined --
-        # a schema-16 breakaway run is a standalone Stage C and must not be
+        # a schema-16 breakaway run is a standalone Integral and must not be
         # held to combined-terminal semantics -- but neither does the presence
         # of the field decide it. Taking the workflow from the schema, after
         # `_validate_plan` has confirmed the plan's own field agrees, is what
@@ -2410,7 +2410,7 @@ def audit_velocity_integral(
 def audit_integral_reproduction_pair(
     previous: dict[str, object], current: dict[str, object]
 ) -> dict[str, object]:
-    """Audit the firmware terminal decision across two sufficient Stage-C runs."""
+    """Audit the firmware terminal decision across two sufficient Integral runs."""
     mismatches: list[str] = []
     previous_plan = previous.get("plan")
     current_plan = current.get("plan")

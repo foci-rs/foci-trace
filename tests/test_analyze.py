@@ -3326,13 +3326,13 @@ def test_rest_selection_audit_keys_the_walk_on_build_features(monkeypatch) -> No
 
 
 def test_proportional_rest_audit_falls_back_to_historical_grammar() -> None:
-    """A Stage B trace plan carries no rule-contract marker: protocol.py decodes
-    neither build_features nor a schema_revision for the kind-1 Stage B plan. So
+    """A Proportional trace plan carries no rule-contract marker: protocol.py decodes
+    neither build_features nor a schema_revision for the kind-1 Proportional plan. So
     the scored-rest audit cannot resolve the walk and uses the historical
-    grammar. That is correct for the combined flow, whose Stage B runs at
+    grammar. That is correct for the combined flow, whose Proportional runs at
     COMBINED_PROPORTIONAL_SCHEMA_REVISION (14), below the rest-walk floor of 17.
 
-    This asserts through the real decode surface -- an actual decoded Stage B
+    This asserts through the real decode surface -- an actual decoded Proportional
     plan, with no build_features injected -- so it cannot pass on a state the
     decoder does not produce."""
     import struct
@@ -3367,7 +3367,7 @@ def test_proportional_rest_audit_falls_back_to_historical_grammar() -> None:
         }
         evidence = [analyze._VelocitySweepEvidenceFrame(300, 0, b"", payload)]
 
-        # A real decoded Stage B plan (kind 1, 78-byte shape): it carries a
+        # A real decoded Proportional plan (kind 1, 78-byte shape): it carries a
         # plan_digest and velocities but no build_features and no
         # schema_revision, exactly as the decoder produces from the wire.
         plan_values = (

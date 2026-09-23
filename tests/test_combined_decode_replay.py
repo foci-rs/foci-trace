@@ -21,7 +21,7 @@ git-ignored (`docs/artifacts/trace-captures/.gitignore:8` excludes
 `**/*.bin`) and was never force-added, so it is not available as a committed
 fixture here. The one committed capture with "paired" in its name,
 `foc-182-rpm-probe-p384-paired-stepper-x-20260718-212752.bin`, predates the
-Stage-C integral audit path entirely (it decodes to zero
+Integral-phase integral audit path entirely (it decodes to zero
 `velocity_integral_audits`), so it would not exercise the guarantee this
 module pins and was not used.
 """

@@ -796,7 +796,7 @@ def test_breakaway_discovery_terminal_reports_the_discovery_stop_rung() -> None:
 
 
 def test_decodes_a_breakaway_integral_plan_core_without_a_combined_response() -> None:
-    """A breakaway Stage-C plan has `combined_selected_response: None`, and the
+    """A breakaway Integral plan has `combined_selected_response: None`, and the
     encoder writes the flag byte only in the `Some` branch -- so the record
     simply ends. Reading a flag unconditionally at schema >= 8 runs off the end
     and the record decodes as nothing, which is why breakaway captures carried
@@ -2444,7 +2444,7 @@ def _integral_observation_payload(
     rejection_variant: str | None = None,
     drift_ratio_ppm: int | None = None,
 ) -> bytes:
-    """Build a Stage-C ("integral_observation") record byte-for-byte.
+    """Build an Integral ("integral_observation") record byte-for-byte.
 
     Mirrors `encode_observation` in integral_reporting.rs: the fixed prefix,
     then (if present) the u32 drift ratio, then the stationarity code and its
@@ -2531,8 +2531,8 @@ def test_integral_drift_ratio_decodes_before_stationarity_encoding() -> None:
 
 
 def _proportional_observation_payload(*, drift_ratio_ppm: int | None) -> bytes:
-    """Build a Stage-B ("observation") record byte-for-byte, mirroring
-    `encode_observation` in sweep_reporting.rs. Unlike Stage C this record has
+    """Build a Proportional ("observation") record byte-for-byte, mirroring
+    `encode_observation` in sweep_reporting.rs. Unlike Integral this record has
     no variable-length tail: the drift ratio, when present, is the last four
     bytes."""
     payload = bytearray([2])
@@ -2555,8 +2555,8 @@ def _proportional_observation_payload(*, drift_ratio_ppm: int | None) -> bytes:
 
 
 def test_new_and_old_proportional_observation_lengths_both_decode() -> None:
-    """Stage B has no rejection diagnostic block at all, so extending only the
-    Stage C length set would leave every Stage B capture undecoded for the new
+    """Proportional has no rejection diagnostic block at all, so extending only the
+    Integral length set would leave every Proportional capture undecoded for the new
     field while claiming the length-set change was complete."""
     old_payload = _proportional_observation_payload(drift_ratio_ppm=None)
     assert len(old_payload) == 104
@@ -2645,7 +2645,7 @@ def test_rejects_an_unusable_packed_order_byte() -> None:
 # Every payload below reproduces, byte for byte, the fixture values used by
 # the firmware's own golden tests
 # (`breakaway_trace_reporting_tests.rs::encode_*_has_stable_frame_layout`,
-# schema-15 Stage B / schema-14 Stage C per `task-7b-report.md`). A field
+# schema-15 Proportional / schema-14 Integral per `task-7b-report.md`). A field
 # reorder, width change, or dropped field in either `decode_breakaway_record`
 # or the firmware encoder breaks these tests -- that is the point of pinning
 # the exact hex literals rather than round-tripping through the decoder
@@ -3513,7 +3513,7 @@ def test_decode_breakaway_campaign_terminal_matches_the_firmware_golden_bytes() 
 
 
 def test_breakaway_campaign_terminal_names_the_error_behind_a_confirmed_refusal() -> None:
-    """A confirmed acceptance whose Stage-C plan build was refused must say why,
+    """A confirmed acceptance whose Integral plan build was refused must say why,
     not report a self-contradictory Accepted cause with accepted=0.
     """
     from foci_trace.protocol import decode_breakaway_record
@@ -3623,7 +3623,7 @@ def test_the_only_v14_breakaway_tag_that_collides_with_a_legacy_wire_shape_is_th
       the legacy 22-byte `integral_plan_marker`; the historical v13 shape does.
     - Tag 3 (`discovery_planned`) widened from 43 to 45 bytes when
       `schema_revision` was added, and 45 bytes also happens to be the
-      legacy non-compact Stage-B `rung` record's exact length.
+      legacy non-compact Proportional `rung` record's exact length.
 
     Resolving either case needs the marker-adjacency context
     `assemble_breakaway_ticks` provides -- this test pins both collisions so

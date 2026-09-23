@@ -1,4 +1,4 @@
-"""Schema-8 Stage-B component-selection reproduction."""
+"""Schema-8 Proportional component-selection reproduction."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def _split_components(mask: int) -> list[dict[str, int]]:
 def project_schema8_candidates(
     previous: dict[str, object], current: dict[str, object]
 ) -> dict[str, object]:
-    """Apply the schema-8 comparator to two retained Stage-B summaries."""
+    """Apply the schema-8 comparator to two retained Proportional summaries."""
     from .velocity_measurement import (
         _contiguous_proportional_mask,
         _proportional_closed_intersection,
