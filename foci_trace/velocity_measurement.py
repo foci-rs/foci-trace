@@ -75,6 +75,7 @@ BUILD_FEATURE_Q4_12_GAINS = 1 << 0
 BUILD_FEATURE_DRIFT_BOUND_GATE = 1 << 1
 BUILD_FEATURE_SUFFIX_WALK_CONTINUES = 1 << 2
 BUILD_FEATURE_REST_CHAIN_ON_EVIDENCE = 1 << 3
+BUILD_FEATURE_STANDARD_METER_QUANTUM = 1 << 4
 
 # The two firmware crate-version hashes every archived capture carries in its
 # `build_revision` field, retained here to reconstruct `build_features` for

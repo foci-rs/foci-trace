@@ -9,6 +9,7 @@ from .velocity_measurement import (
     _CURRENT_Q4_12_BUILD_REVISION,
     _LEGACY_Q8_8_BUILD_REVISION,
     BUILD_FEATURE_Q4_12_GAINS,
+    BUILD_FEATURE_STANDARD_METER_QUANTUM,
     UnsupportedIntegralRepresentationError,
     VelocityObservation,
     _confidence_half_width,
@@ -28,6 +29,9 @@ from .velocity_measurement import (
 _MICROS_PER_SECOND = 1_000_000
 _LEGACY_Q8_8_I_NUMERATOR = 65_536
 _CURRENT_Q4_12_I_NUMERATOR = 1_048_576
+# Standard velocity meter (VELOCITY_METER_SELECTION=0) quantum: one encoder count
+# per 65536/15 Hz differentiation sample, so 60 * 65536 / 15 counts per minute.
+_STANDARD_VELOCITY_METER_COUNTS_PER_MINUTE = 262_144
 _I_MAX_POSITIVE_RUNGS = 30
 _I_CONFIDENCE_FAMILY_MAX = 128
 _I_OBSERVATIONS_PER_DIRECTION = 4
@@ -270,6 +274,18 @@ def integral_numerator_for_build(build_revision: int | None) -> int:
     raise UnsupportedIntegralRepresentationError(
         f"unsupported integral-gain representation for build 0x{build_revision:08x}"
     )
+
+
+def velocity_quantum_counts_per_minute(pwm_hz: int, build_features: int) -> int:
+    """Return the velocity-meter quantum the Stage-C transition gate modelled.
+
+    A build declaring `BUILD_FEATURE_STANDARD_METER_QUANTUM` gates on the
+    standard meter's fixed sample rate; earlier builds modelled one encoder count
+    per PWM period.
+    """
+    if build_features & BUILD_FEATURE_STANDARD_METER_QUANTUM:
+        return _STANDARD_VELOCITY_METER_COUNTS_PER_MINUTE
+    return 60 * pwm_hz
 
 
 def integral_numerator_for_build_features(build_features: int) -> int:
@@ -588,6 +604,7 @@ def select_transition_capable_test_point(
     pwm_hz: int,
     moving_stroke_us: int,
     probe_limit: int,
+    build_features: int,
     p_start: int | None = None,
     p_top: int | None = None,
 ) -> dict[str, int | bool]:
@@ -617,7 +634,10 @@ def select_transition_capable_test_point(
     stroke_cycles = _checked_u128(
         (_checked_u128(pwm_hz * moving_stroke_us) + _MICROS_PER_SECOND - 1) // _MICROS_PER_SECOND
     )
-    error_num = _checked_u128(_checked_u128(target_magnitude * counts_per_rev) + 60 * pwm_hz)
+    error_num = _checked_u128(
+        _checked_u128(target_magnitude * counts_per_rev)
+        + velocity_quantum_counts_per_minute(pwm_hz, build_features)
+    )
     prefix_scale = _checked_u128(_CURRENT_Q4_12_I_NUMERATOR + _checked_u128(stroke_cycles * 3))
     rhs = _checked_u128(
         _checked_u128(_checked_u128(256 * counts_per_rev) * _CURRENT_Q4_12_I_NUMERATOR)
@@ -661,6 +681,8 @@ def recovery_quantization_exposed(
     counts_per_rev: int,
     pwm_hz: int,
     probe_limit: int,
+    *,
+    build_features: int,
 ) -> bool:
     """Recompute whether one opposite-sign meter quantum can exceed the probe clamp."""
     if not 0 <= p_raw <= 0xFFFF or not 0 <= probe_limit <= 0xFFFF:
@@ -669,7 +691,9 @@ def recovery_quantization_exposed(
         raise ValueError("recovery exposure geometry is outside u32")
     if not _I32_MIN < target_rpm <= _I32_MAX:
         raise ValueError("recovery exposure target cannot be represented as an absolute i32")
-    velocity_term = abs(target_rpm) * counts_per_rev + 60 * pwm_hz
+    velocity_term = abs(target_rpm) * counts_per_rev + velocity_quantum_counts_per_minute(
+        pwm_hz, build_features
+    )
     demand = p_raw * velocity_term
     clamp = 256 * probe_limit * counts_per_rev
     return demand > clamp
@@ -1203,6 +1227,7 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
                     int(plan["encoder_counts_per_rev"]),
                     int(plan["pwm_hz"]),
                     int(plan["usable_torque_limit"]),
+                    build_features=build_features,
                 )
             except ValueError as error:
                 mismatches.append(f"plan recovery exposure reconstruction failed: {error}")
@@ -1224,6 +1249,7 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
                 pwm_hz=int(plan["pwm_hz"]),
                 moving_stroke_us=int(plan["moving_stroke_us"]),
                 probe_limit=int(plan["usable_torque_limit"]),
+                build_features=build_features,
             )
         except (KeyError, ValueError) as error:
             mismatches.append(f"Stage-C test-point reconstruction failed: {error}")

@@ -48,6 +48,7 @@ from foci_trace.velocity_integral import (
 )
 from foci_trace.velocity_measurement import (
     BUILD_FEATURE_Q4_12_GAINS,
+    BUILD_FEATURE_STANDARD_METER_QUANTUM,
     VelocityObservation,
     audit_rung_origin_recovery,
     audit_scored_rest_grammar,
@@ -549,6 +550,7 @@ def test_operational_clamp_transition_ceiling_admits_p1024_not_p1448() -> None:
         p_start=1_024,
         p_top=1_448,
         **common,
+        build_features=BUILD_FEATURE_Q4_12_GAINS,
     )
 
     assert selection["transition_ceiling"] == 1_088
@@ -621,6 +623,7 @@ def test_schema_seven_selects_transition_capable_prefix_independently() -> None:
         pwm_hz=25_000,
         moving_stroke_us=512_000,
         probe_limit=2_534,
+        build_features=BUILD_FEATURE_Q4_12_GAINS,
     )
 
     assert selection == {
@@ -641,6 +644,7 @@ def test_schema_seven_rejects_upper_component_until_target_is_redeclared() -> No
         pwm_hz=25_000,
         moving_stroke_us=512_000,
         probe_limit=2_534,
+        build_features=BUILD_FEATURE_Q4_12_GAINS,
     )
     reconfigured = select_transition_capable_test_point(
         proportional_joint_membership=0x000C_0000,
@@ -649,6 +653,7 @@ def test_schema_seven_rejects_upper_component_until_target_is_redeclared() -> No
         pwm_hz=25_000,
         moving_stroke_us=512_000,
         probe_limit=2_534,
+        build_features=BUILD_FEATURE_Q4_12_GAINS,
     )
 
     assert unavailable["joint_membership"] == 0
@@ -673,12 +678,14 @@ def test_schema_seven_transition_boundary_and_overflow_fail_closed() -> None:
         p_start=979,
         p_top=980,
         **common,
+        build_features=BUILD_FEATURE_Q4_12_GAINS,
     )
     at_or_above = select_transition_capable_test_point(
         proportional_joint_membership=1 << 1,
         p_start=979,
         p_top=980,
         **common,
+        build_features=BUILD_FEATURE_Q4_12_GAINS,
     )
 
     assert below["fixed_p"] == 979
@@ -693,7 +700,49 @@ def test_schema_seven_transition_boundary_and_overflow_fail_closed() -> None:
             probe_limit=(1 << 16) - 1,
             p_start=0x7FFF,
             p_top=0x7FFF,
+            build_features=BUILD_FEATURE_Q4_12_GAINS,
         )
+
+
+def test_standard_meter_quantum_build_keeps_the_ceiling_at_fifty_kilohertz() -> None:
+    common = {
+        "proportional_joint_membership": 1,
+        "target_rpm": 322,
+        "counts_per_rev": 4_000,
+        "pwm_hz": 50_000,
+        "moving_stroke_us": 512_000,
+        "probe_limit": 2_301,
+    }
+    legacy = select_transition_capable_test_point(
+        build_features=BUILD_FEATURE_Q4_12_GAINS, **common
+    )
+    standard = select_transition_capable_test_point(
+        build_features=BUILD_FEATURE_Q4_12_GAINS | BUILD_FEATURE_STANDARD_METER_QUANTUM,
+        **common,
+    )
+
+    assert legacy["transition_ceiling"] == 511
+    assert standard["transition_ceiling"] == 1_416
+
+
+def test_standard_meter_quantum_build_reconstructs_recovery_exposure() -> None:
+    standard = BUILD_FEATURE_Q4_12_GAINS | BUILD_FEATURE_STANDARD_METER_QUANTUM
+    assert (
+        recovery_quantization_exposed(1_024, 264, 4_000, 25_000, 2_534, build_features=standard)
+        is False
+    )
+    assert (
+        recovery_quantization_exposed(1_968, 264, 4_000, 25_000, 2_534, build_features=standard)
+        is False
+    )
+    assert (
+        recovery_quantization_exposed(1_969, 264, 4_000, 25_000, 2_534, build_features=standard)
+        is True
+    )
+    assert (
+        recovery_quantization_exposed(1_969, 264, 4_000, 50_000, 2_534, build_features=standard)
+        is True
+    )
 
 
 def test_schema_seventeen_is_known():
@@ -2679,11 +2728,26 @@ def test_schema_five_plan_reconstructs_exact_counts_and_cleanup_duration() -> No
 
 
 def test_schema_six_reconstructs_exact_recovery_quantization_exposure() -> None:
-    assert recovery_quantization_exposed(724, 264, 4_000, 25_000, 2_534) is False
-    assert recovery_quantization_exposed(1_024, 264, 4_000, 25_000, 2_534) is True
-    assert recovery_quantization_exposed(256, 0, 1, 1, 60) is False
+    assert (
+        recovery_quantization_exposed(
+            724, 264, 4_000, 25_000, 2_534, build_features=BUILD_FEATURE_Q4_12_GAINS
+        )
+        is False
+    )
+    assert (
+        recovery_quantization_exposed(
+            1_024, 264, 4_000, 25_000, 2_534, build_features=BUILD_FEATURE_Q4_12_GAINS
+        )
+        is True
+    )
+    assert (
+        recovery_quantization_exposed(256, 0, 1, 1, 60, build_features=BUILD_FEATURE_Q4_12_GAINS)
+        is False
+    )
     with pytest.raises(ValueError, match="absolute i32"):
-        recovery_quantization_exposed(1_024, -(1 << 31), 4_000, 25_000, 2_534)
+        recovery_quantization_exposed(
+            1_024, -(1 << 31), 4_000, 25_000, 2_534, build_features=BUILD_FEATURE_Q4_12_GAINS
+        )
 
     plan = _plan(schema_revision=6)
     plan["plan_digest"] = integral_plan_digest(plan)
