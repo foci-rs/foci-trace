@@ -48,8 +48,6 @@ from .protocol import (
     PROTOCOL_VERSION,
     SOURCE_KIND_BOARD,
     SOURCE_KIND_USB,
-    VELOCITY_OBSERVATION_FLAG_PID_VELOCITY_ACTUAL_VALID,
-    VELOCITY_OBSERVATION_FLAG_PPTM_ACTUAL_VALID,
     DecodeError,
     Frame,
     assemble_breakaway_ticks,
@@ -818,18 +816,6 @@ def _observe_velocity_observation(
                     None
                     if payload.get("peak_torque_target_abs") is None
                     else int(payload["peak_torque_target_abs"])
-                ),
-                pid_velocity_actual=(
-                    int(payload["pid_velocity_actual"])
-                    if int(payload["flags"]) & VELOCITY_OBSERVATION_FLAG_PID_VELOCITY_ACTUAL_VALID
-                    and payload.get("pid_velocity_actual") is not None
-                    else None
-                ),
-                actual_velocity_pptm=(
-                    int(payload["actual_velocity_pptm"])
-                    if int(payload["flags"]) & VELOCITY_OBSERVATION_FLAG_PPTM_ACTUAL_VALID
-                    and payload.get("actual_velocity_pptm") is not None
-                    else None
                 ),
             ),
             flags=int(payload["flags"]),

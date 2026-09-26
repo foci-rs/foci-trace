@@ -87,6 +87,8 @@ SOURCE_KIND_USB = 2
 
 FLAG_DROP_GAP_BEFORE_THIS_FRAME = 1 << 0
 
+# Reserved, historical-only: no live firmware producer sets these; the decoder
+# keeps them so archived captures still decode their diagnostic value.
 VELOCITY_OBSERVATION_FLAG_PID_VELOCITY_ACTUAL_VALID = 1 << 1
 VELOCITY_OBSERVATION_FLAG_PPTM_ACTUAL_VALID = 1 << 2
 

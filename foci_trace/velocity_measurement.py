@@ -532,8 +532,6 @@ class VelocityObservation:
     stroke_index: int
     target_cpms: int
     peak_torque_target_abs: int | None = None
-    pid_velocity_actual: int | None = None
-    actual_velocity_pptm: int | None = None
 
 
 @dataclass(frozen=True)

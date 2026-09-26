@@ -74,8 +74,6 @@ def _observation(
     stroke_index: int = 0,
     target_cpms: int = 1,
     peak_torque_target_abs: int | None = None,
-    pid_velocity_actual: int | None = None,
-    actual_velocity_pptm: int | None = None,
 ) -> VelocityObservation:
     return VelocityObservation(
         delta_counts=delta_counts,
@@ -84,8 +82,6 @@ def _observation(
         stroke_index=stroke_index,
         target_cpms=target_cpms,
         peak_torque_target_abs=peak_torque_target_abs,
-        pid_velocity_actual=pid_velocity_actual,
-        actual_velocity_pptm=actual_velocity_pptm,
     )
 
 
