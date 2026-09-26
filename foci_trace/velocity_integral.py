@@ -57,12 +57,12 @@ _TERMINAL_RECOVERY_UNAVAILABLE = 1 << 0
 _TERMINAL_RECOVERED_WITH_CURRENT_HEADROOM = 1 << 1
 _TERMINAL_RECOVERY_QUANTIZATION_EXPOSED = 1 << 2
 _TERMINAL_PROBE_CONSTRAINED_TEST_POINT = 1 << 3
-# Schema 7 only. Bit 7 (`_TERMINAL_COMBINED_WORKFLOW`) belongs to the retired
-# combined workflow; schemas from 8 on must leave it clear.
 _TERMINAL_REST_REJECTION_AFTER_SUFFICIENCY = 1 << 4
 _TERMINAL_REST_REJECTION_OWNER_SHIFT = 5
 _TERMINAL_REST_REJECTION_OWNER_MASK = 0b11 << _TERMINAL_REST_REJECTION_OWNER_SHIFT
 _TERMINAL_COMBINED_WORKFLOW = 1 << 7
+_RETIRED_COMBINED_RESPONSE_PRESENCE = 0
+_RETIRED_COMBINED_HORIZON_FIELDS = ("tau_us", "moving_horizon_us", "horizon_class")
 
 _REST_REJECTION_OWNER_NAMES = {
     0b00: "integral_anchor",
@@ -275,8 +275,6 @@ def _append_integer(buffer: bytearray, value: int, size: int, *, signed: bool = 
 def integral_plan_digest(plan: dict[str, object]) -> int:
     """Recompute the firmware Integral plan digest over every immutable input."""
     schema_revision = int(plan["schema_revision"])
-    # A newer capture states build_features; a legacy capture keeps the
-    # build_revision and the schema-gated layout of its archived digest.
     is_post_foc252 = "build_features" in plan
     encoded = bytearray()
     if is_post_foc252:
@@ -299,11 +297,8 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     for interval in plan["directional_pooled_intervals"]:  # type: ignore[union-attr]
         _append_integer(encoded, int(interval[0]), 4, signed=True)
         _append_integer(encoded, int(interval[1]), 4, signed=True)
-    # Firmware still hashes the retired combined selected-response presence
-    # byte as a constant zero. A newer writer does this unconditionally; a
-    # legacy writer only from FIRST_COMBINED.
     if is_post_foc252 or schema_revision >= _FIRST_COMBINED_INTEGRAL_SCHEMA_REVISION:
-        _append_integer(encoded, 0, 1)
+        _append_integer(encoded, _RETIRED_COMBINED_RESPONSE_PRESENCE, 1)
     _append_integer(encoded, int(plan["planned_velocity_mrev_s"]), 4)
     _append_integer(encoded, int(plan["target_velocity_rpm"]), 4, signed=True)
     _append_integer(encoded, int(plan["pwm_hz"]), 4)
@@ -1873,9 +1868,7 @@ def audit_velocity_integral(
         if not 0 <= rung_index < len(expected_gains):
             mismatches.append(f"integral rung is out of range: {rung_index}")
             continue
-        # Only the retired combined workflow reported a response horizon, so a
-        # rung that carries one is not from any audited build.
-        if any(field in record for field in ("tau_us", "moving_horizon_us", "horizon_class")):
+        if any(field in record for field in _RETIRED_COMBINED_HORIZON_FIELDS):
             mismatches.append(
                 f"rung {rung_index} reports a response horizon outside a combined workflow"
             )
@@ -1994,13 +1987,6 @@ def audit_velocity_integral(
         eligible_masks,
     )
     if schema_revision >= _FIRST_COMBINED_INTEGRAL_SCHEMA_REVISION:
-        # From schema 8 on, the recovery-flags workflow bit and the terminal's
-        # 66-byte combined tail belonged only to the retired combined workflow,
-        # so an audited terminal must carry neither. A sufficient standalone run
-        # reports `FirstRunRetained` (0); the breakaway and unified-rest
-        # schemas can also be reproduced via `integral_resume` and then
-        # genuinely report `Complete` (1). A faulted run's outcome carries no
-        # schedule information, so it is exempt.
         recovery_flags = int(terminal.get("recovery_flags", 0))
         if recovery_flags & _TERMINAL_COMBINED_WORKFLOW:
             mismatches.append("terminal combined-workflow flag differs from the plan")

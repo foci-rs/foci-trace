@@ -685,9 +685,6 @@ _INTEGRAL_OBSERVATION_LEGACY_LENGTHS = (46, 47, 77, 80, 96)
 _INTEGRAL_OBSERVATION_LENGTHS_WITH_DRIFT = (50, 51, 81, 84, 100)
 
 
-# Reserved, historical-only: never reassign. These kinds carried the retired
-# combined Proportional sweep and its reproduction evidence, which current
-# captures never contain.
 RETIRED_VELOCITY_SWEEP_EVIDENCE_KINDS = frozenset({1, 6, 7, 8, *range(12, 21)})
 
 

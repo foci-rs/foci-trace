@@ -23,12 +23,6 @@ MAX_MOVING_DRIFT_PPM = 200_000
 # entirely). Mirrors firmware's NO_REPORTABLE_DRIFT_RATIO_PPM: a zero would
 # read as "measured, and tiny", the opposite of the truth here.
 NO_REPORTABLE_DRIFT_RATIO_PPM = 0xFFFFFFFF
-# Integral schema revisions at which firmware's stationarity gates changed:
-# the drift bound replaced the slope-significance test, the suffix walk began
-# continuing past a rejected window, and the scored-rest chain began closing
-# only on evidence against rest. A capture recorded below a threshold was
-# produced by firmware that never ran that rule, so the offline mirror keeps the
-# older behavior for it.
 INTEGRAL_DRIFT_BOUND_MIN_SCHEMA_REVISION = 13  # firmware: INTEGRAL_PLAN_SCHEMA_REVISION
 INTEGRAL_SUFFIX_WALK_MIN_SCHEMA_REVISION = 15
 INTEGRAL_REST_WALK_MIN_SCHEMA_REVISION = 16

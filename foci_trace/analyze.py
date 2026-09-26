@@ -2197,14 +2197,6 @@ def _attach_rest_selection_audit(
     `_RAW_VERIFIABLE_REST_SELECTION_OWNERS` are counted separately in
     `rest_selection_raw_unverifiable_count` and never compared against the
     unrelated window that happens to precede them.
-
-    `stage` selects the schema namespace for resolving the recording
-    firmware's rule contract from the plan (see `capture_rule_features`); the
-    scored-rest walk grammar is applied when that contract declares
-    `BUILD_FEATURE_REST_CHAIN_ON_EVIDENCE`. `None` (no stage known) falls back
-    to the historical grammar, matching a capture that offers no rule signal.
-    An Integral plan record states build_features on the wire, so an Integral
-    rest selection reads the bit directly.
     """
     plan = report.get("plan")
     build_features = (

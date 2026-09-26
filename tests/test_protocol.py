@@ -1786,11 +1786,6 @@ def test_historical_mechanical_id_constants_are_reserved_not_reused() -> None:
 
 
 def test_retired_velocity_sweep_evidence_kinds_are_reserved_not_reused() -> None:
-    """Kinds that carried the retired combined Proportional sweep stay reserved.
-
-    Pin the exact set so a new record cannot quietly take one of these kinds,
-    and check each is rejected before any live decode branch can claim it.
-    """
     from foci_trace.protocol import (
         RETIRED_VELOCITY_SWEEP_EVIDENCE_KINDS,
         _decode_velocity_sweep_evidence,
@@ -3109,15 +3104,6 @@ def test_decode_breakaway_record_rejects_a_length_mismatch_for_a_known_tag() -> 
 
 
 def test_every_breakaway_record_decodes_through_decode_frame() -> None:
-    """`decode_frame` recovers every breakaway record the breakaway decoder accepts.
-
-    Breakaway local tags 0-15 share the leading byte with the velocity-sweep
-    evidence kinds, so `decode_frame` only reaches `decode_breakaway_record`
-    after the generic decoder rejects a payload. Every (builder, header
-    version) pair the breakaway decoder accepts must come out of
-    `decode_frame` as the same breakaway record: no live velocity-sweep
-    evidence shape may share a breakaway record's tag and exact length.
-    """
     from foci_trace.protocol import decode_breakaway_record
 
     builders = (
