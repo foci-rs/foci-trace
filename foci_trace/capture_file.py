@@ -98,6 +98,7 @@ class CaptureReader:
 
     def __init__(self, source: io.BufferedIOBase | io.BytesIO):
         self._source = source
+        self.truncated_tail_bytes = 0
         header = self._source.read(FILE_HEADER_LEN)
         magic, version, header_len, _unix_ns, _mono_ns, _reserved = struct.unpack("<IHHQQQ", header)
         if magic != FILE_MAGIC:
@@ -119,6 +120,7 @@ class CaptureReader:
                 # short header read means the stream ended, so stop cleanly and
                 # keep every complete record before it rather than discarding the
                 # whole capture.
+                self.truncated_tail_bytes = len(header)
                 return
             (
                 magic,
@@ -139,6 +141,7 @@ class CaptureReader:
                 # mid-write. A short payload read means the stream ended, so
                 # stop cleanly and keep every complete record before it rather
                 # than discarding the whole capture.
+                self.truncated_tail_bytes = len(header) + len(payload)
                 return
             if version != RECORD_VERSION or flags != 0:
                 continue

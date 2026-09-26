@@ -358,6 +358,7 @@ class CaptureAnalysis:
     corexy_plus: str | None = None
     corexy_minus: str | None = None
     tracking_lag: TrackingLagReport | None = None
+    truncated_tail_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -2663,7 +2664,8 @@ def analyze_capture(
     states: dict[int, _DeviceState] = {}
     decoded_frames: list[tuple[int, Frame]] = []
     commissioning = CommissioningCaptureBuilder()
-    for record in CaptureReader(source).records():
+    reader = CaptureReader(source)
+    for record in reader.records():
         state = _state(states, record.device_index)
         if record.record_type == RECORD_TYPE_DEVICE_TABLE:
             usb_path, product, serial = _parse_device_table(record.payload)
@@ -2876,6 +2878,7 @@ def analyze_capture(
         corexy_plus=corexy_plus,
         corexy_minus=corexy_minus,
         tracking_lag=tracking_lag,
+        truncated_tail_bytes=reader.truncated_tail_bytes,
     )
 
 
@@ -3224,6 +3227,12 @@ def format_analysis(
         tracking_lag=analysis.tracking_lag,
         mm_per_rev=mm_per_rev,
     )
+    if analysis.truncated_tail_bytes:
+        truncation = (
+            f"capture truncated: final {analysis.truncated_tail_bytes} bytes were a partial "
+            "record and were discarded"
+        )
+        text = "\n".join(part for part in (truncation, text) if part)
     commissioning_text = format_commissioning_report(analysis.commissioning)
     if commissioning_text:
         text = "\n".join(part for part in (text, commissioning_text) if part)
@@ -3350,6 +3359,7 @@ def format_analysis(
 def analysis_to_json(analysis: CaptureAnalysis) -> dict[str, object]:
     """Convert full capture analysis to JSON-compatible dictionaries."""
     return {
+        "truncated_tail_bytes": analysis.truncated_tail_bytes,
         "devices": [
             {
                 "device_index": report.device_index,
@@ -3438,6 +3448,8 @@ def velocity_analysis_to_json(analysis: CaptureAnalysis) -> dict[str, object]:
         result["fixed_gain_amplitude_runs"] = analysis.fixed_gain_amplitude_audits
     if analysis.breakaway_campaign_audits:
         result["breakaway_campaigns"] = analysis.breakaway_campaign_audits
+    if analysis.truncated_tail_bytes:
+        result["truncated_tail_bytes"] = analysis.truncated_tail_bytes
     return result
 
 

@@ -3751,3 +3751,17 @@ def test_integral_run_that_changes_source_is_reported_not_raised() -> None:
     assert audit["run_sequence"] == 14
     assert audit["matches_firmware"] is False
     assert audit["mismatches"] == ["velocity-integral evidence changed source index"]
+
+
+def test_analysis_reports_a_truncated_capture_tail() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+    raw = output.getvalue() + b"\x46\x54\x52\x52\x01"
+
+    analysis = analyze_capture(io.BytesIO(raw))
+
+    assert analysis.truncated_tail_bytes == 5
+    assert analysis_to_json(analysis)["truncated_tail_bytes"] == 5
+    assert velocity_analysis_to_json(analysis)["truncated_tail_bytes"] == 5
+    assert "5 bytes" in format_analysis(analysis)

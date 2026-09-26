@@ -10,8 +10,10 @@ def test_capture_round_trip_firmware_frame() -> None:
     writer.write_device_table(0, 100, "1-1", "FOCI OpenFFBoard (trace)", "ABC", b"meta")
     writer.write_firmware_frame(0, 120, b"frame")
 
-    records = list(CaptureReader(io.BytesIO(output.getvalue())).records())
+    reader = CaptureReader(io.BytesIO(output.getvalue()))
+    records = list(reader.records())
 
+    assert reader.truncated_tail_bytes == 0
     assert records[0].record_type == 1
     assert records[0].payload.endswith(b"meta")
     assert records[1].record_type == 2
@@ -45,10 +47,12 @@ def test_truncated_final_header_is_tolerated() -> None:
     raw = bytearray(output.getvalue())
     raw += struct.pack("<IB", 0x52525446, 1)  # 5 bytes of a 32-byte record header
 
-    records = list(CaptureReader(io.BytesIO(raw)).records())
+    reader = CaptureReader(io.BytesIO(raw))
+    records = list(reader.records())
 
     assert len(records) == 1
     assert records[0].payload == b"frame"
+    assert reader.truncated_tail_bytes == 5
 
 
 def test_truncated_final_record_is_tolerated() -> None:
@@ -64,7 +68,9 @@ def test_truncated_final_record_is_tolerated() -> None:
     )
     raw += truncated_header + b"ab"  # header claims 8 payload bytes; only 2 present
 
-    records = list(CaptureReader(io.BytesIO(raw)).records())
+    reader = CaptureReader(io.BytesIO(raw))
+    records = list(reader.records())
 
     assert len(records) == 1
     assert records[0].payload == b"frame"
+    assert reader.truncated_tail_bytes == 34
