@@ -383,6 +383,7 @@ class _CriticalObservation:
     cached_velocity_offset: int
     cached_velocity_transient_offset: int
     cached_velocity_clamped: bool
+    boot_id: int
 
 
 @dataclass(frozen=True)
@@ -414,6 +415,7 @@ class _PhaseBoundaryObservation:
     channel: int
     old_class: int
     new_class: int
+    boot_id: int
 
 
 @dataclass(frozen=True)
@@ -421,6 +423,7 @@ class _StatusObservation:
     timestamp_ticks: int
     source_key: tuple[int, int]
     dropped_event_log_count: int
+    boot_id: int
 
 
 @dataclass(frozen=True)
@@ -491,7 +494,7 @@ class _DeviceState:
     phase_advance_observations: list[_PhaseAdvanceObservation] = field(default_factory=list)
     phase_boundary_observations: list[_PhaseBoundaryObservation] = field(default_factory=list)
     status_observations: list[_StatusObservation] = field(default_factory=list)
-    event_drop_gap_ticks: list[int] = field(default_factory=list)
+    event_drop_gap_ticks: list[tuple[int, int]] = field(default_factory=list)
     control_detail_observations: list[_ControlDetailObservation] = field(default_factory=list)
     velocity_observations: list[_VelocityFrameObservation] = field(default_factory=list)
     velocity_sweep_evidence: list[_VelocitySweepEvidenceFrame] = field(default_factory=list)
@@ -608,7 +611,11 @@ def _observe_metadata(state: _DeviceState, payload: dict[str, object]) -> None:
 
 
 def _observe_status(
-    state: _DeviceState, source: tuple[int, int], payload: dict[str, object], timestamp_ticks: int
+    state: _DeviceState,
+    source: tuple[int, int],
+    payload: dict[str, object],
+    timestamp_ticks: int,
+    boot_id: int,
 ) -> None:
     status = {name: int(value) for name, value in payload.items()}
     state.first_status_by_source.setdefault(source, status)
@@ -618,6 +625,7 @@ def _observe_status(
             timestamp_ticks=timestamp_ticks,
             source_key=source,
             dropped_event_log_count=int(payload["dropped_event_log_count"]),
+            boot_id=boot_id,
         )
     )
 
@@ -629,6 +637,7 @@ def _observe_critical(
     source_key: tuple[int, int],
     host_recv_ns: int,
     steady_after_s: float,
+    boot_id: int,
 ) -> None:
     if source_key not in state.report.critical_source_keys:
         state.report.critical_source_keys.append(source_key)
@@ -690,6 +699,7 @@ def _observe_critical(
                 payload.get("cached_velocity_transient_offset", 0)
             ),
             cached_velocity_clamped=bool(payload.get("cached_velocity_clamped", False)),
+            boot_id=boot_id,
         )
     )
     if _relative_seconds(state, timestamp_ticks) < steady_after_s:
@@ -1498,6 +1508,20 @@ def _longest_plateau_run(
     return longest_run
 
 
+def _boot_scoped_phase_evidence(
+    state: _DeviceState, segment_samples: list[_CriticalObservation]
+) -> tuple[list[_PhaseBoundaryObservation], list[_StatusObservation], list[int]]:
+    boots = {sample.boot_id for sample in segment_samples}
+    if len(boots) != 1:
+        return [], [], []
+    boot_id = boots.pop()
+    return (
+        [obs for obs in state.phase_boundary_observations if obs.boot_id == boot_id],
+        [obs for obs in state.status_observations if obs.boot_id == boot_id],
+        [tick for boot, tick in state.event_drop_gap_ticks if boot == boot_id],
+    )
+
+
 def _marker_based_phase_bounds(
     boundary_observations: list[_PhaseBoundaryObservation],
     status_observations: list[_StatusObservation],
@@ -2044,9 +2068,7 @@ def _finalize_motion_segments(
             motion_group.next_start_tick,
             velocity_tracking_available,
             decoupling_config,
-            state.phase_boundary_observations,
-            state.status_observations,
-            state.event_drop_gap_ticks,
+            *_boot_scoped_phase_evidence(state, segment_samples),
             source_key[1],
         )
         state.report.motion_segments.append(
@@ -2652,6 +2674,7 @@ def analyze_capture(
                 (header.source_kind, header.source_index),
                 frame.payload,
                 header.timestamp_ticks,
+                header.boot_id,
             )
         elif header.frame_type == FRAME_TYPE_CRITICAL:
             _observe_critical(
@@ -2661,6 +2684,7 @@ def analyze_capture(
                 (header.source_kind, header.source_index),
                 record.host_recv_ns,
                 steady_after_s,
+                header.boot_id,
             )
             commissioning.observe_critical(
                 record.device_index,
@@ -2753,7 +2777,7 @@ def analyze_capture(
                 )
             )
             if header.flags & FLAG_DROP_GAP_BEFORE_THIS_FRAME:
-                state.event_drop_gap_ticks.append(header.timestamp_ticks)
+                state.event_drop_gap_ticks.append((header.boot_id, header.timestamp_ticks))
             if (
                 frame.payload.get("event_name") == "phase_boundary"
                 and "phase_boundary_channel" in frame.payload
@@ -2764,6 +2788,7 @@ def analyze_capture(
                         channel=int(frame.payload["phase_boundary_channel"]),
                         old_class=int(frame.payload["args"][1]),
                         new_class=int(frame.payload["args"][2]),
+                        boot_id=header.boot_id,
                     )
                 )
             commissioning.observe_event(record.device_index, header, frame.payload)

@@ -6,6 +6,7 @@ import pytest
 
 from foci_trace.analyze import (
     CaptureAnalysis,
+    DeviceReport,
     _marker_based_phase_bounds,
     _PhaseBoundaryObservation,
     _StatusObservation,
@@ -180,6 +181,7 @@ def _header(
     source_index: int,
     flags: int = 0,
     version: int = PROTOCOL_VERSION,
+    boot_id: int = 1234,
 ) -> bytes:
     return struct.pack(
         "<IBBBBHBBI Q I I".replace(" ", ""),
@@ -193,7 +195,7 @@ def _header(
         source_index,
         seq,
         ts,
-        1234,
+        boot_id,
         0,
     )
 
@@ -890,7 +892,7 @@ def test_phase_split_follows_kinematics_not_a_fixed_window() -> None:
     assert decel.kinematic_fallback is False
 
 
-def test_motion_phase_report_prefers_firmware_markers_when_reliable() -> None:
+def _firmware_marker_capture_reports(marker_boot_id: int) -> list[DeviceReport]:
     output = io.BytesIO()
     writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
     writer.write_device_table(0, 100, "1-50", "FOCI Ouroboros (trace)", "ABC", b"")
@@ -930,7 +932,15 @@ def test_motion_phase_report_prefers_firmware_markers_when_reliable() -> None:
     writer.write_firmware_frame(
         0,
         marker_accel_cruise_tick,
-        _header(FRAME_TYPE_EVENT, marker_accel_cruise, 100, marker_accel_cruise_tick, 0, 0xFF)
+        _header(
+            FRAME_TYPE_EVENT,
+            marker_accel_cruise,
+            100,
+            marker_accel_cruise_tick,
+            0,
+            0xFF,
+            boot_id=marker_boot_id,
+        )
         + marker_accel_cruise,
     )
     marker_cruise_decel_tick = clock * 125 // 1000
@@ -938,7 +948,15 @@ def test_motion_phase_report_prefers_firmware_markers_when_reliable() -> None:
     writer.write_firmware_frame(
         0,
         marker_cruise_decel_tick,
-        _header(FRAME_TYPE_EVENT, marker_cruise_decel, 101, marker_cruise_decel_tick, 0, 0xFF)
+        _header(
+            FRAME_TYPE_EVENT,
+            marker_cruise_decel,
+            101,
+            marker_cruise_decel_tick,
+            0,
+            0xFF,
+            boot_id=marker_boot_id,
+        )
         + marker_cruise_decel,
     )
 
@@ -948,20 +966,54 @@ def test_motion_phase_report_prefers_firmware_markers_when_reliable() -> None:
     # trace-deadline-pressure/max-spi-cycle fields this helper doesn't emit.
     status_before = _status_payload(drops=0, endpoint_pressure=0)
     writer.write_firmware_frame(
-        0, 0, _header(FRAME_TYPE_STATUS, status_before, 102, 0, 0, 0, version=21) + status_before
+        0,
+        0,
+        _header(
+            FRAME_TYPE_STATUS,
+            status_before,
+            102,
+            0,
+            0,
+            0,
+            version=21,
+            boot_id=marker_boot_id,
+        )
+        + status_before,
     )
     status_after_tick = clock * 500 // 1000
     status_after = _status_payload(drops=0, endpoint_pressure=0)
     writer.write_firmware_frame(
         0,
         status_after_tick,
-        _header(FRAME_TYPE_STATUS, status_after, 103, status_after_tick, 0, 0, version=21)
+        _header(
+            FRAME_TYPE_STATUS,
+            status_after,
+            103,
+            status_after_tick,
+            0,
+            0,
+            version=21,
+            boot_id=marker_boot_id,
+        )
         + status_after,
     )
 
-    reports = summarize_capture(
+    return summarize_capture(
         io.BytesIO(output.getvalue()), steady_after_s=0, motion_gap_s=0.1, motion_min_steps=1000
     )
+
+
+def test_motion_phase_report_ignores_markers_from_another_boot() -> None:
+    reports = _firmware_marker_capture_reports(marker_boot_id=5678)
+
+    segment = reports[0].motion_segments[0]
+    assert {p.phase_boundary_source for p in segment.phase_reports if p.name != "post_0_500ms"} == {
+        "kinematic"
+    }
+
+
+def test_motion_phase_report_prefers_firmware_markers_when_reliable() -> None:
+    reports = _firmware_marker_capture_reports(marker_boot_id=1234)
 
     segment = reports[0].motion_segments[0]
     accel = next(p for p in segment.phase_reports if p.name == "accel")
@@ -3392,7 +3444,11 @@ def test_analyze_capture_reports_tracking_lag_and_budget() -> None:
 
 def _pb(tick: int, channel: int, old_class: int, new_class: int):
     return _PhaseBoundaryObservation(
-        timestamp_ticks=tick, channel=channel, old_class=old_class, new_class=new_class
+        timestamp_ticks=tick,
+        channel=channel,
+        old_class=old_class,
+        new_class=new_class,
+        boot_id=0,
     )
 
 
@@ -3401,6 +3457,7 @@ def _so(tick: int, count: int, channel: int = 1, source_kind: int = SOURCE_KIND_
         timestamp_ticks=tick,
         source_key=(source_kind, channel),
         dropped_event_log_count=count,
+        boot_id=0,
     )
 
 
