@@ -18,10 +18,10 @@ recoverable rate).
 
 This test therefore pins two separate things: that the seven inputs match
 what hardware actually reported, and that `_drift_ratio_ppm` (the offline
-mirror of the firmware's integer-only arithmetic, ported in Task 9) keeps
-every one of them under the bound across every span the block structure
-could have produced. It does not replay the classifier itself: the span
-that produced these records is not recoverable from the rejection path (see
+mirror of the firmware's integer-only arithmetic) keeps every one of them
+under the bound across every span the block structure could have produced.
+It does not replay the classifier itself: the span that produced these
+records is not recoverable from the rejection path (see
 `test_every_captured_rejection_passes_at_every_possible_span`'s docstring),
 so the test sweeps every span a 64-sample suffix could produce rather than
 asserting one.

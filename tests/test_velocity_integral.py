@@ -326,12 +326,8 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
                 "recovery_slot_count": 15,
                 # slot_transition_allowance_us and the combined-only duration
                 # reserve do not apply to a non-combined (append_exact_cap:
-                # false) plan, so schema 8's 13-rung combined durations
-                # (177_751/195_496) are NOT reusable here -- this is a new
-                # combination (non-combined, 13 rungs) with no existing
-                # fixture precedent. Step 4 computes and fills these in from
-                # the real firmware duration function, the same
-                # temporary-Rust-print technique Task 10 Step 1 uses.
+                # false) plan. The plan validator recomputes both durations
+                # offline, so these values must match its duration model.
                 "nominal_workflow_ms": 177_751,
                 "maximum_workflow_ms": 195_496,
             }
@@ -3187,7 +3183,7 @@ def test_standalone_sufficient_but_faulted_terminal_is_accepted() -> None:
     both in `integral_sweep.rs`). Before the `not faulted` guard was added,
     this exact shape -- a sufficient replay whose terminal reports outcome 3
     on a standalone plan -- falsely tripped the standalone-direction outcome
-    check, which is precisely what happened when Task 7 replayed the real
+    check, which is precisely what happened when replaying the real
     `foc213-transport-validated` capture. Assert an empty mismatch list: the
     fault is real firmware output, not a defect to report.
     """
