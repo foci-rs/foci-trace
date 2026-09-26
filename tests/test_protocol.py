@@ -1759,6 +1759,17 @@ def test_decode_phase_boundary_event() -> None:
     assert frame.payload["phase_boundary_new_class_name"] == "decel"
 
 
+def test_decode_spi_sample_duration_event() -> None:
+    payload = struct.pack("<BBHBxxxiiii", 1, 1, 11, 2, 840, 1_210, 0, 0)
+
+    frame = decode_frame(_header(FRAME_TYPE_EVENT, payload) + payload)
+
+    assert frame.payload["subsystem_name"] == "tmc_control"
+    assert frame.payload["event_name"] == "spi_sample_duration"
+    assert frame.payload["spi_sample_cycles"] == 840
+    assert frame.payload["max_spi_sample_cycles"] == 1_210
+
+
 def test_phase_boundary_constants_match_the_firmware_trace_events_table() -> None:
     from foci_trace.protocol import EVENT_PHASE_BOUNDARY, SUBSYSTEM_STEP_TIMER
 
@@ -1791,6 +1802,7 @@ def test_protocol_23_is_supported_and_22_still_decodes_unchanged() -> None:
         (147, "commission_fixed_gain_amplitude_observation"),
         (148, "commission_fixed_gain_amplitude_amplitude"),
         (149, "commission_fixed_gain_amplitude_terminal"),
+        (150, "commission_selected_recovery_rest"),
     ),
 )
 def test_decode_velocity_integral_response_event_names(event_id: int, event_name: str) -> None:

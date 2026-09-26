@@ -92,6 +92,7 @@ VELOCITY_OBSERVATION_FLAG_PPTM_ACTUAL_VALID = 1 << 2
 
 SUBSYSTEM_COMMISSIONING = 7
 SUBSYSTEM_STEP_TIMER = 2
+SUBSYSTEM_TMC_CONTROL = 1
 
 EVENT_COMMISSION_ENGINE_START = 100
 EVENT_COMMISSION_PHASE_START = 101
@@ -136,6 +137,7 @@ EVENT_COMMISSION_FIXED_GAIN_AMPLITUDE_PLAN = 146
 EVENT_COMMISSION_FIXED_GAIN_AMPLITUDE_OBSERVATION = 147
 EVENT_COMMISSION_FIXED_GAIN_AMPLITUDE_AMPLITUDE = 148
 EVENT_COMMISSION_FIXED_GAIN_AMPLITUDE_TERMINAL = 149
+EVENT_COMMISSION_SELECTED_RECOVERY_REST = 150
 EVENT_COMMISSION_REST_SELECTION_DIAGNOSTIC = 151
 EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN = 152
 EVENT_COMMISSION_BREAKAWAY_PROBE_RESULT = 153
@@ -156,6 +158,7 @@ EVENT_COMMISSION_DIAGNOSTIC_WARNING = 200
 # transition. subsystem_id is SUBSYSTEM_STEP_TIMER, not
 # SUBSYSTEM_COMMISSIONING.
 EVENT_PHASE_BOUNDARY = 12
+EVENT_SPI_SAMPLE_DURATION = 11
 
 # Every breakaway-campaign marker event id (152-162), in phase-emission order.
 # The FTRC marker granularity is one `CommissionTraceEvent` per tick -- these
@@ -191,6 +194,7 @@ _PHASE_CLASS_NAMES = {0: "accel", 1: "cruise", 2: "decel"}
 _SUBSYSTEM_NAMES = {
     SUBSYSTEM_COMMISSIONING: "commissioning",
     SUBSYSTEM_STEP_TIMER: "step_timer",
+    SUBSYSTEM_TMC_CONTROL: "tmc_control",
 }
 
 _COMMISSIONING_EVENT_NAMES = {
@@ -236,6 +240,7 @@ _COMMISSIONING_EVENT_NAMES = {
     ),
     EVENT_COMMISSION_FIXED_GAIN_AMPLITUDE_AMPLITUDE: "commission_fixed_gain_amplitude_amplitude",
     EVENT_COMMISSION_FIXED_GAIN_AMPLITUDE_TERMINAL: "commission_fixed_gain_amplitude_terminal",
+    EVENT_COMMISSION_SELECTED_RECOVERY_REST: "commission_selected_recovery_rest",
     EVENT_COMMISSION_REST_SELECTION_DIAGNOSTIC: "commission_rest_selection_diagnostic",
     EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN: "commission_breakaway_probe_plan",
     EVENT_COMMISSION_BREAKAWAY_PROBE_RESULT: "commission_breakaway_probe_result",
@@ -2550,6 +2555,11 @@ def _decode_event(payload: bytes) -> dict[str, Any]:
             decoded["phase_boundary_new_class_name"] = _PHASE_CLASS_NAMES.get(
                 decoded_args[2], f"unknown_{decoded_args[2]}"
             )
+    elif subsystem_id == SUBSYSTEM_TMC_CONTROL and event_id == EVENT_SPI_SAMPLE_DURATION:
+        decoded["event_name"] = "spi_sample_duration"
+        if len(decoded_args) >= 2:
+            decoded["spi_sample_cycles"] = decoded_args[0]
+            decoded["max_spi_sample_cycles"] = decoded_args[1]
     else:
         decoded["event_name"] = f"unknown_{event_id}"
     return {
