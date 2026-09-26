@@ -898,7 +898,6 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             )
             if decoded["schema_revision"] >= 3 or len(payload) == 88:
                 decoded["limit_evidence_capability"] = cursor.take("B")
-            decoded["combined_selected_response"] = False
             schema_revision = decoded["schema_revision"]
             if schema_revision in _RESPONSE_LADDER_INTEGRAL_SCHEMA_REVISIONS:
                 decoded["i_top_cap"] = cursor.take("H")

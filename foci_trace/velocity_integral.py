@@ -1018,8 +1018,6 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
             f"plan schema revision {schema_revision} is outside the firmware Integral range"
         )
         return
-    if plan.get("combined_selected_response", False):
-        mismatches.append("plan carries a retired combined selected response")
     try:
         calculated_digest = integral_plan_digest(plan)
     except (KeyError, OverflowError, TypeError, ValueError) as error:

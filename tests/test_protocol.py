@@ -742,7 +742,6 @@ def test_decodes_a_breakaway_integral_plan_core_without_a_combined_response() ->
     assert frame.payload["record_kind"] == "integral_plan_core"
     assert frame.payload["schema_revision"] == 14
     assert frame.payload["fixed_p"] == 951
-    assert frame.payload["combined_selected_response"] is False
 
 
 def test_schema_seventeen_core_record_decodes_i_top_cap() -> None:
@@ -775,7 +774,6 @@ def test_schema_seventeen_core_record_decodes_i_top_cap() -> None:
 
     assert frame.payload["schema_revision"] == 17
     assert frame.payload["i_top_cap"] == 1_310
-    assert frame.payload["combined_selected_response"] is False
 
 
 def test_schema_sixteen_core_record_decodes_i_top_cap() -> None:
@@ -796,7 +794,6 @@ def test_schema_sixteen_core_record_decodes_i_top_cap() -> None:
 
     assert frame.payload["schema_revision"] == 16
     assert frame.payload["i_top_cap"] == 1_310
-    assert frame.payload["combined_selected_response"] is False
 
 
 def test_schema_sixteen_core_record_truncated_before_i_top_cap_raises() -> None:
@@ -834,7 +831,6 @@ def test_schema_fifteen_core_record_has_no_i_top_cap_and_is_unaffected() -> None
 
     assert frame.payload["schema_revision"] == 15
     assert "i_top_cap" not in frame.payload
-    assert frame.payload["combined_selected_response"] is False
 
 
 def test_schema_seventeen_core_record_truncated_before_i_top_cap_raises() -> None:

@@ -2986,28 +2986,6 @@ def test_unified_rest_capture_without_event_150_is_rejected() -> None:
     ]
 
 
-def test_breakaway_schema_plan_claiming_a_combined_response_is_rejected() -> None:
-    """Opposite direction: schema 14 is built by
-    `plan_breakaway_velocity_integral_response` with
-    `combined_selected_response: None` (integral_plan.rs:1435), so a schema-14
-    plan that claims one is equally impossible. Checked at `_validate_plan`
-    directly -- the whole-capture path is covered by the schema-12 forgery
-    above, and this pins the mapping's other edge.
-    """
-    plan = _plan(14)
-    plan["combined_selected_response"] = True
-    plan["selected_response_intervals_q"] = [
-        [12_900_000, 13_200_000],
-        [-13_100_000, -12_800_000],
-    ]
-    plan["plan_digest"] = integral_plan_digest(plan)
-    mismatches: list[str] = []
-
-    _validate_plan(plan, mismatches)
-
-    assert "plan carries a retired combined selected response" in mismatches
-
-
 def test_breakaway_rung_carrying_a_response_horizon_is_rejected() -> None:
     """The response horizon belongs to the combined workflow, not to schema 9.
     `integral_sweep.rs:2358` computes `(tau_us, horizon_class)` only
