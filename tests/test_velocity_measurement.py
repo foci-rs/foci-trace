@@ -3068,3 +3068,13 @@ def test_audit_breakaway_campaign_reports_target_band_skipped_from_a_real_discov
     assert result["discovery_target_band_skipped"] is True
     assert result["additive_ladder_resolution_budget_exceeded"] is False
     assert result["discovery_planned"] is not None
+
+
+def test_breakaway_probe_plan_marker_without_its_record_is_refused() -> None:
+    ticks = [
+        {"event_id": 152, "timestamp_ticks": 100, "sequence": 1, "records": []},
+        {"event_id": 159, "timestamp_ticks": 200, "sequence": 2, "records": []},
+    ]
+
+    with pytest.raises(ValueError, match="exactly one breakaway_probe_planned"):
+        audit_breakaway_campaign(ticks)

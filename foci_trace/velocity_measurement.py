@@ -2071,7 +2071,7 @@ def _bw_validate_streamed_marker_identity(ticks: list[dict[str, object]]) -> Non
     """
     if not ticks:
         return
-    campaign_run = int(ticks[0]["records"][0][1]["run_sequence"])  # type: ignore[index]
+    campaign_run = int(_bw_single_record(ticks[0], "breakaway_probe_planned")["run_sequence"])
     discovery_digest: int | None = None
     confirmation_digest: int | None = None
     for tick in ticks:
