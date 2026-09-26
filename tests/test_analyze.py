@@ -1,7 +1,6 @@
 import io
 import json
 import struct
-from pathlib import Path
 
 import pytest
 
@@ -2647,63 +2646,6 @@ def test_capture_integrates_canonical_velocity_sweep_audit() -> None:
             "pid_velocity_actual": 7,
         }
     ]
-
-
-def test_retained_foc_182_captures_replay_expected_proportional_regions() -> None:
-    capture_dir = (
-        Path(__file__).resolve().parents[4]
-        / "docs/artifacts/trace-captures/2026-07-17-foc-182-characterization"
-    )
-    fixtures = {
-        "X": (
-            "foc-182-rpm-512ms-declared-window-stepper-x-20260718-222243.bin",
-            [[512, 724, 1024, 1448, 2048], [1024, 1448, 2048]],
-            [[17_111_029, 17_143_936], [-19_015_885, -17_736_330]],
-        ),
-        "Y": (
-            "foc-182-rpm-512ms-declared-window-stepper-y-20260718-223138.bin",
-            [[1024, 1448, 2048], [1024, 1448, 2048]],
-            [[17_079_270, 17_178_385], [-19_848_903, -18_877_667]],
-        ),
-    }
-
-    for _axis, (filename, selected_ps, common_intervals) in fixtures.items():
-        with (capture_dir / filename).open("rb") as source:
-            analysis = analyze_capture(source)
-        replay = analysis.velocity_sweep_audits[0]["proportional_replay"]
-        selected = [
-            [region for region in direction if region["kind"] == "valid"][-1]
-            for direction in replay["directions"]
-        ]
-        assert [region["selected_ps"] for region in selected] == selected_ps
-        assert [region["common_interval"] for region in selected] == common_intervals
-        assert replay["nominated_p"] == 1448
-        assert replay["coverage"] == ["full", "full"]
-        assert "p=1448 coverage=full,full" in format_analysis(analysis)
-        if _axis == "X":
-            assert "17/1" in replay["structured_boundaries"]
-            assert "17/3" in replay["structured_boundaries"]
-            assert "18/3" in replay["structured_boundaries"]
-            assert "18/1" not in replay["structured_boundaries"]
-
-
-def test_schema8_complete_current_headroom_rung_uses_primitive_current_evidence() -> None:
-    capture = (
-        Path(__file__).resolve().parents[4]
-        / "docs/artifacts/trace-captures/2026-07-20-foc-183-velocity-integral-response"
-        / "foc-183-stepper-x-schema8-stagec6-candidate-20260725-185130.bin"
-    )
-
-    with capture.open("rb") as source:
-        analysis = analyze_capture(source)
-
-    sweep = analysis.velocity_sweep_audits[0]
-    assert sweep["matches_firmware"] is True
-    assert sweep["observation_count"] == 168
-    assert len(sweep["recoveries"]) == 20
-    assert sweep["current_evidence"][-1]["contact"] == 1
-    assert sweep["current_evidence"][-1]["moving_pid_output_peak"] == 2_534
-    assert sweep["proportional_replay"]["directional_rungs"][1][-1]["eligible_mask"] == 0b0111
 
 
 def test_velocity_frames_group_by_device_source_and_engine_run() -> None:

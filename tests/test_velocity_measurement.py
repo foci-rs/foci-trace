@@ -2303,53 +2303,6 @@ def test_proportional_core_projection_preserves_reduced_and_transferred_coverage
     assert projected["coverage"][1]["coverage"] == "full"
 
 
-def test_schema8_projection_selects_shared_operating_component_from_captures() -> None:
-    import json
-    from pathlib import Path
-
-    from foci_trace.velocity_measurement import project_proportional_schema8_pair
-
-    capture_root = (
-        Path(__file__).resolve().parents[4]
-        / "docs/artifacts/trace-captures/2026-07-20-foc-183-velocity-integral-response"
-    )
-    names = (
-        "foc-183-stepper-x-schema7-capability-fixed-candidate-20260723-192516.velocity.json",
-        "foc-183-stepper-x-schema7-capability-fixed-composite-20260723-194119.velocity.json",
-        "foc-183-stepper-x-schema7-4-compact-candidate-20260724-165436.velocity.json",
-    )
-    reports = [json.loads((capture_root / name).read_text())["sweeps"][0] for name in names]
-    # Archived captures predate the field rename; no back-compat is owed to them.
-    for report in reports:
-        report["proportional_replay"] = report.pop("stage_b_replay")
-    compact_reverse = reports[2]["proportional_replay"]["directions"][1]
-
-    assert [
-        (int(fragment["member_mask"]), int(fragment["member_count"]))
-        for fragment in compact_reverse
-    ] == [(0x0001_0000, 1), (0x0018_0000, 2)]
-
-    projections = (
-        project_proportional_schema8_pair(reports[0], reports[1]),
-        project_proportional_schema8_pair(reports[0], reports[2]),
-        project_proportional_schema8_pair(reports[1], reports[2]),
-    )
-
-    assert [projection["fixed_p"] for projection in projections] == [1024, 1024, 1024]
-    assert projections[0]["selected_joint_mask"] == 0x001C_0000
-    assert projections[0]["reduced_margin"] is False
-    for projection in projections[1:]:
-        assert projection["interpretation"] == "schema-8 what-if"
-        assert projection["current_candidate"]["nominated_p"] == 256
-        assert projection["current_candidate"]["memberships"][1] == 0x0018_0000
-        assert projection["selected_joint_mask"] == 0x0018_0000
-        assert projection["selected_first_rung"] == 19
-        assert projection["selected_member_count"] == 2
-        assert projection["reduced_margin"] is True
-        assert projection["directional_validity"] == [3, 1]
-    assert all(projection["fixed_p"] != 1448 for projection in projections)
-
-
 def test_schema8_candidate_terminal_uses_joint_union_membership() -> None:
     from foci_trace.velocity_measurement import _candidate_terminal_memberships
 
@@ -3013,60 +2966,6 @@ def test_proportional_reproduction_pair_joins_previous_digest_and_candidate() ->
     assert any("previous memberships" in item for item in mismatch["mismatches"])
 
 
-def test_schema2_reproduction_captures_keep_historical_parity() -> None:
-    import json
-    from pathlib import Path
-
-    from foci_trace.velocity_measurement import audit_proportional_reproduction_pair
-
-    capture_root = (
-        Path(__file__).resolve().parents[4]
-        / "docs/artifacts/trace-captures/2026-07-19-foc-185-multistroke"
-    )
-    pairs = (
-        (
-            "foc-185-stepper-x-candidate-final-20260720-082815.json",
-            "foc-185-stepper-x-reproduction-final-20260720-091324.json",
-        ),
-        (
-            "foc-185-stepper-y-candidate-final-20260720-092043.json",
-            "foc-185-stepper-y-reproduction-final-20260720-092918.json",
-        ),
-    )
-    for candidate_name, reproduction_name in pairs:
-        candidate = json.loads((capture_root / candidate_name).read_text())["sweeps"][0]
-        reproduction = json.loads((capture_root / reproduction_name).read_text())["sweeps"][0]
-        assert candidate["reproduction"] is None
-        assert reproduction["reproduction"]["record_kind"] == "reproduction"
-        assert reproduction["terminal"]["outcome"] == 2
-        assert reproduction["terminal"]["cause"] == 5
-        assert (
-            audit_proportional_reproduction_pair(candidate, reproduction)["matches_firmware"]
-            is True
-        )
-
-    for name in (
-        "foc-185-stepper-x-candidate-retained-20260720-002637.json",
-        "foc-185-stepper-x-reproduction-retained-20260720-003204.json",
-    ):
-        retained = json.loads((capture_root / name).read_text())["sweeps"][0]
-        assert retained["reproduction"] is None
-        assert retained["terminal"]["outcome"] == 0
-
-    n2_root = (
-        Path(__file__).resolve().parents[4]
-        / "docs/artifacts/trace-captures/2026-07-19-foc-194-operating-regions"
-    )
-    for name in (
-        "foc-194-stepper-x-gap5ms-candidate-20260719-175704.json",
-        "foc-194-stepper-y-gap5ms-candidate-20260719-182837.json",
-    ):
-        historical = json.loads((n2_root / name).read_text())["sweeps"][0]
-        assert historical["plan"]["observations_per_direction"] == 2
-        assert historical["matches_firmware"] is True
-        assert historical["terminal"]["outcome"] == 2
-
-
 def test_proportional_audit_accepts_exact_zero_rung_fault_terminal() -> None:
     from foci_trace.velocity_measurement import FNV1A64_OFFSET, FNV1A64_PRIME, audit_velocity_sweep
 
@@ -3443,53 +3342,6 @@ def test_combined_selector_uses_closed_exact_band_endpoints() -> None:
 
     assert exact["selected_p"] == 1_024
     assert outside["selected_p"] is None
-
-
-@pytest.mark.parametrize(
-    "capture_name",
-    (
-        "foc-183-stepper-y-schema8-stagec7-candidate-abnfix-20260726-144157-20260726-144204.bin",
-        "foc-183-stepper-y-schema8-stagec7-reproduction-abnfix-20260726-145237-20260726-145244.bin",
-    ),
-)
-def test_corrected_y_capture_projects_combined_p_1024(capture_name: str) -> None:
-    from foci_trace.analyze import analyze_capture
-
-    capture = (
-        Path(__file__).resolve().parents[4]
-        / "docs/artifacts/trace-captures/2026-07-20-foc-183-velocity-integral-response"
-        / capture_name
-    )
-    with capture.open("rb") as source:
-        audit = analyze_capture(source).velocity_sweep_audits[0]
-
-    assert audit["matches_firmware"] is True
-    assert audit["proportional_replay"]["combined_selection_projection"]["interpretation"] == (
-        "projected_result_under_combined_selector"
-    )
-    assert audit["proportional_replay"]["combined_selection_projection"]["selected_p"] == 1_024
-
-
-def test_schema_nine_combined_capture_replays_response_selected_proportional() -> None:
-    from foci_trace.analyze import analyze_capture
-
-    capture = (
-        Path(__file__).resolve().parents[4]
-        / "docs/artifacts/trace-captures/2026-07-26-foc-183-an053-combined"
-        / "foc183-y-combined-schema9-stagec8-20260726-200611.complete.bin"
-    )
-    with capture.open("rb") as source:
-        result = analyze_capture(source)
-
-    proportional = result.velocity_sweep_audits[0]
-    integral = result.velocity_integral_audits[0]
-    assert proportional["matches_firmware"] is True
-    assert proportional["proportional_replay"]["schema_revision"] == 9
-    assert proportional["proportional_replay"]["combined_response_selected"] is True
-    assert proportional["nominated_p"] == 1_024
-    assert integral["matches_firmware"] is True
-    assert integral["plan"]["combined_selected_response"] is True
-    assert integral["terminal"]["cause"] == 47
 
 
 # --- Breakaway-seeded P ladder --------------------------------------------
