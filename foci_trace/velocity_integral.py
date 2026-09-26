@@ -1990,8 +1990,6 @@ def audit_velocity_integral(
         recovery_flags = int(terminal.get("recovery_flags", 0))
         if recovery_flags & _TERMINAL_COMBINED_WORKFLOW:
             mismatches.append("terminal combined-workflow flag differs from the plan")
-        if terminal.get("combined_workflow", False):
-            mismatches.append("terminal combined tail differs from the plan")
         if (
             not faulted
             and sufficient

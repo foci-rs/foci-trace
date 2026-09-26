@@ -1868,22 +1868,6 @@ def test_decodes_schema_eight_compact_plan_response_intervals() -> None:
     ]
 
 
-def test_decodes_schema_eight_integral_terminal_target() -> None:
-    payload = bytearray([4])
-    payload.extend(struct.pack("<IHQQBBB", 7, 99, 0x11, 0x22, 4, 0, 0xA0))
-    payload.extend(struct.pack("<HHHHII", 120, 120, 15, 15, 0x1FFF, 0x1FFF))
-    payload.extend(struct.pack("<BBBQQ", 3, 3, 0, 10, 20))
-    payload.extend(struct.pack("<BHBB", 1, 1_024, 2, 7))
-
-    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
-
-    assert frame.payload["record_kind"] == "integral_terminal"
-    assert frame.payload["combined_workflow"] is True
-    assert frame.payload["fixed_p"] == 1_024
-    assert frame.payload["target_status"] == 2
-    assert frame.payload["target_terminus"] == 6
-
-
 def test_decodes_gate_rejection_diagnostic_on_an_excluded_observation() -> None:
     """An excluded observation reports why the gate rejected it.
 

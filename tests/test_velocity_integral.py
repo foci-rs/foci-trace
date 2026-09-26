@@ -3091,32 +3091,6 @@ def test_immediate_scored_terminal_claiming_the_combined_workflow_flag_is_reject
     assert audit["mismatches"] == ["terminal combined-workflow flag differs from the plan"]
 
 
-def test_immediate_scored_terminal_carrying_the_combined_tail_is_rejected() -> None:
-    """Tail-only: a genuine immediate-scored terminal must not carry the
-    decoded combined tail (`combined_workflow`/`fixed_p`/`target_status`/
-    `target_terminus`, only ever set by `protocol.py` when the wire payload
-    is the 66-byte combined variant), even with an honest `recovery_flags`
-    byte. Before this round, the agreement check only looked at the
-    recovery_flags bit, so a terminal that carried the tail while leaving
-    the flag clear produced no mismatch at all -- exactly the gap the
-    reviewer reproduced.
-    """
-    raw, records = _synthetic_complete_capture(schema_revision=14)
-    terminal_raw, terminal = records[-1]
-    terminal = {
-        **terminal,
-        "combined_workflow": True,
-        "fixed_p": 1_024,
-        "target_status": 3,
-        "target_terminus": None,
-    }
-    records[-1] = (terminal_raw, terminal)
-
-    audit = audit_velocity_integral(raw, records)
-
-    assert audit["mismatches"] == ["terminal combined tail differs from the plan"]
-
-
 def test_standalone_sufficient_terminal_claiming_the_combined_outcome_is_rejected() -> None:
     """A sufficient, genuinely standalone (immediate-scored) run must report
     outcome 0 (`FirstRunRetained`), never outcome 1 (`Complete`):

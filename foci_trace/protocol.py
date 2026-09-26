@@ -9,8 +9,6 @@ from typing import Any
 from ._vocabulary_generated import BREAKAWAY_PHASE_NAMES, PHASE_NAMES
 from .scored_rest import select_causal_rest_suffixes
 from .velocity_integral import (
-    _COMBINED_INTEGRAL_SCHEMA_REVISION,
-    _FIRST_COMBINED_INTEGRAL_SCHEMA_REVISION,
     _RESPONSE_LADDER_INTEGRAL_SCHEMA_REVISIONS,
 )
 
@@ -897,24 +895,8 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             )
             if decoded["schema_revision"] >= 3 or len(payload) == 88:
                 decoded["limit_evidence_capability"] = cursor.take("B")
-            # The encoder writes this block only when the plan actually carries
-            # a combined selected response; a breakaway Integral plan has none
-            # and its record simply ends here. Presence is therefore signalled
-            # by remaining bytes, not by the schema revision alone.
             decoded["combined_selected_response"] = False
             schema_revision = decoded["schema_revision"]
-            is_combined_schema = (
-                _FIRST_COMBINED_INTEGRAL_SCHEMA_REVISION
-                <= schema_revision
-                <= _COMBINED_INTEGRAL_SCHEMA_REVISION
-            )
-            if is_combined_schema and cursor.offset < len(payload):
-                if cursor.take("B") != 1:
-                    raise DecodeError("combined integral plan core is invalid")
-                decoded["combined_selected_response"] = True
-                decoded["selected_response_intervals_q"] = [
-                    [cursor.take("i"), cursor.take("i")] for _ in range(2)
-                ]
             if schema_revision in _RESPONSE_LADDER_INTEGRAL_SCHEMA_REVISIONS:
                 decoded["i_top_cap"] = cursor.take("H")
             decoded["record_kind"] = "integral_plan_core"
@@ -1191,7 +1173,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             decoded["target_terminus"] = None
         decoded["plan_digest"] = decoded["plan_digest_low"] | (decoded["plan_digest_high"] << 32)
         decoded["record_kind"] = "integral_rung"
-    elif kind == 4 and len(payload) in (58, 59, 61, 62, 66):
+    elif kind == 4 and len(payload) in (58, 59, 61, 62):
         fields = [
             ("run_sequence", "I"),
             ("evidence_sequence", "H"),
@@ -1204,7 +1186,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         ]
         if len(payload) == 59:
             fields.append(("recovery_unavailable", "B"))
-        elif len(payload) in (61, 62, 66):
+        elif len(payload) in (61, 62):
             fields.append(("recovery_flags", "B"))
         fields.extend(
             (
@@ -1219,7 +1201,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             tuple(fields),
         )
         decoded["eligible_masks"] = [cursor.take("I") for _ in range(2)]
-        if len(payload) in (61, 62, 66):
+        if len(payload) in (61, 62):
             decoded["opening_available_mask"] = cursor.take("B")
             decoded["bookend_available_mask"] = cursor.take("B")
             decoded["recovery_unavailable"] = decoded["recovery_flags"] & 1
@@ -1233,16 +1215,6 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         decoded["run_completed_us"] = cursor.take("I") | (cursor.take("I") << 32)
         if len(payload) == 62:
             decoded["cause_namespace"] = cursor.take("B")
-        if len(payload) == 66:
-            if cursor.take("B") != 1:
-                raise DecodeError("combined integral terminal marker is invalid")
-            decoded["combined_workflow"] = True
-            decoded["fixed_p"] = cursor.take("H")
-            decoded["target_status"] = cursor.take("B")
-            target_terminus_plus_one = cursor.take("B")
-            decoded["target_terminus"] = (
-                None if target_terminus_plus_one == 0 else target_terminus_plus_one - 1
-            )
         decoded["plan_digest"] = decoded["plan_digest_low"] | (decoded["plan_digest_high"] << 32)
         decoded["digest"] = decoded["digest_low"] | (decoded["digest_high"] << 32)
         decoded["record_kind"] = "integral_terminal"
