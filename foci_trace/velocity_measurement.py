@@ -3183,10 +3183,6 @@ def audit_breakaway_campaign(
         # parameters, no nomination-style inflation -- and independently
         # verify containment, the candidate/confirmed P match, and the fixed
         # four-forward-then-four-reverse `CONFIRMATION_SLOT_ORDER` schedule.
-        # This is the exact check a human reviewer demonstrated the OLD
-        # audit skipped: an accepted confirmation with a reported interval
-        # mutated to sit outside [70, 80] used to pass with
-        # `matches_firmware=True`. It cannot now.
         raw_confirmation_observations = {
             int(decoded["slot_index"]): decoded
             for decoded in _bw_collect_raw_observations(
