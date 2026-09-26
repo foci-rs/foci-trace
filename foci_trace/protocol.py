@@ -831,11 +831,12 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         decoded["record_kind"] = "integral_plan_marker"
         if len(payload) == 98:
             if cursor.take("B") != 1:
-                raise DecodeError("combined integral plan marker is invalid")
-            decoded["combined_selected_response"] = True
-            decoded["selected_response_intervals_q"] = [
-                [cursor.take("i"), cursor.take("i")] for _ in range(2)
-            ]
+                raise DecodeError("fixed-gain-amplitude plan marker is invalid")
+            digest_low = cursor.take("I")
+            decoded["acceptance_plan_digest"] = digest_low | (cursor.take("I") << 32)
+            decoded["qualifier_bits"] = cursor.take("i")
+            if cursor.take("i") != 0:
+                raise DecodeError("fixed-gain-amplitude plan marker is invalid")
             decoded["recovery_lower_rate_q"] = [
                 cursor.take("Q"),
                 cursor.take("Q"),

@@ -1521,14 +1521,6 @@ def audit_velocity_integral(
                 mismatches,
                 "plan marker",
             )
-        if schema_revision >= 8:
-            _compare_fields(
-                plan,
-                marker_records[0],
-                ("selected_response_intervals_q",),
-                mismatches,
-                "plan marker",
-            )
     digest = _fnv1a64(_compact_plan_marker(plan, run_sequence))
     for raw, _value in nonterminal:
         digest = _fnv1a64(raw, digest)

@@ -1283,6 +1283,43 @@ def test_decodes_recovery_aware_velocity_integral_plan_marker() -> None:
     assert frame.payload["recovery_slot_count"] == 7
 
 
+def test_decodes_fixed_gain_amplitude_compact_plan_marker_suffix() -> None:
+    base = struct.pack(
+        "<BIQHIiIHBHIIIIIIIBHH",
+        0,
+        7,
+        0x0123_4567_89AB_CDEF,
+        1_448,
+        4_394,
+        264,
+        25_000,
+        1_024,
+        5,
+        20,
+        512_000,
+        500_000,
+        236_000,
+        66_456,
+        1_000,
+        1_816_958,
+        3_000_000,
+        7,
+        2_816,
+        2_534,
+    )
+    suffix = struct.pack("<BIIiiQQ", 1, 0x3333_4444, 0x1111_2222, 0x0123, 0, 900, 1_100)
+    payload = base + suffix
+
+    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
+
+    assert len(payload) == 98
+    assert frame.payload["record_kind"] == "integral_plan_marker"
+    assert frame.payload["acceptance_plan_digest"] == 0x1111_2222_3333_4444
+    assert frame.payload["qualifier_bits"] == 0x0123
+    assert frame.payload["recovery_lower_rate_q"] == [900, 1_100]
+    assert "combined_selected_response" not in frame.payload
+
+
 def test_decodes_velocity_integral_response_observation() -> None:
     payload = bytearray([2])
     payload.extend(struct.pack("<IHII", 7, 1, 0x1122_3344, 0x5566_7788))
