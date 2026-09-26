@@ -150,7 +150,7 @@ class LiveSummary:
                 device.fixed_gain_amplitude_cause = int(frame.payload["cause"])
             elif kind == "rung_origin_recovery":
                 device.rung_origin_recoveries += 1
-                if int(frame.payload["outcome"]) >= 2:
+                if int(frame.payload["outcome"]) in (2, 3, 4):
                     device.contained_recoveries += 1
             elif kind == "outer_safety_timing":
                 device.outer_gap_max_us = int(frame.payload["max_realized_gap_us"])

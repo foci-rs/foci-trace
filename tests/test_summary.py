@@ -170,7 +170,7 @@ def test_summary_namespaces_fixed_gain_amplitude_status() -> None:
 
 def test_summary_tracks_successful_and_contained_recoveries() -> None:
     summary = LiveSummary()
-    for sequence, outcome in enumerate((0, 1, 2, 3), 1):
+    for sequence, outcome in enumerate((0, 1, 2, 3, 4, 5), 1):
         summary.observe(
             0,
             sequence,
@@ -194,8 +194,8 @@ def test_summary_tracks_successful_and_contained_recoveries() -> None:
 
     text = summary.render()
 
-    assert "recoveries=4" in text
-    assert "contained_recoveries=2" in text
+    assert "recoveries=6" in text
+    assert "contained_recoveries=3" in text
 
 
 def test_summary_keeps_best_effort_clip_uncertainty_visible() -> None:
