@@ -32,7 +32,11 @@ from .contour import (
     contour_segment_report,
     pair_motor_samples,
 )
-from .fixed_gain_amplitude import audit_fixed_gain_amplitude, compare_amplitude_runs
+from .fixed_gain_amplitude import (
+    audit_fixed_gain_amplitude,
+    compare_amplitude_runs,
+    unreplayable_amplitude_report,
+)
 from .protocol import (
     EVENT_COMMISSION_OUTER_SAFETY_TIMING,
     FLAG_DROP_GAP_BEFORE_THIS_FRAME,
@@ -2358,7 +2362,16 @@ def _fixed_gain_amplitude_audits(states: dict[int, _DeviceState]) -> list[dict[s
                 continue
             source_indexes = {item.source_index for item in amplitude_records}
             if len(source_indexes) != 1:
-                raise ValueError("fixed-gain-amplitude evidence changed source index")
+                report = unreplayable_amplitude_report(
+                    [(item.raw_payload, item.payload) for item in amplitude_records],
+                    "fixed-gain-amplitude evidence changed source index",
+                    "fixed-gain amplitude run spans more than one source",
+                )
+                report["device_index"] = device_index
+                report["source_index"] = None
+                report["serial"] = state.report.serial or state.report.metadata_serial
+                audits.append(report)
+                continue
             source_index = next(iter(source_indexes))
             start = min(item.timestamp_ticks for item in amplitude_records)
             end = max(item.timestamp_ticks for item in amplitude_records)

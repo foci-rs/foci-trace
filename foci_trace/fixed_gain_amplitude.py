@@ -292,7 +292,23 @@ def _compare_fields(
 def audit_fixed_gain_amplitude(
     evidence_records: list[tuple[bytes, dict[str, Any]]],
 ) -> dict[str, Any]:
-    """Replay one amplitude run from canonical records and verify its terminal."""
+    """Replay one amplitude run from canonical records and verify its terminal.
+
+    Evidence too malformed to replay is reported as a mismatch for this run
+    alone, so one damaged run never aborts the rest of the capture's analysis.
+    """
+    try:
+        return _replay_fixed_gain_amplitude(evidence_records)
+    except ValueError as error:
+        return unreplayable_amplitude_report(
+            evidence_records, str(error), "malformed fixed-gain amplitude evidence"
+        )
+
+
+def unreplayable_amplitude_report(
+    evidence_records: list[tuple[bytes, dict[str, Any]]], mismatch: str, caveat: str
+) -> dict[str, Any]:
+    """Build the failed-audit report for a run whose evidence cannot be replayed."""
     plans = [
         value
         for _raw, value in evidence_records
@@ -304,20 +320,38 @@ def audit_fixed_gain_amplitude(
         if value.get("record_kind") == "fixed_gain_amplitude_terminal"
     ]
     identities = plans or terminals or [value for _raw, value in evidence_records]
+    return {
+        "run_sequence": int(identities[0].get("run_sequence", 0)) if identities else 0,
+        "plan": None,
+        "terminal": dict(terminals[0]) if len(terminals) == 1 else None,
+        "amplitudes": [],
+        "complete": False,
+        "matches_firmware": False,
+        "mismatches": [mismatch],
+        "caveats": [caveat],
+    }
+
+
+def _replay_fixed_gain_amplitude(
+    evidence_records: list[tuple[bytes, dict[str, Any]]],
+) -> dict[str, Any]:
+    plans = [
+        value
+        for _raw, value in evidence_records
+        if value.get("record_kind") == "fixed_gain_amplitude_plan"
+    ]
+    terminals = [
+        value
+        for _raw, value in evidence_records
+        if value.get("record_kind") == "fixed_gain_amplitude_terminal"
+    ]
     if len(plans) != 3 or len(terminals) != 1:
-        return {
-            "run_sequence": int(identities[0].get("run_sequence", 0)) if identities else 0,
-            "plan": None,
-            "terminal": dict(terminals[0]) if len(terminals) == 1 else None,
-            "amplitudes": [],
-            "complete": False,
-            "matches_firmware": False,
-            "mismatches": [
-                "partial fixed-gain-amplitude capture: three plan fragments and one "
-                "terminal are required"
-            ],
-            "caveats": ["partial fixed-gain amplitude validation capture"],
-        }
+        return unreplayable_amplitude_report(
+            evidence_records,
+            "partial fixed-gain-amplitude capture: three plan fragments and one "
+            "terminal are required",
+            "partial fixed-gain amplitude validation capture",
+        )
     mismatches: list[str] = []
     plan = assemble_amplitude_plan(plans)
     slot_order = int(plan.get("slot_order", 0))

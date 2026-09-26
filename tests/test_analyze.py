@@ -3630,3 +3630,29 @@ def test_reverse_slot_order_amplitude_runs_are_compared(monkeypatch) -> None:
     audits = analyze._fixed_gain_amplitude_audits({0: state})
 
     assert audits[1]["cross_run_comparison"] == {"compared": True}
+
+
+def test_amplitude_run_that_changes_source_is_reported_not_raised() -> None:
+    from foci_trace import analyze
+
+    state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
+    state.velocity_sweep_evidence = [
+        analyze._VelocitySweepEvidenceFrame(
+            tick,
+            source_index,
+            b"",
+            {
+                "namespace": "fixed_gain_amplitude",
+                "record_kind": "fixed_gain_amplitude_plan",
+                "run_sequence": 12,
+                "fragment": 0,
+            },
+        )
+        for tick, source_index in ((1, 0), (2, 1))
+    ]
+
+    (audit,) = analyze._fixed_gain_amplitude_audits({0: state})
+
+    assert audit["run_sequence"] == 12
+    assert audit["matches_firmware"] is False
+    assert audit["mismatches"] == ["fixed-gain-amplitude evidence changed source index"]

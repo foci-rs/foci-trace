@@ -541,3 +541,16 @@ def test_schema_one_execution_marker_decodes_without_recovery_rates() -> None:
     assert decoded["acceptance_plan_digest"] == plan["acceptance_plan_digest"]
     assert decoded["qualifier_bits"] == plan["qualifier_bits"]
     assert "recovery_lower_rate_q" not in decoded
+
+
+def test_amplitude_audit_reports_a_duplicate_plan_fragment_as_a_mismatch() -> None:
+    evidence = _minimal_amplitude_evidence(
+        nonterminal_sequences=[1, 2], terminal_evidence_sequence=3
+    )
+    evidence[2] = (evidence[2][0], {**evidence[2][1], "fragment": 1})
+
+    audit = audit_fixed_gain_amplitude(evidence)
+
+    assert audit["run_sequence"] == 7
+    assert audit["matches_firmware"] is False
+    assert any("fragments 0, 1, and 2" in mismatch for mismatch in audit["mismatches"])
