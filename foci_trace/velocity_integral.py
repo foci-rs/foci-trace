@@ -60,7 +60,7 @@ _TERMINAL_PROBE_CONSTRAINED_TEST_POINT = 1 << 3
 _TERMINAL_REST_REJECTION_AFTER_SUFFICIENCY = 1 << 4
 _TERMINAL_REST_REJECTION_OWNER_SHIFT = 5
 _TERMINAL_REST_REJECTION_OWNER_MASK = 0b11 << _TERMINAL_REST_REJECTION_OWNER_SHIFT
-_TERMINAL_COMBINED_WORKFLOW = 1 << 7
+_TERMINAL_RETIRED_COMBINED_WORKFLOW = 1 << 7
 _RETIRED_COMBINED_RESPONSE_PRESENCE = 0
 _RETIRED_COMBINED_HORIZON_FIELDS = ("tau_us", "moving_horizon_us", "horizon_class")
 
@@ -127,6 +127,11 @@ _COMBINED_INTEGRAL_SCHEMA_REVISION = 13
 _BREAKAWAY_INTEGRAL_SCHEMA_REVISION = 16
 _HALF_OCTAVE_INTEGRAL_SCHEMA_REVISION = 17
 _UNIFIED_REST_INTEGRAL_SCHEMA_REVISION = 18
+
+_RESUMABLE_INTEGRAL_SCHEMA_REVISIONS = (
+    _BREAKAWAY_INTEGRAL_SCHEMA_REVISION,
+    _UNIFIED_REST_INTEGRAL_SCHEMA_REVISION,
+)
 
 # Every schema whose ladder carries the half-octave insertion and hashes
 # `i_top_cap`. All three are response-ladder plans; they are listed rather than
@@ -275,9 +280,9 @@ def _append_integer(buffer: bytearray, value: int, size: int, *, signed: bool = 
 def integral_plan_digest(plan: dict[str, object]) -> int:
     """Recompute the firmware Integral plan digest over every immutable input."""
     schema_revision = int(plan["schema_revision"])
-    is_post_foc252 = "build_features" in plan
+    states_build_features = "build_features" in plan
     encoded = bytearray()
-    if is_post_foc252:
+    if states_build_features:
         _append_integer(encoded, int(plan["build_features"]), 2)
     else:
         _append_integer(encoded, int(plan["build_revision"]), 4)
@@ -297,7 +302,7 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     for interval in plan["directional_pooled_intervals"]:  # type: ignore[union-attr]
         _append_integer(encoded, int(interval[0]), 4, signed=True)
         _append_integer(encoded, int(interval[1]), 4, signed=True)
-    if is_post_foc252 or schema_revision >= _FIRST_COMBINED_INTEGRAL_SCHEMA_REVISION:
+    if states_build_features or schema_revision >= _FIRST_COMBINED_INTEGRAL_SCHEMA_REVISION:
         _append_integer(encoded, _RETIRED_COMBINED_RESPONSE_PRESENCE, 1)
     _append_integer(encoded, int(plan["planned_velocity_mrev_s"]), 4)
     _append_integer(encoded, int(plan["target_velocity_rpm"]), 4, signed=True)
@@ -1659,7 +1664,7 @@ def audit_velocity_integral(
                 _TERMINAL_REST_REJECTION_AFTER_SUFFICIENCY | _TERMINAL_REST_REJECTION_OWNER_MASK
             )
         if schema_revision >= 8:
-            known_flags |= _TERMINAL_COMBINED_WORKFLOW
+            known_flags |= _TERMINAL_RETIRED_COMBINED_WORKFLOW
         if recovery_flags < 0 or recovery_flags & ~known_flags:
             mismatches.append("terminal recovery flags contain reserved bits")
         else:
@@ -1978,16 +1983,12 @@ def audit_velocity_integral(
     )
     if schema_revision >= _FIRST_COMBINED_INTEGRAL_SCHEMA_REVISION:
         recovery_flags = int(terminal.get("recovery_flags", 0))
-        if recovery_flags & _TERMINAL_COMBINED_WORKFLOW:
+        if recovery_flags & _TERMINAL_RETIRED_COMBINED_WORKFLOW:
             mismatches.append("terminal combined-workflow flag differs from the plan")
         if (
             not faulted
             and sufficient
-            and schema_revision
-            not in (
-                _BREAKAWAY_INTEGRAL_SCHEMA_REVISION,
-                _UNIFIED_REST_INTEGRAL_SCHEMA_REVISION,
-            )
+            and schema_revision not in _RESUMABLE_INTEGRAL_SCHEMA_REVISIONS
             and outcome != 0
         ):
             mismatches.append("standalone sufficient run falsely reports the combined outcome")
