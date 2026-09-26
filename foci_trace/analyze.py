@@ -2381,7 +2381,7 @@ def _fixed_gain_amplitude_audits(states: dict[int, _DeviceState]) -> list[dict[s
             terminal = report.get("terminal")
             key = (device_index, source_index)
             if isinstance(plan, dict) and isinstance(terminal, dict):
-                order = int(plan.get("order", 0))
+                order = int(plan.get("amplitude_order", 0))
                 outcome = int(terminal.get("outcome", -1))
                 if order == 1 and outcome == 0:
                     ascending[key] = report

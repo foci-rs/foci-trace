@@ -3595,3 +3595,38 @@ def test_marker_based_bounds_none_when_only_foci_source_baseline_available() -> 
     observations = [_pb(300, 0, 0, 1), _pb(700, 0, 1, 2)]
     status = [_so(0, 0, source_kind=_SOURCE_KIND_FOCI), _so(1000, 0)]
     assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
+
+
+def test_reverse_slot_order_amplitude_runs_are_compared(monkeypatch) -> None:
+    from foci_trace import analyze
+
+    state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
+    state.velocity_sweep_evidence = [
+        analyze._VelocitySweepEvidenceFrame(
+            tick,
+            0,
+            b"",
+            {
+                "namespace": "fixed_gain_amplitude",
+                "record_kind": "fixed_gain_amplitude_plan",
+                "run_sequence": run_sequence,
+                "fragment": 0,
+            },
+        )
+        for tick, run_sequence in ((1, 10), (2, 11))
+    ]
+    plans = {
+        10: {"order": 0x11, "amplitude_order": 1, "slot_order": 1},
+        11: {"order": 0x12, "amplitude_order": 2, "slot_order": 1},
+    }
+
+    def amplitude(records):
+        run_sequence = int(records[0][1]["run_sequence"])
+        return {"plan": dict(plans[run_sequence]), "terminal": {"outcome": 0}}
+
+    monkeypatch.setattr(analyze, "audit_fixed_gain_amplitude", amplitude)
+    monkeypatch.setattr(analyze, "compare_amplitude_runs", lambda *_args: {"compared": True})
+
+    audits = analyze._fixed_gain_amplitude_audits({0: state})
+
+    assert audits[1]["cross_run_comparison"] == {"compared": True}
