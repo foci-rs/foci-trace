@@ -12,19 +12,15 @@ from foci_trace.velocity_integral import (
     SLOT_ORDER_PAIRED_OUT_AND_BACK,
     SLOT_ORDER_REVERSE_FIRST,
     UnsupportedIntegralRepresentationError,
-    _compact_plan_marker,
     _retained_integral_evidence,
     _validate_plan,
     audit_integral_reproduction_pair,
     audit_velocity_integral,
     classify_observation,
-    combined_target_status,
     compare_integral_runs,
     delta_e,
     depth_three_consensus,
     derive_integral_ladder,
-    integral_combined_workflow,
-    integral_deficit_reaches_target,
     integral_numerator_for_build,
     integral_numerator_for_build_features,
     integral_plan_digest,
@@ -365,20 +361,6 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
     return plan
 
 
-def test_schema_ten_replays_toward_zero_target_and_recovery_velocity() -> None:
-    plan = _plan(schema_revision=10)
-    plan["plan_digest"] = integral_plan_digest(plan)
-    plan_mismatches: list[str] = []
-    _validate_plan(plan, plan_mismatches)
-
-    _, recovery = _recovery_record(0, 1)
-    recovery["planned_velocity_mrev_s"] = 4_383
-    recovery_audit = audit_rung_origin_recovery(recovery, plan)
-
-    assert plan_mismatches == []
-    assert recovery_audit["mismatches"] == []
-
-
 def test_integral_plan_digest_hashes_every_immutable_input_in_firmware_order() -> None:
     assert integral_plan_digest(_plan()) == 0x8E228108A8F0E004
 
@@ -398,135 +380,6 @@ def test_post_foc252_capture_validates_from_build_features() -> None:
     _validate_plan(plan, mismatches)
     assert not any("reconstruction failed" in m for m in mismatches), mismatches
     assert not any(m.startswith("plan digest") for m in mismatches), mismatches
-
-
-def test_schema_eleven_plan_digest_hashes_stabilized_recovery_schedule() -> None:
-    assert integral_plan_digest(_plan(schema_revision=11)) == 0x83E8FE6A458FE303
-
-
-def test_schema_eight_plan_hashes_selected_response_and_appends_exact_cap() -> None:
-    plan = _plan(schema_revision=8)
-    baseline = integral_plan_digest(plan)
-    changed = {
-        **plan,
-        "selected_response_intervals_q": [
-            [12_900_001, 13_200_000],
-            [-13_100_000, -12_800_000],
-        ],
-    }
-
-    assert baseline != integral_plan_digest(changed)
-    assert derive_integral_ladder(
-        25_000,
-        512_000,
-        64_000,
-        32_767,
-        schema_revision=8,
-        build_features=BUILD_FEATURE_Q4_12_GAINS,
-    ) == {
-        "i_start": 1,
-        "i_top_cap": 1_310,
-        "positive_i": [1, 2, 3, 4, 8, 16, 32, 64, 128, 256, 512, 1_024, 1_310],
-    }
-
-
-@pytest.mark.parametrize(
-    ("schema_revision", "combined"),
-    [(1, False), (7, False), (8, True), (12, True), (13, True), (14, False)],
-)
-def test_integral_workflow_follows_the_firmware_schema_ranges(
-    schema_revision: int, combined: bool
-) -> None:
-    """The four firmware constants that partition the Integral schema space:
-    `INTEGRAL_EVIDENCE_SCHEMA_REVISION = 7` (integral_plan.rs:24),
-    `FIRST_COMBINED_INTEGRAL_SCHEMA_REVISION = 8` and
-    `COMBINED_INTEGRAL_SCHEMA_REVISION = 13` (combined_plan.rs:20,22), and
-    `BREAKAWAY_INTEGRAL_SCHEMA_REVISION = 14` (combined_plan.rs:40). Only 8
-    through 13 are combined; 14 is a standalone breakaway run, which is why
-    `schema >= 8` on its own is not a combined-workflow test.
-    """
-    assert integral_combined_workflow(schema_revision) is combined
-
-
-def test_breakaway_schema_ladder_omits_the_combined_exact_cap() -> None:
-    """`plan_breakaway_velocity_integral_response` passes
-    `append_exact_cap: false` (integral_plan.rs:1438), so schema 14 builds the
-    plain `build_integral_ladder` whole-octave ladder while the combined
-    schemas append the exact `i_top_cap` rung. Same geometry, two ladders --
-    the real schema-14 plan in `foc213-transport-validated` carries exactly the
-    twelve rungs asserted here.
-    """
-    geometry = {
-        "pwm_hz": 25_000,
-        "moving_stroke_us": 512_000,
-        "shortest_suffix_us": 64_000,
-        "maximum_i": 32_767,
-        "build_features": BUILD_FEATURE_Q4_12_GAINS,
-    }
-    breakaway = derive_integral_ladder(
-        geometry["pwm_hz"],
-        geometry["moving_stroke_us"],
-        geometry["shortest_suffix_us"],
-        geometry["maximum_i"],
-        schema_revision=14,
-        build_features=geometry["build_features"],
-    )
-    combined = derive_integral_ladder(
-        geometry["pwm_hz"],
-        geometry["moving_stroke_us"],
-        geometry["shortest_suffix_us"],
-        geometry["maximum_i"],
-        schema_revision=13,
-        build_features=geometry["build_features"],
-    )
-
-    assert breakaway["i_top_cap"] == 1_310
-    assert breakaway["positive_i"] == [1, 2, 3, 4, 8, 16, 32, 64, 128, 256, 512, 1_024]
-    assert combined["positive_i"] == [*breakaway["positive_i"], 1_310]
-
-
-def test_combined_integral_target_uses_signed_directional_deficits() -> None:
-    assert integral_deficit_reaches_target(
-        264,
-        4_000,
-        [[300_000, 350_000], [-350_000, -300_000]],
-    )
-    assert not integral_deficit_reaches_target(
-        264,
-        4_000,
-        [[360_000, 370_000], [-350_000, -300_000]],
-    )
-
-
-def test_combined_target_status_distinguishes_all_ladder_termini() -> None:
-    common = {"eligible_masks": [0b111, 0b111], "expected_rungs": 15}
-
-    assert (
-        combined_target_status(target_terminus=6, current_terminus=None, emitted_rungs=7, **common)
-        == 0
-    )
-    assert (
-        combined_target_status(
-            target_terminus=2,
-            eligible_masks=[0b11, 0b111],
-            current_terminus=None,
-            emitted_rungs=3,
-            expected_rungs=15,
-        )
-        == 1
-    )
-    assert (
-        combined_target_status(
-            target_terminus=None, current_terminus=10, emitted_rungs=12, **common
-        )
-        == 2
-    )
-    assert (
-        combined_target_status(
-            target_terminus=None, current_terminus=None, emitted_rungs=15, **common
-        )
-        == 3
-    )
 
 
 def test_operational_clamp_transition_ceiling_admits_p1024_not_p1448() -> None:
@@ -574,37 +427,6 @@ def test_schema_seven_plan_digest_hashes_both_memberships_and_both_flags() -> No
     assert baseline != integral_plan_digest({**plan, "proportional_joint_membership": 0x0018_0000})
     assert baseline != integral_plan_digest({**plan, "joint_membership": 0x000C_0000})
     assert baseline != integral_plan_digest({**plan, "flags": 0b11})
-
-
-def test_compact_plan_marker_suffix_belongs_to_the_combined_workflow() -> None:
-    """`encode_velocity_integral_plan_marker` (`integral_reporting.rs:454-471`)
-    appends the presence byte and the four interval endpoints only inside
-    `if plan.combined_workflow || acquisition_kind is FixedGainAmplitude*`. A breakaway
-    plan's marker therefore ends after `usable_torque_limit`, with no trailing
-    byte at all -- emitting a zero byte there hashed one byte firmware never
-    hashed and made every breakaway capture's terminal digest disagree.
-
-    Both markers share an identical fixed prefix (the field list is the same
-    from schema 2 up), so the combined marker's tail past the breakaway
-    marker's length is exactly the suffix under test.
-    """
-    combined = _plan(schema_revision=13)
-    combined["plan_digest"] = integral_plan_digest(combined)
-    breakaway = _plan(schema_revision=14)
-    breakaway["plan_digest"] = integral_plan_digest(breakaway)
-
-    combined_marker = _compact_plan_marker(combined, 7)
-    breakaway_marker = _compact_plan_marker(breakaway, 7)
-
-    assert combined_marker[len(breakaway_marker) :] == struct.pack(
-        "<Biiii",
-        1,
-        *(
-            endpoint
-            for interval in combined["selected_response_intervals_q"]
-            for endpoint in interval
-        ),
-    )
 
 
 def test_schema_seven_selects_transition_capable_prefix_independently() -> None:
@@ -739,6 +561,11 @@ def test_standard_meter_quantum_build_reconstructs_recovery_exposure() -> None:
 
 def test_schema_seventeen_is_known():
     assert integral_schema_is_known(17)
+
+
+def test_retired_combined_schemas_are_not_audited():
+    assert not any(integral_schema_is_known(schema) for schema in range(8, 14))
+    assert all(integral_schema_is_known(schema) for schema in (7, 14, 16, 18))
 
 
 def test_schema_seventeen_derives_the_half_octave_rung():
@@ -881,7 +708,7 @@ def _plan_marker(plan: dict[str, object], sequence: int) -> tuple[bytes, dict[st
         # interval endpoints exist only for a combined workflow. A breakaway
         # plan's marker ends after `usable_torque_limit` with no trailing byte
         # at all -- not a byte carrying zero.
-        if integral_combined_workflow(int(plan["schema_revision"])):
+        if plan.get("combined_selected_response", False):
             raw.extend(struct.pack("<B", 1))
             # Same fallback as `_compact_plan_marker`, so the forged capture
             # built by `forge_standalone` (which strips the block a combined
@@ -1421,7 +1248,7 @@ def _rung_record(
     if (
         plan is not None
         and int(plan["schema_revision"]) >= 9
-        and integral_combined_workflow(int(plan["schema_revision"]))
+        and plan.get("combined_selected_response", False)
     ):
         tau_us = (
             0
@@ -1754,36 +1581,6 @@ def _synthetic_complete_capture(
     return raw_observations, records
 
 
-def test_schema_eight_combined_run_completes_without_reproduction() -> None:
-    raw, records = _synthetic_complete_capture(schema_revision=8)
-
-    audit = audit_velocity_integral(raw, records)
-
-    assert audit["matches_firmware"] is True
-    assert audit["terminal"]["outcome"] == 1
-    assert audit["terminal"]["target_status"] == 3
-
-
-@pytest.mark.parametrize("schema_revision", [9, 10, 11])
-def test_current_combined_schemas_replay_response_horizons_and_transition_allowance(
-    schema_revision: int,
-) -> None:
-    raw, records = _synthetic_complete_capture(schema_revision=schema_revision)
-
-    audit = audit_velocity_integral(raw, records)
-
-    assert audit["matches_firmware"] is True
-    assert audit["plan"]["slot_transition_allowance_us"] == 20_000
-    rung = next(
-        value
-        for _raw, value in records
-        if value["record_kind"] == "integral_rung" and value["i_raw"] == 64
-    )
-    assert rung["tau_us"] == 655_360
-    assert rung["moving_horizon_us"] == 512_000
-    assert rung["horizon_class"] == 1
-
-
 def test_fault_after_completed_observation_allows_missing_current_record() -> None:
     raw, records = _synthetic_complete_capture(schema_revision=11)
     observation_index = next(
@@ -1811,21 +1608,6 @@ def test_fault_after_completed_observation_allows_missing_current_record() -> No
     assert (
         "integral recovery causal order differs from the fixed schedule" not in audit["mismatches"]
     )
-
-
-def test_schema_nine_reports_firmware_response_horizon_mismatch() -> None:
-    raw, records = _synthetic_complete_capture(schema_revision=9)
-    rung = next(
-        value
-        for _raw, value in records
-        if value["record_kind"] == "integral_rung" and value["i_raw"] == 64
-    )
-    rung["tau_us"] = 655_359
-
-    audit = audit_velocity_integral(raw, records)
-
-    assert audit["matches_firmware"] is False
-    assert any("response horizon tau_us" in mismatch for mismatch in audit["mismatches"])
 
 
 def test_observation_role_is_the_fixed_out_and_back_alternation():
@@ -3070,13 +2852,12 @@ def test_renumber_integral_nonterminal_sequence_keeps_raw_and_decoded_in_sync() 
     renumbered stream would report different sequence numbers than the dicts
     the tests assert against -- the digest would then be rebuilt from bytes
     that disagree with the fixture's own claims about itself. Remove a
-    record, as `test_stabilized_integral_recovery_without_event_150_reports_both_validators`
-    does, and confirm every remaining raw record decodes to the exact
+    record and confirm every remaining raw record decodes to the exact
     sequence its dict carries.
     """
     from foci_trace.protocol import _decode_velocity_sweep_evidence
 
-    _raw, records = _synthetic_complete_capture(schema_revision=12)
+    _raw, records = _synthetic_complete_capture(schema_revision=18)
     records.pop()  # terminal: carries no raw payload, excluded from renumbering
     removed_index = next(
         index
@@ -3205,37 +2986,6 @@ def test_unified_rest_capture_without_event_150_is_rejected() -> None:
     ]
 
 
-def test_schema_twelve_capture_without_its_combined_response_is_rejected() -> None:
-    """The forgery this fix exists to stop: a schema-12 capture that omits its
-    combined selected response and every consequence of it -- the combined
-    recovery flag, the combined terminal tail, the combined outcome -- while
-    staying self-consistent, digests included. No firmware builder can produce
-    it: `plan_combined_velocity_integral_response` is the only builder for
-    schemas 8 through 13 and it always supplies `Some(selected)`
-    (integral_plan.rs:1214). Deriving the workflow from the plan's own field
-    let this capture elect standalone semantics for itself and reach an empty
-    mismatch list; deriving it from the schema revision rejects it on seven
-    independent counts, starting with the schema/workflow contradiction. Event
-    150 and its recovery rest are no longer among those counts: firmware now
-    runs the stabilized rest schedule unconditionally, so this forgery still
-    carries both.
-    """
-    raw, records = _synthetic_complete_capture(schema_revision=12, forge_standalone=True)
-
-    audit = audit_velocity_integral(raw, records)
-
-    assert audit["mismatches"] == [
-        "plan combined selected response contradicts its schema workflow: "
-        "schema=12 expects a combined selected response",
-        "combined plan selected response intervals are invalid",
-        "terminal combined-workflow flag differs from the plan",
-        "terminal combined tail differs from the plan",
-        "combined target status differs from causal ladder evidence",
-        "combined terminal target flags differ from canonical status",
-        "combined sufficient run did not complete without retention",
-    ]
-
-
 def test_breakaway_schema_plan_claiming_a_combined_response_is_rejected() -> None:
     """Opposite direction: schema 14 is built by
     `plan_breakaway_velocity_integral_response` with
@@ -3255,10 +3005,7 @@ def test_breakaway_schema_plan_claiming_a_combined_response_is_rejected() -> Non
 
     _validate_plan(plan, mismatches)
 
-    assert (
-        "plan combined selected response contradicts its schema workflow: "
-        "schema=14 expects no combined selected response"
-    ) in mismatches
+    assert "plan carries a retired combined selected response" in mismatches
 
 
 def test_breakaway_rung_carrying_a_response_horizon_is_rejected() -> None:
@@ -3318,53 +3065,6 @@ def test_breakaway_rung_carrying_a_response_horizon_is_rejected() -> None:
     assert audit["mismatches"] == ["rung 3 reports a response horizon outside a combined workflow"]
 
 
-def test_stabilized_integral_recovery_passes_with_event_150() -> None:
-    """The combined-workflow counterpart to the breakaway case above: schema
-    12 also emits the owner-5 selection, then Event 150, then the recovery.
-    Both must reach an empty mismatch list, pinning that the grammar holds
-    across schema revisions now that the schedule itself no longer varies.
-    """
-    raw, records = _synthetic_complete_capture(schema_revision=12)
-
-    audit = audit_velocity_integral(raw, records)
-
-    assert audit["mismatches"] == []
-    assert audit["matches_firmware"] is True
-
-
-def test_stabilized_integral_recovery_without_event_150_reports_both_validators() -> None:
-    """Removing Event 150 from an otherwise-valid stabilized capture must still
-    be rejected, proving the presence rule has teeth under `Stabilized` and
-    was not simply disabled. Two validators fire on the same real stream:
-    Task 6's presence check, and Task 5's grammar (the owner-5 selection's
-    successor is no longer `recovery_rest`). Assert exactly that pair and
-    nothing else.
-    """
-    plan = _plan(12)
-    plan["plan_digest"] = integral_plan_digest(plan)
-    raw, records = _synthetic_complete_capture(schema_revision=12)
-    terminal_raw, terminal = records.pop()
-    removed_index = next(
-        index
-        for index, (_raw, value) in enumerate(records)
-        if value["record_kind"] == "recovery_rest"
-    )
-    del records[removed_index]
-    next_sequence = _renumber_integral_nonterminal_sequence(records)
-    terminal["evidence_sequence"] = next_sequence
-    terminal["digest"] = _rebuild_integral_digest(plan, records)
-    records.append((terminal_raw, terminal))
-
-    audit = audit_velocity_integral(raw, records)
-
-    # The grammar (Task 5) runs before the presence check (Task 6) inside
-    # `audit_velocity_integral`, so its message appears first.
-    assert audit["mismatches"] == [
-        "Integral recovery selection does not precede Event 150",
-        "moving Integral recovery lacks recovery rest evidence",
-    ]
-
-
 # The four sabotage tests below isolate the recovery_flags workflow bit and
 # the decoded combined tail as two *independent* signals: a false terminal
 # can carry either one without the other (the reviewer reproduced exactly
@@ -3389,28 +3089,6 @@ def test_immediate_scored_terminal_claiming_the_combined_workflow_flag_is_reject
     audit = audit_velocity_integral(raw, records)
 
     assert audit["mismatches"] == ["terminal combined-workflow flag differs from the plan"]
-
-
-def test_stabilized_terminal_dropping_the_combined_workflow_flag_is_rejected() -> None:
-    """Flag-only, opposite direction: a genuine combined (`Stabilized`)
-    terminal's `recovery_flags` byte must carry the combined-workflow bit.
-    The combined target-status mask lives in the same byte, so clearing the
-    whole byte also invalidates the encoded target status -- both checks
-    stay active for a plan that claims a combined workflow, which is why the
-    agreement check must run before, not instead of, the rest of the
-    combined-terminal validation.
-    """
-    raw, records = _synthetic_complete_capture(schema_revision=12)
-    terminal_raw, terminal = records[-1]
-    terminal = {**terminal, "recovery_flags": 0}
-    records[-1] = (terminal_raw, terminal)
-
-    audit = audit_velocity_integral(raw, records)
-
-    assert audit["mismatches"] == [
-        "terminal combined-workflow flag differs from the plan",
-        "combined terminal target flags differ from canonical status",
-    ]
 
 
 def test_immediate_scored_terminal_carrying_the_combined_tail_is_rejected() -> None:
@@ -3439,30 +3117,6 @@ def test_immediate_scored_terminal_carrying_the_combined_tail_is_rejected() -> N
     assert audit["mismatches"] == ["terminal combined tail differs from the plan"]
 
 
-def test_stabilized_terminal_missing_the_combined_tail_is_rejected() -> None:
-    """Tail-only, opposite direction: a genuine combined terminal must carry
-    the decoded combined tail, even with an honest `recovery_flags` byte.
-    Dropping the tail alone also leaves `target_status` absent, so the
-    causal-ladder target-status check fires too -- both checks stay active
-    for a plan that claims a combined workflow.
-    """
-    raw, records = _synthetic_complete_capture(schema_revision=12)
-    terminal_raw, terminal = records[-1]
-    terminal = {
-        key: value
-        for key, value in terminal.items()
-        if key not in ("combined_workflow", "fixed_p", "target_status", "target_terminus")
-    }
-    records[-1] = (terminal_raw, terminal)
-
-    audit = audit_velocity_integral(raw, records)
-
-    assert audit["mismatches"] == [
-        "terminal combined tail differs from the plan",
-        "combined target status differs from causal ladder evidence",
-    ]
-
-
 def test_standalone_sufficient_terminal_claiming_the_combined_outcome_is_rejected() -> None:
     """A sufficient, genuinely standalone (immediate-scored) run must report
     outcome 0 (`FirstRunRetained`), never outcome 1 (`Complete`):
@@ -3482,23 +3136,6 @@ def test_standalone_sufficient_terminal_claiming_the_combined_outcome_is_rejecte
     audit = audit_velocity_integral(raw, records)
 
     assert audit["mismatches"] == ["standalone sufficient run falsely reports the combined outcome"]
-
-
-def test_combined_sufficient_terminal_claiming_the_standalone_outcome_is_rejected() -> None:
-    """Opposite direction: a sufficient, genuinely combined (`Stabilized`)
-    run must report outcome 1 (`Complete`), never outcome 0
-    (`FirstRunRetained`). This check predates this fix round -- it is not
-    new production behavior -- but had no direct test coverage; added here
-    to close that gap alongside the new standalone-direction test above.
-    """
-    raw, records = _synthetic_complete_capture(schema_revision=12)
-    terminal_raw, terminal = records[-1]
-    terminal = {**terminal, "outcome": 0}
-    records[-1] = (terminal_raw, terminal)
-
-    audit = audit_velocity_integral(raw, records)
-
-    assert audit["mismatches"] == ["combined sufficient run did not complete without retention"]
 
 
 def test_breakaway_reproduced_complete_audits_clean() -> None:
@@ -3566,19 +3203,6 @@ def test_standalone_non_breakaway_complete_still_flagged() -> None:
     assert audit["mismatches"] == ["standalone sufficient run falsely reports the combined outcome"]
 
 
-def test_combined_integral_audit_unchanged() -> None:
-    """Locks the combined branch (schemas 8-13) against the schema-16
-    breakaway carve-out: a combined (schema-13) sufficient run reporting
-    `Complete` (outcome 1) still audits clean, unmodified by the new
-    schema-16 exception.
-    """
-    raw, records = _synthetic_complete_capture(schema_revision=13)
-
-    audit = audit_velocity_integral(raw, records)
-
-    assert audit["mismatches"] == []
-
-
 def _fault_the_terminal(
     records: list[tuple[bytes, dict[str, object]]],
 ) -> list[tuple[bytes, dict[str, object]]]:
@@ -3619,25 +3243,6 @@ def test_standalone_sufficient_but_faulted_terminal_is_accepted() -> None:
     fault is real firmware output, not a defect to report.
     """
     raw, records = _synthetic_complete_capture(schema_revision=14)
-    records = _fault_the_terminal(records)
-
-    audit = audit_velocity_integral(raw, records)
-
-    assert audit["mismatches"] == []
-
-
-def test_combined_sufficient_but_faulted_terminal_is_accepted() -> None:
-    """Mirror of the standalone case above: a faulted run's outcome carries
-    no schedule information under `Stabilized` either, so a sufficient
-    replay whose terminal reports outcome 3 on a combined plan must not trip
-    the combined-direction outcome check. `sufficient` is unaffected by
-    `plan.combined_workflow` (it depends only on the replayed causal
-    ladder), so a faulted combined run can be sufficient by exactly the same
-    mechanism as the standalone case -- this is the "determine from firmware
-    whether a faulted combined run can be sufficient" the fix round asked
-    for, applied as a real fixture rather than an assertion on paper.
-    """
-    raw, records = _synthetic_complete_capture(schema_revision=12)
     records = _fault_the_terminal(records)
 
     audit = audit_velocity_integral(raw, records)
@@ -3718,89 +3323,4 @@ def test_faulted_terminal_preserving_wrong_anchor_masks_is_rejected() -> None:
     assert audit["mismatches"] == [
         "terminal opening-anchor availability mask differs from replay",
         "terminal bookend availability mask differs from replay",
-    ]
-
-
-def _fault_the_terminal_after_reaching_target(
-    records: list[tuple[bytes, dict[str, object]]],
-    *,
-    target_terminus: int,
-    target_status: int,
-    recovery_flags: int,
-) -> list[tuple[bytes, dict[str, object]]]:
-    """Fault a combined terminal that had already reached its 98-percent target.
-
-    `terminal_from_data` (`integral_sweep.rs:973`) sets
-    `rest_boundary_rung_plus_one` from `data.target_terminus`, which is *not*
-    part of `IntegralRunEvidence`, so the target terminus survives the fault
-    while `eligible_masks`/`current_terminus` are reset to empty by
-    `IntegralRunEvidence::new(...)`. `terminal_target_status`
-    (`integral_reporting.rs:51-76`) then reads those empty masks, so a
-    reached-target fault reports `TargetReachedSparse` (1), not
-    `TargetReached` (0), and `terminal_recovery_flags` encodes
-    `TERMINAL_COMBINED_WORKFLOW | ((1 + 1) << 4)` == 0xA0.
-    """
-    terminal_raw, terminal = records[-1]
-    terminal = {
-        **terminal,
-        "outcome": 3,
-        "cause": 4,
-        "eligible_masks": [0, 0],
-        "opening_available_mask": 0,
-        "bookend_available_mask": 0,
-        "current_terminus": None,
-        "target_terminus": target_terminus,
-        "target_status": target_status,
-        "recovery_flags": recovery_flags,
-    }
-    return [*records[:-1], (terminal_raw, terminal)]
-
-
-def test_combined_faulted_terminal_reaching_its_target_reports_sparse_status() -> None:
-    """A combined run that faults *after* reaching its target keeps
-    `target_terminus` but loses its `eligible_masks`, so firmware's own
-    `terminal_target_status` classifies it `TargetReachedSparse` (1) and
-    encodes recovery flags 0xA0. The audit previously fed the *replayed*
-    (still-sufficient, three-or-more eligible rungs per direction) masks into
-    `combined_target_status`, expected `TargetReached` (0), and reported both
-    the status and the encoded-flag mismatch against this honest terminal.
-
-    The existing `test_combined_sufficient_but_faulted_terminal_is_accepted`
-    cannot catch this: with `target_terminus=None` and a complete ladder the
-    formula falls through to `TargetNotReachedAtCap` (3) under empty *and*
-    replayed masks alike, so both readings agree by accident.
-    """
-    raw, records = _synthetic_complete_capture(schema_revision=12)
-    records = _fault_the_terminal_after_reaching_target(
-        records,
-        target_terminus=2,
-        target_status=1,
-        recovery_flags=0xA0,
-    )
-
-    audit = audit_velocity_integral(raw, records)
-
-    assert audit["mismatches"] == []
-
-
-def test_combined_faulted_terminal_claiming_a_dense_target_is_rejected() -> None:
-    """The target-status checks must keep their teeth under a fault rather
-    than being switched off by it. Same reached-target fault as above, but
-    the terminal claims `TargetReached` (0) with recovery flags 0x90 -- the
-    reading the reset masks cannot support. Both the status field and its
-    encoded copy must be rejected.
-    """
-    raw, records = _synthetic_complete_capture(schema_revision=12)
-    records = _fault_the_terminal_after_reaching_target(
-        records,
-        target_terminus=2,
-        target_status=0,
-        recovery_flags=0x90,
-    )
-
-    audit = audit_velocity_integral(raw, records)
-
-    assert audit["mismatches"] == [
-        "combined target status differs from causal ladder evidence",
-        "combined terminal target flags differ from canonical status",
     ]
