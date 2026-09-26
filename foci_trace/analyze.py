@@ -52,6 +52,7 @@ from .protocol import (
     PROTOCOL_VERSION,
     SOURCE_KIND_BOARD,
     SOURCE_KIND_USB,
+    SUBSYSTEM_COMMISSIONING,
     DecodeError,
     Frame,
     assemble_breakaway_ticks,
@@ -2622,6 +2623,18 @@ def _outer_safety_timing_audits(states: dict[int, _DeviceState]) -> list[dict[st
     return audits
 
 
+def _commissioning_event_source_index(payload: dict[str, object], header_source_index: int) -> int:
+    # An event frame's own header carries a fixed "not applicable" source
+    # index (`SOURCE_KIND_BOARD`/`SOURCE_INDEX_NA` in usb_trace.rs); the real
+    # per-motor source index commissioning events are tied to rides in
+    # `args[0]` instead (the same convention `commissioning.py`'s
+    # `observe_event` already relies on).
+    args = payload.get("args")
+    if isinstance(args, list) and args and payload.get("subsystem_id") == SUBSYSTEM_COMMISSIONING:
+        return int(args[0])
+    return header_source_index
+
+
 def analyze_capture(
     source: BinaryIO | io.BytesIO,
     steady_after_s: float = 10.0,
@@ -2759,17 +2772,9 @@ def analyze_capture(
                         int(args[3]),  # type: ignore[index]
                     )
                 )
-            # An event frame's own header carries a fixed "not applicable"
-            # source index (`SOURCE_KIND_BOARD`/`SOURCE_INDEX_NA` in
-            # usb_trace.rs); the real per-motor source index commissioning
-            # events are tied to rides in `args[0]` instead (the same
-            # convention `commissioning.py`'s `observe_event` already
-            # relies on).
-            event_args = frame.payload.get("args") or []
-            event_source_index = int(event_args[0]) if event_args else header.source_index
             state.breakaway_frame_log.append(
                 (
-                    event_source_index,
+                    _commissioning_event_source_index(frame.payload, header.source_index),
                     FRAME_TYPE_EVENT,
                     header.timestamp_ticks,
                     frame.raw_payload,

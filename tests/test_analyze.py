@@ -26,6 +26,7 @@ from foci_trace.protocol import (
     EVENT_COMMISSION_OUTER_SAFETY_TIMING,
     EVENT_COMMISSION_PHASE_END,
     EVENT_COMMISSION_PHASE_START,
+    EVENT_PHASE_BOUNDARY,
     FRAME_TYPE_CONTROL_DETAIL,
     FRAME_TYPE_CRITICAL,
     FRAME_TYPE_CURRENT_PATH,
@@ -38,6 +39,7 @@ from foci_trace.protocol import (
     PROTOCOL_VERSION,
     SOURCE_KIND_BOARD,
     SUBSYSTEM_COMMISSIONING,
+    SUBSYSTEM_STEP_TIMER,
 )
 
 # FOCI-source status frames never populate dropped_event_log_count on the
@@ -3075,7 +3077,10 @@ def test_recovery_event_151_cannot_consume_the_preceding_observations_window(
     assert report["rest_selection_raw_unverifiable_count"] == 1
 
 
-def test_analyze_capture_reconstructs_a_breakaway_campaign_from_ftrc_frames() -> None:
+@pytest.mark.parametrize("interleave_phase_boundary", [False, True])
+def test_analyze_capture_reconstructs_a_breakaway_campaign_from_ftrc_frames(
+    interleave_phase_boundary: bool,
+) -> None:
     """End-to-end: raw FTRC frames through `analyze_capture` reconstruct a
     breakaway campaign, including the marker-adjacency decode that resolves
     the tag-1/`integral_plan_marker` collision (see
@@ -3128,6 +3133,15 @@ def test_analyze_capture_reconstructs_a_breakaway_campaign_from_ftrc_frames() ->
         1_000,
         _header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, probe_planned, 1, 1_000, 1, 0) + probe_planned,
     )
+    if interleave_phase_boundary:
+        phase_boundary = struct.pack(
+            "<BBHBxxxiiii", 1, SUBSYSTEM_STEP_TIMER, EVENT_PHASE_BOUNDARY, 3, 0, 1, 2, 0
+        )
+        writer.write_firmware_frame(
+            0,
+            1_050,
+            _header(FRAME_TYPE_EVENT, phase_boundary, 2, 1_050, 255, 255) + phase_boundary,
+        )
     marker_plan = bw_event_payload(152, 1)
     writer.write_firmware_frame(
         0, 1_100, _header(FRAME_TYPE_EVENT, marker_plan, 2, 1_100, 255, 255) + marker_plan
