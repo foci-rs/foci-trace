@@ -809,7 +809,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             decoded["slot_order"] = slot_order
         decoded["namespace"] = "fixed_gain_amplitude"
         decoded["record_kind"] = "fixed_gain_amplitude_plan"
-    elif kind == 0 and len(payload) in (65, 98):
+    elif kind == 0 and len(payload) in (65, 82, 98):
         decoded = _take_fields(
             cursor,
             (
@@ -836,7 +836,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         )
         decoded["evidence_sequence"] = 1
         decoded["record_kind"] = "integral_plan_marker"
-        if len(payload) == 98:
+        if len(payload) in (82, 98):
             if cursor.take("B") != 1:
                 raise DecodeError("fixed-gain-amplitude plan marker is invalid")
             digest_low = cursor.take("I")
@@ -844,6 +844,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             decoded["qualifier_bits"] = cursor.take("i")
             if cursor.take("i") != 0:
                 raise DecodeError("fixed-gain-amplitude plan marker is invalid")
+        if len(payload) == 98:
             decoded["recovery_lower_rate_q"] = [
                 cursor.take("Q"),
                 cursor.take("Q"),

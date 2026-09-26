@@ -525,3 +525,19 @@ def test_cross_run_signed_gap_preserves_movement_direction() -> None:
 
     assert forward["comparisons"][0]["signed_gap_q"] == 2
     assert reverse["comparisons"][0]["signed_gap_q"] == -2
+
+
+def test_schema_one_execution_marker_decodes_without_recovery_rates() -> None:
+    from foci_trace.protocol import _decode_velocity_sweep_evidence
+
+    plan = _plan()
+    digest = amplitude_plan_digest(plan)
+    marker = _compact_execution_marker({**plan, "run_sequence": 7, "plan_digest": digest})
+
+    decoded = _decode_velocity_sweep_evidence(marker)
+
+    assert len(marker) == 82
+    assert decoded["record_kind"] == "integral_plan_marker"
+    assert decoded["acceptance_plan_digest"] == plan["acceptance_plan_digest"]
+    assert decoded["qualifier_bits"] == plan["qualifier_bits"]
+    assert "recovery_lower_rate_q" not in decoded
