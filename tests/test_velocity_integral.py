@@ -365,19 +365,16 @@ def test_integral_plan_digest_hashes_every_immutable_input_in_firmware_order() -
     assert integral_plan_digest(_plan()) == 0x8E228108A8F0E004
 
 
-def test_post_foc252_capture_validates_from_build_features() -> None:
+def test_capture_stating_build_features_validates_without_build_revision() -> None:
     from foci_trace.velocity_integral import _validate_plan
 
-    # A newer combined capture carries build_features instead of
-    # build_revision. The digest mirror hashes build_features and gates the
-    # selected-response blocks on content, so the capture reconstructs and its
-    # own digest validates with no build_revision anywhere.
-    plan = _plan(schema_revision=13)
+    plan = _plan(schema_revision=16)
     del plan["build_revision"]
     plan["build_features"] = 0b1111
     plan["plan_digest"] = integral_plan_digest(plan)
     mismatches: list[str] = []
     _validate_plan(plan, mismatches)
+    assert not any("outside the firmware Integral range" in m for m in mismatches), mismatches
     assert not any("reconstruction failed" in m for m in mismatches), mismatches
     assert not any(m.startswith("plan digest") for m in mismatches), mismatches
 
