@@ -10,29 +10,11 @@ from .protocol import (
     EVENT_COMMISSION_DIAGNOSTIC_WARNING,
     EVENT_COMMISSION_ENGINE_START,
     EVENT_COMMISSION_ENGINE_TERMINAL,
-    EVENT_COMMISSION_MECHANICAL_ID_ATTEMPT,
-    EVENT_COMMISSION_MECHANICAL_ID_CLASSIFICATION,
-    EVENT_COMMISSION_MECHANICAL_ID_RESPONSE,
-    EVENT_COMMISSION_MECHANICAL_ID_RESULT,
     EVENT_COMMISSION_PHASE_END,
     EVENT_COMMISSION_PHASE_START,
-    EVENT_COMMISSION_POSITION_TUNE_LIMITS,
-    EVENT_COMMISSION_POSITION_TUNE_METRICS,
-    EVENT_COMMISSION_POSITION_TUNE_RESULT,
-    EVENT_COMMISSION_POSITION_TUNE_TARGET,
     EVENT_COMMISSION_RESTORE_DISPOSITION,
     EVENT_COMMISSION_RESTORE_ERROR_DRIFT,
     EVENT_COMMISSION_RESTORE_RESULT,
-    EVENT_COMMISSION_VELOCITY_SWEEP_COMPLETE,
-    EVENT_COMMISSION_VELOCITY_SWEEP_DERIVED,
-    EVENT_COMMISSION_VELOCITY_SWEEP_OBSERVATION,
-    EVENT_COMMISSION_VELOCITY_SWEEP_PLAN,
-    EVENT_COMMISSION_VELOCITY_SWEEP_RUNG,
-    EVENT_COMMISSION_VELOCITY_SWEEP_TERMINAL,
-    EVENT_COMMISSION_VELOCITY_VALIDATE_GAIN,
-    EVENT_COMMISSION_VELOCITY_VALIDATE_LIMITS,
-    EVENT_COMMISSION_VELOCITY_VALIDATE_METRICS,
-    EVENT_COMMISSION_VELOCITY_VALIDATE_RESULT,
     FRAME_TYPE_EVENT,
     PHASE_NAMES,
     SUBSYSTEM_COMMISSIONING,
@@ -52,35 +34,9 @@ ENGINE_KIND_NAMES = {
 }
 
 SUMMARY_FAMILIES = {
-    # Reserved, historical-only: MechanicalId summary fragments only appear in
-    # archived captures; production firmware no longer emits events 110-113.
-    EVENT_COMMISSION_MECHANICAL_ID_RESULT: ("mechanical_id_summary", "result"),
-    EVENT_COMMISSION_MECHANICAL_ID_ATTEMPT: ("mechanical_id_summary", "attempt"),
-    EVENT_COMMISSION_MECHANICAL_ID_RESPONSE: ("mechanical_id_summary", "response"),
-    EVENT_COMMISSION_MECHANICAL_ID_CLASSIFICATION: (
-        "mechanical_id_summary",
-        "classification",
-    ),
-    EVENT_COMMISSION_VELOCITY_VALIDATE_RESULT: ("velocity_validate_summary", "result"),
-    EVENT_COMMISSION_VELOCITY_VALIDATE_GAIN: ("velocity_validate_summary", "gain"),
-    EVENT_COMMISSION_VELOCITY_VALIDATE_METRICS: ("velocity_validate_summary", "metrics"),
-    EVENT_COMMISSION_VELOCITY_VALIDATE_LIMITS: ("velocity_validate_summary", "limits"),
-    EVENT_COMMISSION_POSITION_TUNE_RESULT: ("position_tune_summary", "result"),
-    EVENT_COMMISSION_POSITION_TUNE_TARGET: ("position_tune_summary", "target"),
-    EVENT_COMMISSION_POSITION_TUNE_METRICS: ("position_tune_summary", "metrics"),
-    EVENT_COMMISSION_POSITION_TUNE_LIMITS: ("position_tune_summary", "limits"),
     EVENT_COMMISSION_RESTORE_RESULT: ("restore_summary", "result"),
     EVENT_COMMISSION_RESTORE_ERROR_DRIFT: ("restore_summary", "error_drift"),
     EVENT_COMMISSION_RESTORE_DISPOSITION: ("restore_summary", "disposition"),
-}
-
-VELOCITY_SWEEP_EVENTS = {
-    EVENT_COMMISSION_VELOCITY_SWEEP_PLAN: "plan",
-    EVENT_COMMISSION_VELOCITY_SWEEP_OBSERVATION: "observation",
-    EVENT_COMMISSION_VELOCITY_SWEEP_RUNG: "rung",
-    EVENT_COMMISSION_VELOCITY_SWEEP_DERIVED: "derived",
-    EVENT_COMMISSION_VELOCITY_SWEEP_TERMINAL: "terminal",
-    EVENT_COMMISSION_VELOCITY_SWEEP_COMPLETE: "complete",
 }
 
 
@@ -135,16 +91,6 @@ class CommissioningWarning:
     timestamp_ticks: int
 
 
-@dataclass(frozen=True)
-class VelocitySweepTraceMarker:
-    """Compact lifecycle marker accompanying canonical sweep evidence."""
-
-    kind: str
-    sequence_or_cause: int
-    detail: int | None
-    timestamp_ticks: int
-
-
 @dataclass
 class CommissioningRun:
     """One commissioning, calibration, selftest, or tune engine run."""
@@ -162,7 +108,6 @@ class CommissioningRun:
     phases: list[CommissioningPhaseSpan] = field(default_factory=list)
     summaries: list[CommissioningSummaryFragment] = field(default_factory=list)
     warnings: list[CommissioningWarning] = field(default_factory=list)
-    velocity_sweep_markers: list[VelocitySweepTraceMarker] = field(default_factory=list)
     caveats: list[str] = field(default_factory=list)
 
 
@@ -229,8 +174,6 @@ class CommissioningCaptureBuilder:
             self._observe_engine_terminal(event)
         elif event.event_id in SUMMARY_FAMILIES:
             self._observe_summary(event)
-        elif event.event_id in VELOCITY_SWEEP_EVENTS:
-            self._observe_velocity_sweep_marker(event)
         elif event.event_id == EVENT_COMMISSION_DIAGNOSTIC_WARNING:
             self._observe_warning(event)
 
@@ -342,14 +285,7 @@ class CommissioningCaptureBuilder:
             _add_caveat(run.caveats, f"partial capture: missing phase_start for {phase.phase_name}")
         phase.end_ticks = event.timestamp_ticks
         phase.status_code = status_code
-        if _has_sweep_terminal_result(run) and status_code == _sweep_terminal_cause(run):
-            phase.status_name = run.result
-            _add_caveat(
-                phase.caveats,
-                "legacy velocity-sweep cause occupied the generic phase status field",
-            )
-        else:
-            phase.status_name = _status_name(status_code)
+        phase.status_name = _status_name(status_code)
 
     def _observe_engine_terminal(self, event: CommissioningEvent) -> None:
         if len(event.args) < 4:
@@ -358,23 +294,6 @@ class CommissioningCaptureBuilder:
         engine_seq = event.args[3]
         run = self._runs_by_seq.get((*active_key, engine_seq)) or self._current_run(event)
         run.events.append(event)
-        if _has_sweep_terminal_result(run):
-            status_code = event.args[2]
-            cause = _sweep_terminal_cause(run)
-            detail = _status_name(status_code)
-            if cause == status_code:
-                _add_caveat(
-                    run.caveats,
-                    "legacy generic terminal reused velocity-sweep cause "
-                    f"{cause} ({detail}); dedicated velocity-sweep terminal is authoritative",
-                )
-            else:
-                _add_caveat(
-                    run.caveats,
-                    f"generic terminal disagrees with dedicated velocity-sweep terminal: {detail}",
-                )
-            self._active_runs.pop(active_key, None)
-            return
         run.terminal_ticks = event.timestamp_ticks
         run.result_code = event.args[2]
         run.result = _status_name(event.args[2])
@@ -408,29 +327,6 @@ class CommissioningCaptureBuilder:
                 timestamp_ticks=event.timestamp_ticks,
             )
         )
-
-    def _observe_velocity_sweep_marker(self, event: CommissioningEvent) -> None:
-        if len(event.args) < 3:
-            return
-        run = self._current_run(event)
-        run.events.append(event)
-        run.velocity_sweep_markers.append(
-            VelocitySweepTraceMarker(
-                kind=VELOCITY_SWEEP_EVENTS[event.event_id],
-                sequence_or_cause=event.args[2],
-                detail=event.args[3] if len(event.args) > 3 else None,
-                timestamp_ticks=event.timestamp_ticks,
-            )
-        )
-        terminal_result = {
-            "info": "complete",
-            "warn": "inconclusive",
-            "error": "fault",
-        }.get(event.level_name)
-        if event.event_id == EVENT_COMMISSION_VELOCITY_SWEEP_TERMINAL and terminal_result:
-            run.result_code = None
-            run.result = terminal_result
-            run.terminal_ticks = event.timestamp_ticks
 
     def _current_run(self, event: CommissioningEvent) -> CommissioningRun:
         active_key = _active_key(event)
@@ -526,14 +422,6 @@ def format_commissioning_report(report: CommissioningCaptureReport) -> str:
             lines.append(
                 f"  diagnostic_warning code={warning.warning_code} detail={warning.detail}"
             )
-        for marker in run.velocity_sweep_markers:
-            lines.append(
-                "  velocity_sweep_{kind} value={value} detail={detail}".format(
-                    kind=marker.kind,
-                    value=marker.sequence_or_cause,
-                    detail="n/a" if marker.detail is None else marker.detail,
-                )
-            )
         if run.terminal_ticks is not None:
             lines.append(f"  engine_terminal t={run.terminal_ticks} result={result}")
         for caveat in run.caveats:
@@ -578,15 +466,6 @@ def commissioning_report_to_json(report: CommissioningCaptureReport) -> dict[str
                     }
                     for warning in run.warnings
                 ],
-                "velocity_sweep_markers": [
-                    {
-                        "kind": marker.kind,
-                        "sequence_or_cause": marker.sequence_or_cause,
-                        "detail": marker.detail,
-                        "timestamp_ticks": marker.timestamp_ticks,
-                    }
-                    for marker in run.velocity_sweep_markers
-                ],
                 "caveats": list(run.caveats),
             }
             for run in report.runs
@@ -609,19 +488,6 @@ def _phase_name(phase_id: int) -> str:
 
 def _status_name(status_code: int) -> str:
     return COMMISSION_STATUS_NAMES.get(status_code, f"status_{status_code}")
-
-
-def _sweep_terminal_cause(run: CommissioningRun) -> int | None:
-    terminals = [marker for marker in run.velocity_sweep_markers if marker.kind == "terminal"]
-    if not terminals:
-        return None
-    return terminals[-1].sequence_or_cause
-
-
-def _has_sweep_terminal_result(run: CommissioningRun) -> bool:
-    return run.result in {"complete", "inconclusive", "fault"} and bool(
-        _sweep_terminal_cause(run) is not None
-    )
 
 
 def _add_caveat(caveats: list[str], caveat: str) -> None:

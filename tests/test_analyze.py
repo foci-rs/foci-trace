@@ -19,12 +19,12 @@ from foci_trace.analyze import (
 )
 from foci_trace.capture_file import CaptureWriter
 from foci_trace.protocol import (
+    EVENT_COMMISSION_DIAGNOSTIC_WARNING,
     EVENT_COMMISSION_ENGINE_START,
     EVENT_COMMISSION_ENGINE_TERMINAL,
     EVENT_COMMISSION_OUTER_SAFETY_TIMING,
     EVENT_COMMISSION_PHASE_END,
     EVENT_COMMISSION_PHASE_START,
-    EVENT_COMMISSION_VELOCITY_VALIDATE_GAIN,
     FRAME_TYPE_CONTROL_DETAIL,
     FRAME_TYPE_CRITICAL,
     FRAME_TYPE_CURRENT_PATH,
@@ -2551,103 +2551,6 @@ def test_main_writes_deterministic_velocity_report_file(tmp_path, capsys) -> Non
     assert report_path.read_text().endswith("\n")
 
 
-def test_capture_integrates_canonical_velocity_sweep_audit() -> None:
-    output = io.BytesIO()
-    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
-    plan_values = (
-        7,
-        0,
-        5_000,
-        1,
-        4_800,
-        7_500,
-        1,
-        0,
-        288,
-        8,
-        8,
-        0,
-        2,
-        256_000,
-        200_000,
-        0,
-        0,
-        1_000,
-        250,
-        1_250,
-        1_250,
-        1_000,
-        900,
-    )
-    plan = bytes([1]) + struct.pack("<IHIBIIHBiHHBHIIIIIIIIHH", *plan_values)
-    digest = 0xCBF29CE484222325
-    for byte in plan:
-        digest ^= byte
-        digest = (digest * 0x100000001B3) & 0xFFFF_FFFF_FFFF_FFFF
-    empty_direction = struct.pack("<BHHHiiiiiBHB", 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-    terminal = (
-        bytes([4])
-        + struct.pack("<III", 7, 4_000, 25_000)
-        + empty_direction
-        + struct.pack("<BHHHiiiiiBHB", 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-        + struct.pack(
-            "<HHHHIIBBB",
-            0,
-            0,
-            0,
-            0,
-            digest & 0xFFFF_FFFF,
-            digest >> 32,
-            1,
-            2,
-            0,
-        )
-    )
-    for sequence, timestamp, payload in ((1, 1_000, plan), (3, 2_000, terminal)):
-        writer.write_firmware_frame(
-            0,
-            timestamp,
-            _header(
-                FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
-                payload,
-                sequence,
-                timestamp,
-                1,
-                0,
-            )
-            + payload,
-        )
-    feedback = _velocity_observation_payload(
-        11,
-        6,
-        elapsed_us=1_000,
-        stroke_index=0,
-        direction=1,
-        pid_velocity_actual=7,
-    )
-    writer.write_firmware_frame(
-        0,
-        1_500,
-        _header(FRAME_TYPE_VELOCITY_OBSERVATION, feedback, 2, 1_500, 1, 0) + feedback,
-    )
-
-    analysis = analyze_capture(io.BytesIO(output.getvalue()))
-
-    assert analysis.velocity_sweep_audits[0]["matches_firmware"] is True
-    assert analysis.velocity_sweep_audits[0]["digest"] == digest
-    assert analysis.velocity_sweep_audits[0]["pid_velocity_actual_samples"] == [
-        {
-            "stroke_index": 0,
-            "sample_index": 0,
-            "direction": 1,
-            "target_counts_per_ms": 11,
-            "delta_counts": 6,
-            "elapsed_us": 1_000,
-            "pid_velocity_actual": 7,
-        }
-    ]
-
-
 def test_velocity_frames_group_by_device_source_and_engine_run() -> None:
     output = io.BytesIO()
     writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
@@ -2668,17 +2571,6 @@ def test_velocity_frames_group_by_device_source_and_engine_run() -> None:
             _header(FRAME_TYPE_EVENT, start, sequence, 1_000, 255, 255) + start,
         )
         sequence += 2 if device_index == 0 else 1
-        gain = _commission_event_payload(
-            EVENT_COMMISSION_VELOCITY_VALIDATE_GAIN,
-            arg2=1,
-            arg3=350 | (80 << 16),
-        )
-        writer.write_firmware_frame(
-            device_index,
-            1_500,
-            _header(FRAME_TYPE_EVENT, gain, sequence, 1_500, 255, 255) + gain,
-        )
-        sequence += 1
         for direction, target, stroke_index in ((1, 4, 0), (-1, -4, 1)):
             for delta in (direction, 0, direction, direction):
                 payload = _velocity_observation_payload(
@@ -2734,7 +2626,6 @@ def test_velocity_frames_group_by_device_source_and_engine_run() -> None:
     assert len(analysis.velocity_reports) == 2
     x_group, y_group = analysis.velocity_reports
     assert (x_group.device_index, x_group.serial, x_group.engine_seq) == (0, "X", 7)
-    assert (x_group.velocity_p, x_group.velocity_i) == (350, 80)
     assert set(x_group.report.directions) == {-1, 1}
     assert x_group.missing_frames == 1
     assert x_group.caveats == []
@@ -2742,80 +2633,6 @@ def test_velocity_frames_group_by_device_source_and_engine_run() -> None:
     assert "partial capture: missing engine_terminal" in y_group.caveats
     json_groups = velocity_analysis_to_json(analysis)["groups"]
     assert json_groups[0]["measurement"]["directions"]["-1"]["target_cpms"] == -4
-
-
-def test_velocity_frames_split_reused_stroke_indexes_at_gain_summaries() -> None:
-    output = io.BytesIO()
-    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
-    writer.write_device_table(0, 100, "1-0", "FOCI OpenFFBoard (trace)", "X", b"")
-    sequence = 1
-    timestamp = 1_000
-    start = _commission_event_payload(EVENT_COMMISSION_ENGINE_START, arg3=7)
-    writer.write_firmware_frame(
-        0,
-        timestamp,
-        _header(FRAME_TYPE_EVENT, start, sequence, timestamp, 255, 255) + start,
-    )
-
-    for summary_seq, gain_p, delta_scale in ((1, 350, 1), (2, 500, 2)):
-        for direction, target, stroke_index in ((1, 4, 0), (-1, -4, 1)):
-            for _ in range(4):
-                sequence += 1
-                timestamp += 1_000
-                payload = _velocity_observation_payload(
-                    target,
-                    direction * delta_scale,
-                    stroke_index=stroke_index,
-                    direction=direction,
-                )
-                writer.write_firmware_frame(
-                    0,
-                    timestamp,
-                    _header(
-                        FRAME_TYPE_VELOCITY_OBSERVATION,
-                        payload,
-                        sequence,
-                        timestamp,
-                        1,
-                        0,
-                    )
-                    + payload,
-                )
-        sequence += 1
-        timestamp += 1_000
-        gain = _commission_event_payload(
-            EVENT_COMMISSION_VELOCITY_VALIDATE_GAIN,
-            arg2=summary_seq,
-            arg3=gain_p,
-        )
-        writer.write_firmware_frame(
-            0,
-            timestamp,
-            _header(FRAME_TYPE_EVENT, gain, sequence, timestamp, 255, 255) + gain,
-        )
-
-    sequence += 1
-    timestamp += 1_000
-    terminal = _commission_event_payload(EVENT_COMMISSION_ENGINE_TERMINAL, arg2=11, arg3=7)
-    writer.write_firmware_frame(
-        0,
-        timestamp,
-        _header(FRAME_TYPE_EVENT, terminal, sequence, timestamp, 255, 255) + terminal,
-    )
-
-    analysis = analyze_capture(io.BytesIO(output.getvalue()))
-
-    assert [(group.velocity_p, group.velocity_i) for group in analysis.velocity_reports] == [
-        (350, 0),
-        (500, 0),
-    ]
-    assert [
-        group.report.directions[1].observation_count for group in analysis.velocity_reports
-    ] == [4, 4]
-    assert [
-        group.report.directions[1].levels[0].exact_delta_counts
-        for group in analysis.velocity_reports
-    ] == [4, 8]
 
 
 def test_velocity_frames_are_not_reclaimed_by_post_terminal_partial_run() -> None:
@@ -2849,38 +2666,27 @@ def test_velocity_frames_are_not_reclaimed_by_post_terminal_partial_run() -> Non
             )
             + payload,
         )
-    gain = _commission_event_payload(
-        EVENT_COMMISSION_VELOCITY_VALIDATE_GAIN,
-        arg2=0,
-        arg3=350 | (80 << 16),
-    )
-    writer.write_firmware_frame(
-        0, 4_000, _header(FRAME_TYPE_EVENT, gain, 4, 4_000, 255, 255) + gain
-    )
     terminal = _commission_event_payload(EVENT_COMMISSION_ENGINE_TERMINAL, arg2=11, arg3=7)
     writer.write_firmware_frame(
         0,
         5_000,
         _header(FRAME_TYPE_EVENT, terminal, 5, 5_000, 255, 255) + terminal,
     )
-    orphan_gain = _commission_event_payload(
-        EVENT_COMMISSION_VELOCITY_VALIDATE_GAIN,
+    orphan_warning = _commission_event_payload(
+        EVENT_COMMISSION_DIAGNOSTIC_WARNING,
         arg2=1,
         arg3=500,
     )
     writer.write_firmware_frame(
         0,
         6_000,
-        _header(FRAME_TYPE_EVENT, orphan_gain, 6, 6_000, 255, 255) + orphan_gain,
+        _header(FRAME_TYPE_EVENT, orphan_warning, 6, 6_000, 255, 255) + orphan_warning,
     )
 
     analysis = analyze_capture(io.BytesIO(output.getvalue()))
 
     assert len(analysis.velocity_reports) == 1
-    assert (analysis.velocity_reports[0].velocity_p, analysis.velocity_reports[0].velocity_i) == (
-        350,
-        80,
-    )
+    assert analysis.velocity_reports[0].engine_seq == 7
 
 
 def test_velocity_group_rejects_mixed_signed_targets() -> None:
@@ -3265,90 +3071,6 @@ def test_rest_selection_audit_keys_the_walk_on_build_features(monkeypatch) -> No
 
     assert seen == [True]
     assert report["rest_selection_verified_count"] == 1
-
-
-def test_proportional_rest_audit_falls_back_to_historical_grammar() -> None:
-    """A Proportional trace plan carries no rule-contract marker: protocol.py decodes
-    neither build_features nor a schema_revision for the kind-1 Proportional plan. So
-    the scored-rest audit cannot resolve the walk and uses the historical
-    grammar. That is correct for the combined flow, whose Proportional runs at
-    COMBINED_PROPORTIONAL_SCHEMA_REVISION (14), below the rest-walk floor of 17.
-
-    This asserts through the real decode surface -- an actual decoded Proportional
-    plan, with no build_features injected -- so it cannot pass on a state the
-    decoder does not produce."""
-    import struct
-
-    from foci_trace import analyze
-    from foci_trace.protocol import _decode_velocity_sweep_evidence
-    from foci_trace.velocity_measurement import (
-        VelocityObservation,
-        analyze_scored_rest_selection,
-    )
-
-    seen: list[bool] = []
-    original = analyze.verify_scored_rest_selection
-
-    def spy(observations, payload, *, rest_walk_revision=False):
-        seen.append(rest_walk_revision)
-        return original(observations, payload, rest_walk_revision=rest_walk_revision)
-
-    with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setattr(analyze, "verify_scored_rest_selection", spy)
-
-        state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
-        observations = [VelocityObservation(0, 1_000, 1, 0, 0) for _ in range(256)]
-        state.velocity_observations = [
-            analyze._VelocityFrameObservation(index, 0, observation, 0)
-            for index, observation in enumerate(observations, 1)
-        ]
-        payload = {
-            "record_kind": "rest_selection",
-            "owner": 4,
-            **analyze_scored_rest_selection(observations),
-        }
-        evidence = [analyze._VelocitySweepEvidenceFrame(300, 0, b"", payload)]
-
-        # A real decoded Proportional plan (kind 1, 78-byte shape): it carries a
-        # plan_digest and velocities but no build_features and no
-        # schema_revision, exactly as the decoder produces from the wire.
-        plan_values = (
-            7,
-            0,
-            0x0105_C518,
-            0x53E2_5AF6,
-            5_000,
-            1,
-            4_800,
-            7_500,
-            1,
-            0,
-            288,
-            8,
-            128,
-            5,
-            2,
-            256_000,
-            200_000,
-            9_120,
-            10_000,
-            1_000,
-            250,
-            1_250,
-            1_250,
-            1_000,
-            900,
-        )
-        plan_payload = bytes([1]) + struct.pack("<IHIIIBIIHBiHHBHIIIIIIIIHH", *plan_values)
-        plan = _decode_velocity_sweep_evidence(plan_payload)
-        assert plan["record_kind"] == "plan"
-        assert "build_features" not in plan
-        assert "schema_revision" not in plan
-
-        report = {"matches_firmware": True, "mismatches": [], "plan": plan}
-        analyze._attach_rest_selection_audit(report, state, evidence, 0, stage="b")
-
-    assert seen == [False]
 
 
 @pytest.mark.parametrize("recovery_owner", (1, 2, 5, 6, 8))

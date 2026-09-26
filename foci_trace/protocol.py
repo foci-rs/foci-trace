@@ -410,17 +410,10 @@ def _decode_payload(version: int, frame_type: int, payload: bytes) -> dict[str, 
             # scoped to the marker `event_id` (152-159) that follows a bundle
             # of these records, not globally unique against the older
             # velocity-sweep-evidence tag space -- see
-            # `breakaway_trace_reporting.rs`'s module doc. Every breakaway tag
-            # except tag 1 (`directional_breakaway`, 22 bytes) fails every
-            # existing (kind, length) branch above and lands here; tag 1
-            # collides byte-for-byte with the legacy 22-byte
-            # `integral_plan_marker` shape and cannot be resolved from bytes
-            # alone (`decode_breakaway_record` doesn't fix that ambiguity --
-            # marker-adjacency context in `velocity_measurement.py`'s
-            # breakaway assembler does, by always re-decoding the raw payload
-            # once the surrounding marker is known). If the breakaway decoder
-            # also rejects the payload, the original legacy error is what
-            # callers see, preserving today's corrupt-payload behavior.
+            # `breakaway_trace_reporting.rs`'s module doc. Every breakaway
+            # record fails every (kind, length) branch above and lands here.
+            # If the breakaway decoder also rejects the payload, the original
+            # error is what callers see, preserving corrupt-payload behavior.
             try:
                 return decode_breakaway_record(payload, protocol_version=version)
             except DecodeError:
@@ -692,10 +685,18 @@ _INTEGRAL_OBSERVATION_LEGACY_LENGTHS = (46, 47, 77, 80, 96)
 _INTEGRAL_OBSERVATION_LENGTHS_WITH_DRIFT = (50, 51, 81, 84, 100)
 
 
+# Reserved, historical-only: never reassign. These kinds carried the retired
+# combined Proportional sweep and its reproduction evidence, which current
+# captures never contain.
+RETIRED_VELOCITY_SWEEP_EVIDENCE_KINDS = frozenset({1, 6, 7, 8, *range(12, 21)})
+
+
 def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
     _require(payload, 1, "velocity-sweep evidence")
     cursor = _EvidenceCursor(payload)
     kind = cursor.take("B")
+    if kind in RETIRED_VELOCITY_SWEEP_EVIDENCE_KINDS:
+        raise DecodeError(f"retired velocity-sweep evidence kind {kind}")
     if kind == 0 and len(payload) in (43, 56, 72, 73, 75):
         decoded = _take_fields(
             cursor,
@@ -980,77 +981,6 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             raise DecodeError(f"unknown velocity-integral plan fragment {fragment}")
         decoded["plan_fragment"] = fragment
         decoded["plan_digest"] = decoded["plan_digest_low"] | (decoded["plan_digest_high"] << 32)
-    elif kind == 1 and len(payload) == 22:
-        decoded = _take_fields(
-            cursor,
-            (
-                ("run_sequence", "I"),
-                ("evidence_sequence", "H"),
-                ("plan_digest_low", "I"),
-                ("plan_digest_high", "I"),
-                ("fixed_p", "H"),
-                ("positive_rung_count", "B"),
-                ("maximum_workflow_ms", "I"),
-            ),
-        )
-        decoded["plan_digest"] = decoded["plan_digest_low"] | (decoded["plan_digest_high"] << 32)
-        decoded["record_kind"] = "integral_plan_marker"
-    elif kind == 1:
-        proportional = len(payload) in (78, 91)
-        proportional_recovery = len(payload) == 91
-        plan_fields = [
-            ("run_sequence", "I"),
-            ("evidence_sequence", "H"),
-        ]
-        if proportional:
-            plan_fields.extend((("plan_digest_low", "I"), ("plan_digest_high", "I")))
-        plan_fields.extend(
-            (
-                ("requested_velocity_mrev_s", "I"),
-                ("requested_velocity_source", "B"),
-                ("planned_velocity_mrev_s", "I"),
-                ("effective_ceiling_mrev_s", "I"),
-                ("clamp_flags", "H"),
-                ("binding_source", "B"),
-                ("target_velocity_rpm", "i"),
-                ("p_start", "H"),
-                ("p_top", "H"),
-                ("rung_count", "B"),
-                ("observations_per_direction", "H"),
-                ("moving_stroke_us", "I"),
-                ("zero_settle_us", "I"),
-                ("nominal_workflow_ms", "I"),
-                ("maximum_workflow_ms", "I"),
-            )
-        )
-        if proportional_recovery:
-            plan_fields.extend(
-                (
-                    ("recovery_origin_band_counts", "I"),
-                    ("recovery_nominal_slot_us", "I"),
-                    ("recovery_maximum_slot_us", "I"),
-                    ("recovery_slot_count", "B"),
-                )
-            )
-        plan_fields.extend(
-            (
-                ("max_stroke_travel_mrev", "I"),
-                ("settle_travel_reserve_mrev", "I"),
-                ("negative_position_headroom_mrev", "I"),
-                ("positive_position_headroom_mrev", "I"),
-                ("hard_torque_limit", "H"),
-                ("usable_torque_limit", "H"),
-            )
-        )
-        decoded = _take_fields(
-            cursor,
-            tuple(plan_fields),
-        )
-        if proportional:
-            decoded["plan_digest"] = decoded["plan_digest_low"] | (
-                decoded["plan_digest_high"] << 32
-            )
-        decoded["record_kind"] = "plan"
     elif kind == 2 and (amplitude := _try_decode_fixed_gain_amplitude(payload)) is not None:
         return amplitude
     elif kind == 2 and len(payload) in (
@@ -1159,58 +1089,6 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                     raise DecodeError("a rejected tail cannot pass every gate")
         decoded["plan_digest"] = decoded["plan_digest_low"] | (decoded["plan_digest_high"] << 32)
         decoded["record_kind"] = "integral_observation"
-    elif kind == 2:
-        decoded = _take_fields(
-            cursor,
-            (
-                ("run_sequence", "I"),
-                ("evidence_sequence", "H"),
-                ("rung_index", "B"),
-                ("slot", "B"),
-                ("target_velocity_rpm", "i"),
-                ("classification", "B"),
-                ("flags", "B"),
-                ("delta_sign", "B"),
-                ("delta_mantissa", "I"),
-                ("delta_shift", "B"),
-                ("elapsed_mantissa", "I"),
-                ("elapsed_shift", "B"),
-                ("rate_low", "i"),
-                ("rate_mean", "i"),
-                ("rate_high", "i"),
-                ("deficit_low", "i"),
-                ("deficit_high", "i"),
-                ("rate_shift", "B"),
-                ("suffix_len", "H"),
-                ("selected_level", "B"),
-                ("selected_blocks", "I"),
-                ("rate_variance_mantissa", "I"),
-                ("rate_variance_shift", "B"),
-                ("slope_mantissa", "i"),
-                ("slope_shift", "B"),
-                ("slope_half_width_mantissa", "I"),
-                ("slope_half_width_shift", "B"),
-                ("lag_one_q", "i"),
-                ("lag_one_half_width_q", "I"),
-                ("residual_mantissa", "I"),
-                ("residual_shift", "B"),
-                ("tested_suffixes", "B"),
-                ("velocity_p", "H"),
-                ("disturbance_q16", "i"),
-                ("disturbance_low_q16", "i"),
-                ("disturbance_high_q16", "i"),
-                ("disturbance_variance_mantissa", "I"),
-                ("disturbance_variance_shift", "B"),
-                ("predicted_torque_target_abs", "H"),
-            ),
-        )
-        # Firmware appends the u32 drift ratio at the end of the record, after
-        # predicted_torque_target_abs. Captures from before the field existed
-        # end here instead, and that absence must decode as None rather than
-        # the u32::MAX "no finite reportable ratio" sentinel the firmware
-        # also emits.
-        decoded["drift_ratio_ppm"] = cursor.take("I") if len(payload) - cursor.offset >= 4 else None
-        decoded["record_kind"] = "observation"
     elif kind == 3 and len(payload) == 67:
         decoded = _take_fields(
             cursor,
@@ -1316,114 +1194,6 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             decoded["target_terminus"] = None
         decoded["plan_digest"] = decoded["plan_digest_low"] | (decoded["plan_digest_high"] << 32)
         decoded["record_kind"] = "integral_rung"
-    elif kind == 3:
-        if len(payload) == 122:
-            decoded = _take_fields(
-                cursor,
-                (
-                    ("run_sequence", "I"),
-                    ("evidence_sequence", "H"),
-                    ("rung_index", "B"),
-                    ("velocity_p", "H"),
-                ),
-            )
-            directional = []
-            for prefix in ("forward", "reverse"):
-                values = _take_fields(
-                    cursor,
-                    (
-                        ("class", "B"),
-                        ("component_count", "B"),
-                        ("collected_mask", "B"),
-                        ("eligible_mask", "B"),
-                        ("included_mask", "B"),
-                        ("operable_count", "B"),
-                        ("directional_flags", "B"),
-                    ),
-                )
-                components = [
-                    [cursor.take("i"), cursor.take("i")],
-                    [cursor.take("i"), cursor.take("i")],
-                ]
-                pooled = _take_fields(
-                    cursor,
-                    (
-                        ("pooled_q16", "i"),
-                        ("pooled_low_q16", "i"),
-                        ("pooled_high_q16", "i"),
-                        ("variance_floor_observations", "B"),
-                    ),
-                )
-                rate_bounds = []
-                for _ in range(4):
-                    mantissa = cursor.take("i")
-                    shift = cursor.take("B")
-                    rate_bounds.append(mantissa << shift)
-                count = values["component_count"]
-                if count > 2:
-                    raise DecodeError("velocity-sweep rung has too many components")
-                values["components"] = components[:count]
-                values["rate_bounds_q"] = rate_bounds
-                values.update(pooled)
-                directional.append(values)
-                for name, value in values.items():
-                    decoded[f"{prefix}_{name}"] = value
-            decoded["flags"] = (
-                (directional[0]["directional_flags"] & 1)
-                | ((directional[1]["directional_flags"] & 1) << 1)
-                | ((directional[0]["directional_flags"] & 2) << 1)
-                | ((directional[1]["directional_flags"] & 2) << 2)
-            )
-            decoded["record_kind"] = "rung"
-            cursor.finish()
-            return decoded
-        compact_proportional_rung = len(payload) == 33
-        fields = [
-            ("run_sequence", "I"),
-            ("evidence_sequence", "H"),
-            ("rung_index", "B"),
-            ("velocity_p", "H"),
-            ("forward_low_q16", "i"),
-            ("forward_high_q16", "i"),
-            ("reverse_low_q16", "i"),
-            ("reverse_high_q16", "i"),
-        ]
-        if not compact_proportional_rung:
-            fields.extend(
-                (
-                    ("forward_p_low", "H"),
-                    ("forward_p_high", "H"),
-                    ("reverse_p_low", "H"),
-                    ("reverse_p_high", "H"),
-                )
-            )
-        fields.extend(
-            (
-                ("forward_class", "B"),
-                ("reverse_class", "B"),
-            )
-        )
-        if not compact_proportional_rung:
-            fields.extend(
-                (
-                    ("forward_closure", "B"),
-                    ("reverse_closure", "B"),
-                )
-            )
-        fields.extend(
-            (
-                ("flags", "B"),
-                ("forward_eligible_observations", "H"),
-                ("reverse_eligible_observations", "H"),
-            )
-        )
-        if not compact_proportional_rung:
-            fields[-2:-2] = [
-                ("forward_eligible_rungs", "B"),
-                ("reverse_eligible_rungs", "B"),
-            ]
-        decoded = _take_fields(cursor, tuple(fields))
-        decoded["record_kind"] = "rung"
     elif kind == 4 and len(payload) in (58, 59, 61, 62, 66):
         fields = [
             ("run_sequence", "I"),
@@ -1479,82 +1249,6 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         decoded["plan_digest"] = decoded["plan_digest_low"] | (decoded["plan_digest_high"] << 32)
         decoded["digest"] = decoded["digest_low"] | (decoded["digest_high"] << 32)
         decoded["record_kind"] = "integral_terminal"
-    elif kind == 4 and len(payload) != 71:
-        decoded = {
-            "record_kind": "terminal",
-            "run_sequence": cursor.take("I"),
-            "encoder_counts_per_rev": cursor.take("I"),
-            "f_pwm_hz": cursor.take("I"),
-        }
-        directions = []
-        direction_fields = (
-            ("direction_closure", "B"),
-            ("first_moving", "H"),
-            ("p_low", "H"),
-            ("p_high", "H"),
-            ("common_low_q16", "i"),
-            ("common_high_q16", "i"),
-            ("pooled_q16", "i"),
-            ("pooled_low_q16", "i"),
-            ("pooled_high_q16", "i"),
-            ("eligible_rungs", "B"),
-            ("eligible_observations", "H"),
-            ("flags", "B"),
-        )
-        for _ in range(2):
-            directions.append(_take_fields(cursor, direction_fields))
-        decoded["directions"] = directions
-        decoded.update(
-            _take_fields(
-                cursor,
-                (
-                    ("expected_observations", "H"),
-                    ("emitted_observations", "H"),
-                    ("expected_rungs", "H"),
-                    ("emitted_rungs", "H"),
-                    ("digest_low", "I"),
-                    ("digest_high", "I"),
-                    ("outcome", "B"),
-                    ("cause", "B"),
-                    ("sufficient_direction_mask", "B"),
-                ),
-            )
-        )
-    elif kind == 4:
-        decoded = _take_fields(
-            cursor,
-            (
-                ("run_sequence", "I"),
-                ("evidence_sequence", "H"),
-                ("member_mask", "I"),
-                ("direction", "B"),
-                ("region_kind", "B"),
-                ("closure", "B"),
-                ("first_rung", "B"),
-                ("last_rung", "B"),
-                ("p_low", "H"),
-                ("p_high", "H"),
-                ("member_count", "B"),
-                ("common_low_q16", "i"),
-                ("common_high_q16", "i"),
-                ("pooled_q16", "i"),
-                ("pooled_low_q16", "i"),
-                ("pooled_high_q16", "i"),
-                ("variance_floor_observations", "B"),
-                ("settled_rate_mean_min_mantissa", "i"),
-                ("settled_rate_mean_min_shift", "B"),
-                ("settled_rate_mean_max_mantissa", "i"),
-                ("settled_rate_mean_max_shift", "B"),
-                ("settled_rate_envelope_low_mantissa", "i"),
-                ("settled_rate_envelope_low_shift", "B"),
-                ("settled_rate_envelope_high_mantissa", "i"),
-                ("settled_rate_envelope_high_shift", "B"),
-                ("boundary_rung_plus_one", "B"),
-                ("tested_low_q16", "i"),
-                ("tested_high_q16", "i"),
-            ),
-        )
-        decoded["record_kind"] = "directional_region"
     elif kind == 5 and len(payload) != 19:
         decoded = _take_fields(
             cursor,
@@ -1619,132 +1313,6 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             )
         )
         decoded["record_kind"] = "integral_rest_boundary"
-    elif kind == 5:
-        decoded = _take_fields(
-            cursor,
-            (
-                ("run_sequence", "I"),
-                ("evidence_sequence", "H"),
-                ("member_mask", "I"),
-                ("first_rung", "B"),
-                ("last_rung", "B"),
-                ("member_count", "B"),
-                ("p_low", "H"),
-                ("p_high", "H"),
-                ("closure", "B"),
-            ),
-        )
-        decoded["record_kind"] = "joint_region"
-    elif kind == 6:
-        fields = [
-            ("run_sequence", "I"),
-            ("evidence_sequence", "H"),
-            ("nominated_p", "H"),
-            ("coverage_mask", "B"),
-        ]
-        if len(payload) == 75:
-            fields.extend(
-                (
-                    ("model_direction_mask", "B"),
-                    ("joint_union_mask", "I"),
-                )
-            )
-        fields.extend(
-            (
-                ("joint_member_mask", "I"),
-                ("nominated_rung", "B"),
-                ("distance_to_start_q16", "I"),
-                ("distance_to_top_q16", "I"),
-                ("nomination_flags", "B"),
-            )
-        )
-        decoded = _take_fields(cursor, tuple(fields))
-        directions = []
-        for _ in range(2):
-            directions.append(
-                _take_fields(
-                    cursor,
-                    (
-                        ("member_mask", "I"),
-                        ("pooled_low_q16", "i"),
-                        ("pooled_high_q16", "i"),
-                        ("coverage", "B"),
-                        ("signed_rung_distance", "B"),
-                        ("gain_ratio_num", "H"),
-                        ("gain_ratio_den", "H"),
-                        ("settled_rate_difference_mantissa", "i"),
-                        ("settled_rate_difference_shift", "B"),
-                    ),
-                )
-            )
-        decoded["directions"] = directions
-        decoded["record_kind"] = "handoff"
-    elif kind == 7:
-        decoded = _take_fields(
-            cursor,
-            (
-                ("run_sequence", "I"),
-                ("evidence_sequence", "H"),
-                ("rung_index", "B"),
-                ("slot", "B"),
-                ("passing_suffix_mask", "B"),
-                ("common_rate_low_mantissa", "i"),
-                ("common_rate_low_shift", "B"),
-                ("common_rate_high_mantissa", "i"),
-                ("common_rate_high_shift", "B"),
-                ("binding_slope_margin_mantissa", "i"),
-                ("binding_slope_margin_shift", "B"),
-                ("binding_lag_one_margin_q", "i"),
-            ),
-        )
-        decoded["record_kind"] = "structured_boundary"
-    elif kind == 8:
-        decoded = _take_fields(
-            cursor,
-            (
-                ("run_sequence", "I"),
-                ("evidence_sequence", "H"),
-                ("encoder_counts_per_rev", "I"),
-                ("f_pwm_hz", "I"),
-                ("model_direction_mask", "B"),
-            ),
-        )
-        decoded["selected_memberships"] = [cursor.take("I") for _ in range(3)]
-        decoded["nominated_p"] = cursor.take("H")
-        decoded["selected_intervals"] = [[cursor.take("i"), cursor.take("i")] for _ in range(2)]
-        decoded.update(
-            _take_fields(
-                cursor,
-                (
-                    ("coverage_mask", "B"),
-                    ("forward_region_count", "B"),
-                    ("reverse_region_count", "B"),
-                    ("forward_fragment_count", "B"),
-                    ("reverse_fragment_count", "B"),
-                    ("expected_observations", "H"),
-                    ("emitted_observations", "H"),
-                    ("expected_rungs", "H"),
-                    ("emitted_rungs", "H"),
-                    ("digest_low", "I"),
-                    ("digest_high", "I"),
-                    ("outcome", "B"),
-                    ("cause", "B"),
-                ),
-            )
-        )
-        decoded["recovery_unavailable"] = cursor.take("B") if len(payload) == 86 else 0
-        decoded.update(
-            _take_fields(
-                cursor,
-                (
-                    ("run_started_low", "I"),
-                    ("run_started_high", "I"),
-                    ("run_completed_low", "I"),
-                    ("run_completed_high", "I"),
-                ),
-            )
-        )
-        decoded["record_kind"] = "proportional_terminal"
     elif kind == 9 and len(payload) == 55:
         decoded = _take_fields(
             cursor,
@@ -1769,34 +1337,6 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             ),
         )
         decoded["record_kind"] = "rung_origin_recovery"
-    elif kind == 9:
-        decoded = _take_fields(
-            cursor,
-            (
-                ("run_sequence", "I"),
-                ("evidence_sequence", "H"),
-                ("outcome", "B"),
-                ("previous_nominated_p", "H"),
-                ("current_nominated_p", "H"),
-            ),
-        )
-        decoded["previous_memberships"] = [cursor.take("I") for _ in range(3)]
-        decoded["current_memberships"] = [cursor.take("I") for _ in range(3)]
-        decoded["previous_intervals"] = [[cursor.take("i"), cursor.take("i")] for _ in range(2)]
-        decoded["current_intervals"] = [[cursor.take("i"), cursor.take("i")] for _ in range(2)]
-        decoded.update(
-            _take_fields(
-                cursor,
-                (
-                    ("previous_digest_low", "I"),
-                    ("previous_digest_high", "I"),
-                    ("current_digest_low", "I"),
-                    ("current_digest_high", "I"),
-                ),
-            )
-        )
-        decoded["record_kind"] = "reproduction"
-        decoded["schema_revision"] = 2
     elif kind == 10 and len(payload) == 89:
         decoded = _take_fields(
             cursor,
@@ -1850,47 +1390,6 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         if int(decoded["current_contact_code"]) not in range(4):
             raise DecodeError("recovery rest current contact is invalid")
         decoded["record_kind"] = "recovery_rest"
-    elif kind == 10:
-        common_fields = (
-            ("run_sequence", "I"),
-            ("evidence_sequence", "H"),
-            ("outcome", "B"),
-            ("reason_mask", "B"),
-        )
-        decoded = _take_fields(cursor, common_fields)
-        if len(payload) == 26:
-            decoded.update(
-                _take_fields(
-                    cursor,
-                    (
-                        ("previous_provisional_p", "H"),
-                        ("current_provisional_p", "H"),
-                        ("fixed_p", "H"),
-                        ("selected_joint_mask", "I"),
-                        ("selected_first_rung", "B"),
-                        ("selected_member_count", "B"),
-                        ("forward_validity", "B"),
-                        ("reverse_validity", "B"),
-                        ("reduced_margin", "B"),
-                        ("schema_revision", "H"),
-                    ),
-                )
-            )
-            decoded["record_kind"] = "reproduction_v4_header"
-        else:
-            decoded.update(
-                _take_fields(
-                    cursor,
-                    (
-                        ("previous_nominated_p", "H"),
-                        ("current_nominated_p", "H"),
-                        ("fixed_p", "H"),
-                        ("reduced_margin", "B"),
-                        ("schema_revision", "H"),
-                    ),
-                )
-            )
-            decoded["record_kind"] = "reproduction_v3_header"
     elif kind == 11 and len(payload) in (78, 80):
         decoded = _take_fields(
             cursor,
@@ -2007,83 +1506,6 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             raise DecodeError("scored-rest disposition is invalid")
         decoded["conditioned_rest_evidence"] = disposition == 0
         decoded["record_kind"] = "rest_selection"
-    elif 11 <= kind <= 13:
-        decoded = _take_fields(
-            cursor,
-            (
-                ("run_sequence", "I"),
-                ("evidence_sequence", "H"),
-                ("object", "B"),
-                ("previous", "I"),
-                ("current", "I"),
-                ("core", "I"),
-                ("previous_only", "I"),
-                ("current_only", "I"),
-                ("low_delta", "b"),
-                ("high_delta", "b"),
-            ),
-        )
-        decoded["record_kind"] = "reproduction_membership"
-    elif 14 <= kind <= 15:
-        decoded = _take_fields(
-            cursor,
-            (
-                ("run_sequence", "I"),
-                ("evidence_sequence", "H"),
-                ("direction", "B"),
-                ("previous_low", "i"),
-                ("previous_high", "i"),
-                ("current_low", "i"),
-                ("current_high", "i"),
-                ("overlap_low", "i"),
-                ("overlap_high", "i"),
-            ),
-        )
-        decoded["record_kind"] = "reproduction_pooled"
-    elif 16 <= kind <= 17:
-        decoded = _take_fields(
-            cursor,
-            (
-                ("run_sequence", "I"),
-                ("evidence_sequence", "H"),
-                ("direction", "B"),
-                ("previous_low", "i"),
-                ("previous_high", "i"),
-                ("current_low", "i"),
-                ("current_high", "i"),
-                ("conservative_low", "i"),
-                ("conservative_high", "i"),
-                ("nonempty", "B"),
-            ),
-        )
-        decoded["record_kind"] = "reproduction_common"
-    elif 18 <= kind <= 19:
-        decoded = _take_fields(
-            cursor,
-            (
-                ("run_sequence", "I"),
-                ("evidence_sequence", "H"),
-                ("direction", "B"),
-                ("coverage", "B"),
-                ("signed_rung_distance", "i"),
-                ("gain_ratio_num", "H"),
-                ("gain_ratio_den", "H"),
-            ),
-        )
-        decoded["record_kind"] = "reproduction_coverage"
-    elif kind == 20:
-        decoded = _take_fields(
-            cursor,
-            (
-                ("run_sequence", "I"),
-                ("evidence_sequence", "H"),
-                ("previous_digest_low", "I"),
-                ("previous_digest_high", "I"),
-                ("current_digest_low", "I"),
-                ("current_digest_high", "I"),
-            ),
-        )
-        decoded["record_kind"] = "reproduction_digest"
     elif kind == 30:
         decoded = _take_fields(
             cursor,
@@ -2366,15 +1788,9 @@ def decode_breakaway_record(
     `_decode_velocity_sweep_evidence`, this function is never the sole
     authority for a `FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE` payload: the local
     tag space is scoped to the surrounding `EVENT_COMMISSION_BREAKAWAY_*`
-    marker (152-162), not globally unique. The v13 tag 1
-    (`directional_breakaway`, 22 bytes) collides byte-for-byte with the legacy 22-byte
-    `integral_plan_marker` shape decoded by `_decode_velocity_sweep_evidence`,
-    and tag 3 (`discovery_planned`, 45 bytes since `schema_revision` was added)
-    collides byte-for-byte with the legacy non-compact
-    Proportional `rung` shape, which also happens to be 45 bytes; a caller that
-    already knows (from marker adjacency) that a raw payload belongs to a
-    breakaway bundle must call this function directly on `Frame.raw_payload`
-    rather than trust `Frame.payload`.
+    marker (152-162), not globally unique. A caller that already knows (from
+    marker adjacency) that a raw payload belongs to a breakaway bundle should
+    call this function directly on `Frame.raw_payload`.
     """
     if protocol_version not in SUPPORTED_PROTOCOL_VERSIONS:
         raise DecodeError(f"unsupported protocol version {protocol_version}")

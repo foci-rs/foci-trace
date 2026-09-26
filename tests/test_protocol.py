@@ -277,81 +277,6 @@ def test_decodes_version_six_velocity_observation_without_peak() -> None:
     assert frame.payload["actual_velocity_pptm"] is None
 
 
-def test_decodes_canonical_velocity_sweep_plan() -> None:
-    values = (
-        7,
-        0,
-        5_000,
-        1,
-        4_800,
-        7_500,
-        1,
-        0,
-        288,
-        8,
-        128,
-        5,
-        2,
-        256_000,
-        200_000,
-        9_120,
-        10_000,
-        1_000,
-        250,
-        1_250,
-        1_250,
-        1_000,
-        900,
-    )
-    payload = bytes([1]) + struct.pack("<IHI BIIHBiHHBHIIIIIIIIHH".replace(" ", ""), *values)
-
-    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
-
-    assert frame.payload["record_kind"] == "plan"
-    assert frame.payload["run_sequence"] == 7
-    assert frame.payload["planned_velocity_mrev_s"] == 4_800
-    assert frame.payload["target_velocity_rpm"] == 288
-    assert frame.payload["rung_count"] == 5
-    assert frame.payload["usable_torque_limit"] == 900
-
-
-def test_decodes_proportional_recovery_plan_geometry() -> None:
-    payload = bytearray([1])
-    payload.extend(struct.pack("<IHII", 7, 0, 1, 2))
-    payload.extend(
-        struct.pack(
-            "<IBIIHBiHHBHIIII",
-            5_000,
-            1,
-            4_800,
-            7_500,
-            1,
-            0,
-            288,
-            8,
-            128,
-            5,
-            4,
-            256_000,
-            500_000,
-            298_632,
-            298_632,
-        )
-    )
-    payload.extend(struct.pack("<IIIB", 1_000, 1_816_958, 3_000_000, 23))
-    payload.extend(struct.pack("<IIIIHH", 2_500, 250, 28_100, 28_100, 1_000, 900))
-
-    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
-
-    assert len(payload) == 91
-    assert frame.payload["record_kind"] == "plan"
-    assert frame.payload["plan_digest"] == 0x0000_0002_0000_0001
-    assert frame.payload["recovery_origin_band_counts"] == 1_000
-    assert frame.payload["recovery_nominal_slot_us"] == 1_816_958
-    assert frame.payload["recovery_maximum_slot_us"] == 3_000_000
-    assert frame.payload["recovery_slot_count"] == 23
-
-
 def test_decodes_fragmented_velocity_integral_response_plan() -> None:
     core = bytearray([0])
     core.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
@@ -1325,25 +1250,6 @@ def test_rejects_invalid_scored_rest_selection_record(replacement) -> None:
         decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
 
 
-def test_decodes_velocity_integral_response_plan_marker() -> None:
-    payload = bytearray([1])
-    payload.extend(struct.pack("<IHIIHBI", 7, 1, 0x89AB_CDEF, 0x0123_4567, 1_448, 5, 69_888))
-
-    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
-
-    assert frame.payload == {
-        "run_sequence": 7,
-        "evidence_sequence": 1,
-        "plan_digest_low": 0x89AB_CDEF,
-        "plan_digest_high": 0x0123_4567,
-        "fixed_p": 1_448,
-        "positive_rung_count": 5,
-        "maximum_workflow_ms": 69_888,
-        "plan_digest": 0x0123_4567_89AB_CDEF,
-        "record_kind": "integral_plan_marker",
-    }
-
-
 def test_decodes_recovery_aware_velocity_integral_plan_marker() -> None:
     payload = struct.pack(
         "<BIQHIiIHBHIIIIIIIBHH",
@@ -1642,414 +1548,6 @@ def test_decodes_schema_five_velocity_integral_rest_boundary() -> None:
     assert frame.payload["cleanup_confirmed"] == 1
 
 
-def test_decodes_proportional_canonical_records_and_plan_identity() -> None:
-    plan_values = (
-        7,
-        0,
-        0x0105_C518,
-        0x53E2_5AF6,
-        5_000,
-        1,
-        4_800,
-        7_500,
-        1,
-        0,
-        288,
-        8,
-        128,
-        5,
-        2,
-        256_000,
-        200_000,
-        9_120,
-        10_000,
-        1_000,
-        250,
-        1_250,
-        1_250,
-        1_000,
-        900,
-    )
-    records = [
-        (
-            bytes([1]) + struct.pack("<IHIIIBIIHBiHHBHIIIIIIIIHH", *plan_values),
-            "plan",
-        ),
-        (
-            bytes([4])
-            + struct.pack(
-                "<IHIBBBBBHHBiiiiiBiBiBiBiBBii",
-                7,
-                21,
-                0b11100,
-                0,
-                1,
-                0,
-                2,
-                4,
-                512,
-                1024,
-                3,
-                10,
-                20,
-                15,
-                12,
-                18,
-                0,
-                100,
-                0,
-                200,
-                0,
-                90,
-                0,
-                210,
-                0,
-                6,
-                10,
-                20,
-            ),
-            "directional_region",
-        ),
-        (
-            bytes([5]) + struct.pack("<IHIBBBHHB", 7, 22, 0b11100, 2, 4, 3, 512, 1024, 3),
-            "joint_region",
-        ),
-        (
-            bytes([6])
-            + struct.pack(
-                "<IHHBIBIIBIiiBBHHiBi iiBBHHiB".replace(" ", ""),
-                7,
-                23,
-                724,
-                3,
-                0b11100,
-                3,
-                0x0002_0000,
-                0x0004_0000,
-                0,
-                0b11100,
-                12,
-                18,
-                0,
-                0,
-                1,
-                1,
-                0,
-                0,
-                0b11100,
-                -18,
-                -12,
-                0,
-                0,
-                1,
-                1,
-                0,
-                0,
-            ),
-            "handoff",
-        ),
-        (
-            bytes([7])
-            + struct.pack("<IHBBB iB iB iB i", 7, 24, 2, 0, 0b110, 10, 0, 20, 0, 3, 0, -4),
-            "structured_boundary",
-        ),
-        (
-            bytes([8])
-            + struct.pack(
-                "<IHII BIIIH iiii BBBBB HHHH II BB IIII".replace(" ", ""),
-                7,
-                25,
-                4_000,
-                25_000,
-                3,
-                0b11100,
-                0b11100,
-                0b11100,
-                724,
-                12,
-                18,
-                -18,
-                -12,
-                3,
-                1,
-                1,
-                0,
-                0,
-                20,
-                20,
-                5,
-                5,
-                0x0105_C518,
-                0x53E2_5AF6,
-                0,
-                3,
-                0x1122_3344,
-                0x0000_0001,
-                0x5566_7788,
-                0x0000_0002,
-            ),
-            "proportional_terminal",
-        ),
-        (
-            bytes([9])
-            + struct.pack(
-                "<IHBHHIIIIIIiiiiiiiiIIII",
-                7,
-                26,
-                1,
-                724,
-                724,
-                0b11100,
-                0b11100,
-                0b11100,
-                0b11100,
-                0b11100,
-                0b11100,
-                12,
-                18,
-                -18,
-                -12,
-                13,
-                17,
-                -17,
-                -13,
-                1,
-                2,
-                3,
-                4,
-            ),
-            "reproduction",
-        ),
-    ]
-    assert len(records[5][0]) == 85
-    assert len(records[6][0]) == 84
-
-    decoded = []
-    for payload, expected_kind in records:
-        frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
-        assert frame.payload["record_kind"] == expected_kind
-        decoded.append(frame.payload)
-
-    assert decoded[0]["plan_digest_low"] == 0x0105_C518
-    assert decoded[1]["member_mask"] == 0b11100
-    assert decoded[3]["directions"][1]["pooled_low_q16"] == -18
-    assert decoded[5]["selected_memberships"] == [0b11100, 0b11100, 0b11100]
-    assert decoded[6]["previous_memberships"] == [0b11100, 0b11100, 0b11100]
-    assert decoded[6]["current_intervals"][1] == [-17, -13]
-
-
-def test_decodes_compact_proportional_rung_from_hardware_capture() -> None:
-    payload = bytes.fromhex("030100000005000001000000000000000000000000000000000001010400000000")
-
-    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
-
-    assert len(payload) == 33
-    assert frame.payload["record_kind"] == "rung"
-    assert frame.payload["run_sequence"] == 1
-    assert frame.payload["evidence_sequence"] == 5
-    assert frame.payload["rung_index"] == 0
-    assert frame.payload["velocity_p"] == 1
-    assert frame.payload["forward_class"] == 1
-    assert frame.payload["reverse_class"] == 1
-    assert frame.payload["flags"] == 4
-
-
-def test_decodes_schema8_handoff_union_and_selected_component() -> None:
-    payload = bytes([6]) + struct.pack(
-        "<IHHBBIIBIIBIiiBBHHiBIiiBBHHiB",
-        7,
-        23,
-        1024,
-        3,
-        3,
-        0b11111,
-        0b11100,
-        3,
-        0x0002_0000,
-        0x0004_0000,
-        1,
-        0b11100,
-        12,
-        18,
-        0,
-        0,
-        1,
-        1,
-        0,
-        0,
-        0b11100,
-        -18,
-        -12,
-        0,
-        0,
-        1,
-        1,
-        0,
-        0,
-    )
-
-    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
-
-    assert frame.payload["record_kind"] == "handoff"
-    assert frame.payload["model_direction_mask"] == 3
-    assert frame.payload["joint_union_mask"] == 0b11111
-    assert frame.payload["joint_member_mask"] == 0b11100
-
-
-def test_decodes_proportional_reproduction_schema_headers_and_shared_fragments() -> None:
-    fragments = [
-        (
-            struct.pack("<BIHBBHHHBH", 10, 7, 33, 1, 0, 1448, 1024, 1448, 0, 3),
-            "reproduction_v3_header",
-        ),
-        (
-            struct.pack(
-                "<BIHBBHHHIBBBBBH",
-                10,
-                7,
-                34,
-                1,
-                0,
-                256,
-                1024,
-                1024,
-                0x0018_0000,
-                19,
-                2,
-                3,
-                1,
-                1,
-                8,
-            ),
-            "reproduction_v4_header",
-        ),
-        (
-            struct.pack("<BIHBIIIIIbb", 11, 7, 33, 0, 0x38, 0x3C, 0x38, 0, 4, -1, 0),
-            "reproduction_membership",
-        ),
-        (
-            struct.pack("<BIHBiiiiii", 14, 7, 33, 0, 100, 120, 105, 125, 105, 120),
-            "reproduction_pooled",
-        ),
-        (
-            struct.pack("<BIHBiiiiiiB", 16, 7, 33, 0, 104, 115, 108, 118, 108, 115, 1),
-            "reproduction_common",
-        ),
-        (
-            struct.pack("<BIHBBiHH", 18, 7, 33, 0, 1, -2, 1448, 724),
-            "reproduction_coverage",
-        ),
-        (
-            struct.pack("<BIHIIII", 20, 7, 33, 1, 2, 3, 4),
-            "reproduction_digest",
-        ),
-    ]
-
-    decoded = [
-        decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload).payload
-        for payload, _kind in fragments
-    ]
-
-    assert [value["record_kind"] for value in decoded] == [kind for _payload, kind in fragments]
-    assert decoded[0]["schema_revision"] == 3
-    assert decoded[1]["schema_revision"] == 8
-    assert decoded[1]["selected_joint_mask"] == 0x0018_0000
-    assert decoded[1]["selected_member_count"] == 2
-    assert decoded[1]["forward_validity"] == 3
-    assert decoded[1]["reverse_validity"] == 1
-    assert decoded[2]["low_delta"] == -1
-    assert decoded[3]["overlap_high"] == 120
-    assert decoded[4]["nonempty"] == 1
-    assert decoded[5]["signed_rung_distance"] == -2
-    assert decoded[6]["current_digest_high"] == 4
-
-
-def test_decodes_canonical_four_observation_rung() -> None:
-    def direction(
-        classification: int,
-        components: list[tuple[int, int]],
-        masks: tuple[int, int, int],
-        operable_count: int,
-        flags: int,
-        pooled: tuple[int, int, int, int],
-        rates: tuple[int, int, int, int],
-        rate_shift: int,
-    ) -> bytes:
-        padded = [*components, *([(0, 0)] * (2 - len(components)))]
-        result = struct.pack(
-            "<BBBBBBB",
-            classification,
-            len(components),
-            *masks,
-            operable_count,
-            flags,
-        )
-        result += b"".join(struct.pack("<ii", *component) for component in padded)
-        result += struct.pack("<iiiB", *pooled)
-        result += b"".join(struct.pack("<iB", rate, rate_shift) for rate in rates)
-        return result
-
-    payload = struct.pack("<BIHBH", 3, 7, 12, 4, 724)
-    payload += direction(
-        0,
-        [(100, 120)],
-        (0b1111, 0b1111, 0b0111),
-        4,
-        0b11,
-        (110, 104, 116, 1),
-        (50, 60, 40, 70),
-        2,
-    )
-    payload += direction(
-        1,
-        [(-140, -130), (-110, -100)],
-        (0b1111, 0b1111, 0),
-        3,
-        0b01,
-        (0, 0, 0, 0),
-        (-70, -40, -80, -30),
-        1,
-    )
-
-    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
-
-    assert len(payload) == 122
-    assert frame.payload["record_kind"] == "rung"
-    assert frame.payload["forward_class"] == 0
-    assert frame.payload["forward_components"] == [[100, 120]]
-    assert frame.payload["forward_included_mask"] == 0b0111
-    assert frame.payload["forward_pooled_q16"] == 110
-    assert frame.payload["forward_rate_bounds_q"] == [200, 240, 160, 280]
-    assert frame.payload["reverse_class"] == 1
-    assert frame.payload["reverse_components"] == [[-140, -130], [-110, -100]]
-    assert frame.payload["reverse_operable_count"] == 3
-    assert frame.payload["flags"] == 0b0111
-
-    with pytest.raises(DecodeError):
-        decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload[:-1]) + payload[:-1])
-
-
-def test_decodes_canonical_velocity_sweep_terminal_digest() -> None:
-    direction = struct.pack("<BHHHiiiiiBHB", 0, 8, 8, 32, 10, 20, 15, 12, 18, 3, 6, 0x0D)
-    reverse = struct.pack("<BHHHiiiiiBHB", 1, 12, 12, 48, -20, -10, -15, -18, -12, 3, 6, 0x0D)
-    payload = (
-        bytes([4])
-        + struct.pack("<III", 7, 4_000, 25_000)
-        + direction
-        + reverse
-        + struct.pack("<HHHHIIBBB", 20, 20, 5, 5, 0x0105_C518, 0x53E2_5AF6, 0, 0, 3)
-    )
-
-    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
-
-    assert frame.payload["record_kind"] == "terminal"
-    assert frame.payload["encoder_counts_per_rev"] == 4_000
-    assert frame.payload["f_pwm_hz"] == 25_000
-    assert frame.payload["directions"][1]["pooled_q16"] == -15
-    assert frame.payload["digest_low"] == 0x0105_C518
-    assert frame.payload["digest_high"] == 0x53E2_5AF6
-
-
 def test_decodes_outer_safety_timing_and_rejects_count_drift() -> None:
     payload = bytes([30]) + struct.pack(
         "<IIIIIIIIBBBBBBBB",
@@ -2285,6 +1783,26 @@ def test_historical_mechanical_id_constants_are_reserved_not_reused() -> None:
     assert EVENT_COMMISSION_MECHANICAL_ID_ATTEMPT == 111
     assert EVENT_COMMISSION_MECHANICAL_ID_RESPONSE == 112
     assert EVENT_COMMISSION_MECHANICAL_ID_CLASSIFICATION == 113
+
+
+def test_retired_velocity_sweep_evidence_kinds_are_reserved_not_reused() -> None:
+    """Kinds that carried the retired combined Proportional sweep stay reserved.
+
+    Pin the exact set so a new record cannot quietly take one of these kinds,
+    and check each is rejected before any live decode branch can claim it.
+    """
+    from foci_trace.protocol import (
+        RETIRED_VELOCITY_SWEEP_EVIDENCE_KINDS,
+        _decode_velocity_sweep_evidence,
+    )
+
+    assert (
+        frozenset({1, 6, 7, 8, 12, 13, 14, 15, 16, 17, 18, 19, 20})
+        == RETIRED_VELOCITY_SWEEP_EVIDENCE_KINDS
+    )
+    for kind in RETIRED_VELOCITY_SWEEP_EVIDENCE_KINDS:
+        with pytest.raises(DecodeError, match="retired velocity-sweep evidence kind"):
+            _decode_velocity_sweep_evidence(bytes([kind]) + bytes(64))
 
 
 def test_commission_phase_names_cover_live_wire_codes_only() -> None:
@@ -2552,24 +2070,6 @@ def _proportional_observation_payload(*, drift_ratio_ppm: int | None) -> bytes:
     if drift_ratio_ppm is not None:
         payload.extend(struct.pack("<I", drift_ratio_ppm))
     return bytes(payload)
-
-
-def test_new_and_old_proportional_observation_lengths_both_decode() -> None:
-    """Proportional has no rejection diagnostic block at all, so extending only the
-    Integral length set would leave every Proportional capture undecoded for the new
-    field while claiming the length-set change was complete."""
-    old_payload = _proportional_observation_payload(drift_ratio_ppm=None)
-    assert len(old_payload) == 104
-    old_frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, old_payload) + old_payload)
-    assert old_frame.payload["record_kind"] == "observation"
-    assert old_frame.payload["drift_ratio_ppm"] is None
-
-    new_payload = _proportional_observation_payload(drift_ratio_ppm=14_220)
-    assert len(new_payload) == 108
-    new_frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, new_payload) + new_payload)
-    assert new_frame.payload["record_kind"] == "observation"
-    assert new_frame.payload["drift_ratio_ppm"] == 14_220
-    assert new_frame.payload["predicted_torque_target_abs"] == 500
 
 
 def _amplitude_plan_core(order_byte: int, schema_revision: int = 5) -> bytes:
@@ -3608,33 +3108,36 @@ def test_decode_breakaway_record_rejects_a_length_mismatch_for_a_known_tag() -> 
         decode_breakaway_record(_bw_probe_planned() + b"\x00")
 
 
-def test_the_only_v14_breakaway_tag_that_collides_with_a_legacy_wire_shape_is_three() -> None:
-    """`decode_frame`'s generic decoder recovers every breakaway tag except two.
+def test_every_breakaway_record_decodes_through_decode_frame() -> None:
+    """`decode_frame` recovers every breakaway record the breakaway decoder accepts.
 
-    Tags 0-2 and 4-13 fail every existing `(kind, length)` branch in
-    `_decode_velocity_sweep_evidence` and raise, so `_decode_payload` falls
-    back to `decode_breakaway_record` and recovers the correct interpretation
-    with no extra context needed. Two tags genuinely collide with an
-    unrelated legacy wire shape that shares the same leading tag byte and
-    exact payload length, so the generic decoder "succeeds" with the wrong
-    interpretation:
-
-    - The v14 tag 1 (`directional_breakaway`, 23 bytes) no longer collides with
-      the legacy 22-byte `integral_plan_marker`; the historical v13 shape does.
-    - Tag 3 (`discovery_planned`) widened from 43 to 45 bytes when
-      `schema_revision` was added, and 45 bytes also happens to be the
-      legacy non-compact Proportional `rung` record's exact length.
-
-    Resolving either case needs the marker-adjacency context
-    `assemble_breakaway_ticks` provides -- this test pins both collisions so
-    a future change to any of the three wire shapes doesn't silently make it
-    worse or silently fix it unnoticed.
+    Breakaway local tags 0-15 share the leading byte with the velocity-sweep
+    evidence kinds, so `decode_frame` only reaches `decode_breakaway_record`
+    after the generic decoder rejects a payload. Every (builder, header
+    version) pair the breakaway decoder accepts must come out of
+    `decode_frame` as the same breakaway record: no live velocity-sweep
+    evidence shape may share a breakaway record's tag and exact length.
     """
-    for builder in (
+    from foci_trace.protocol import decode_breakaway_record
+
+    builders = (
+        _bw_probe_planned_v14,
         _bw_probe_planned,
+        _bw_probe_planned_legacy,
+        _bw_directional_breakaway_v13,
+        _bw_directional_breakaway_v14,
+        _bw_probe_resolved,
+        _bw_probe_terminal_v14,
         _bw_probe_terminal,
+        _bw_probe_terminal_v11,
+        _bw_probe_terminal_v10,
+        _bw_discovery_planned,
         _bw_ceiling_source,
+        _bw_raw_observation_v13,
+        _bw_raw_observation_v14,
+        _bw_raw_observation_v15,
         _bw_raw_observation,
+        _bw_probe_decision,
         _bw_discovery_terminal,
         _bw_discovery_rung_margin,
         _bw_rung_zero_diagnostic,
@@ -3642,29 +3145,27 @@ def test_the_only_v14_breakaway_tag_that_collides_with_a_legacy_wire_shape_is_th
         _bw_confirmation_terminal,
         _bw_confirmation_observation,
         _bw_campaign_terminal,
-        _bw_probe_decision,
-    ):
+        _bw_rest_rejected,
+        _bw_origin_mismatch,
+    )
+    covered_tags = set()
+    for builder in builders:
         payload = builder()
-        frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
-        assert str(frame.payload["record_kind"]).startswith("breakaway_")
+        for version in SUPPORTED_PROTOCOL_VERSIONS:
+            try:
+                expected = decode_breakaway_record(payload, protocol_version=version)
+            except DecodeError:
+                continue
+            covered_tags.add(payload[0])
+            frame = decode_frame(
+                _header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload, version=version) + payload
+            )
+            assert frame.payload["record_kind"] == expected["record_kind"], (
+                builder.__name__,
+                version,
+            )
 
-    v13_directional_payload = _bw_directional_breakaway_v13()
-    v13_directional_frame = decode_frame(
-        _header(
-            FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
-            v13_directional_payload,
-            version=13,
-        )
-        + v13_directional_payload
-    )
-    assert v13_directional_frame.payload["record_kind"] == "integral_plan_marker"
-
-    collided_discovery_payload = _bw_discovery_planned()
-    collided_discovery_frame = decode_frame(
-        _header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, collided_discovery_payload)
-        + collided_discovery_payload
-    )
-    assert collided_discovery_frame.payload["record_kind"] == "rung"
+    assert covered_tags == set(range(16))
 
 
 def test_assemble_breakaway_ticks_bundles_records_by_marker() -> None:
