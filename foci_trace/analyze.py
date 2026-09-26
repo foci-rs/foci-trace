@@ -62,6 +62,7 @@ from .tracking_lag import TrackingLagReport, analyze_tracking_lag, format_tracki
 from .velocity_integral import (
     audit_integral_reproduction_pair,
     audit_velocity_integral,
+    unreplayable_integral_report,
 )
 from .velocity_measurement import (
     BUILD_FEATURE_REST_CHAIN_ON_EVIDENCE,
@@ -2320,7 +2321,16 @@ def _velocity_integral_audits(states: dict[int, _DeviceState]) -> list[dict[str,
                 continue
             source_indexes = {item.source_index for item in evidence}
             if len(source_indexes) != 1:
-                raise ValueError("velocity-integral evidence changed source index")
+                report = unreplayable_integral_report(
+                    [(item.raw_payload, item.payload) for item in evidence],
+                    "velocity-integral evidence changed source index",
+                    "velocity-integral run spans more than one source",
+                )
+                report["device_index"] = device_index
+                report["source_index"] = None
+                report["serial"] = state.report.serial or state.report.metadata_serial
+                audits.append(report)
+                continue
             source_index = next(iter(source_indexes))
             start = min(item.timestamp_ticks for item in evidence)
             end = max(item.timestamp_ticks for item in evidence)

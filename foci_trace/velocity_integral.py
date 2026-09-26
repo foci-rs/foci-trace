@@ -1298,6 +1298,30 @@ def _retained_integral_evidence(
     return opening, bookend, positive, eligible_masks
 
 
+def unreplayable_integral_report(
+    evidence_records: list[tuple[bytes, dict[str, object]]], mismatch: str, caveat: str
+) -> dict[str, object]:
+    """Build the failed-audit report for a run whose evidence cannot be replayed."""
+    values = [value for _raw, value in evidence_records]
+
+    def of_kind(record_kind: str) -> list[dict[str, object]]:
+        return [value for value in values if value["record_kind"] == record_kind]
+
+    terminals = of_kind("integral_terminal")
+    identities = (
+        of_kind("integral_plan_core") or of_kind("integral_plan_schedule") or terminals or values
+    )
+    return {
+        "run_sequence": int(identities[0].get("run_sequence", 0)) if identities else 0,
+        "plan": None,
+        "terminal": dict(terminals[0]) if len(terminals) == 1 else None,
+        "complete": False,
+        "matches_firmware": False,
+        "mismatches": [mismatch],
+        "caveats": [caveat],
+    }
+
+
 def audit_velocity_integral(
     raw_observations: list[Any], evidence_records: list[tuple[bytes, dict[str, object]]]
 ) -> dict[str, object]:
@@ -1323,9 +1347,6 @@ def audit_velocity_integral(
         for raw, value in evidence_records
         if value["record_kind"] == "integral_rest_boundary"
     ]
-    identities = (
-        plan_cores or plan_schedules or terminals or [value for _raw, value in evidence_records]
-    )
     if (
         not plan_cores
         and not plan_schedules
@@ -1346,18 +1367,12 @@ def audit_velocity_integral(
         or len(plan_recoveries) != recovery_fragment_count
         or len(terminals) != 1
     ):
-        return {
-            "run_sequence": int(identities[0].get("run_sequence", 0)) if identities else 0,
-            "plan": None,
-            "terminal": dict(terminals[0]) if len(terminals) == 1 else None,
-            "complete": False,
-            "matches_firmware": False,
-            "mismatches": [
-                "partial integral-response capture: required plan fragments and one terminal "
-                "must be present exactly once"
-            ],
-            "caveats": ["partial velocity-integral response capture"],
-        }
+        return unreplayable_integral_report(
+            evidence_records,
+            "partial integral-response capture: required plan fragments and one terminal "
+            "must be present exactly once",
+            "partial velocity-integral response capture",
+        )
     core, schedule, terminal = plan_cores[0], plan_schedules[0], terminals[0]
     plan_identity_fields = (
         "run_sequence",
