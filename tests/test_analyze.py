@@ -2546,7 +2546,6 @@ def test_main_writes_deterministic_velocity_report_file(tmp_path, capsys) -> Non
     assert json.loads(report_path.read_text()) == {
         "groups": [],
         "outer_safety_timing": [],
-        "sweeps": [],
     }
     assert report_path.read_text().endswith("\n")
 
@@ -2807,26 +2806,14 @@ def test_recovery_records_route_to_their_owning_stage(monkeypatch) -> None:
     ]
     routed: dict[str, list[str]] = {}
 
-    def proportional(_raw, records):
-        routed["proportional"] = [str(value["record_kind"]) for _bytes, value in records]
-        return {"terminal": {"outcome": 3, "cause": 0}}
-
     def integral(_raw, records):
         routed["integral"] = [str(value["record_kind"]) for _bytes, value in records]
         return {"terminal": {"outcome": 3, "cause": 0}}
 
-    monkeypatch.setattr(analyze, "audit_velocity_sweep", proportional)
     monkeypatch.setattr(analyze, "audit_velocity_integral", integral)
 
-    analyze._velocity_sweep_audits({0: state})
     analyze._velocity_integral_audits({0: state})
 
-    assert routed["proportional"] == [
-        "plan",
-        "recovery_rest",
-        "rung_origin_recovery",
-        "proportional_terminal",
-    ]
     assert routed["integral"] == [
         "integral_plan_core",
         "velocity_primitive_current",
@@ -2837,7 +2824,7 @@ def test_recovery_records_route_to_their_owning_stage(monkeypatch) -> None:
     ]
 
 
-def test_amplitude_records_bypass_proportional_and_integral_replay(monkeypatch) -> None:
+def test_amplitude_records_bypass_integral_replay(monkeypatch) -> None:
     from foci_trace import analyze
 
     state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
@@ -2865,13 +2852,8 @@ def test_amplitude_records_bypass_proportional_and_integral_replay(monkeypatch) 
         analyze._VelocitySweepEvidenceFrame(index, 0, bytes((index,)), payload)
         for index, payload in enumerate(payloads, 1)
     ]
-    called = {"proportional": False, "integral": False, "amplitude": False}
+    called = {"integral": False, "amplitude": False}
 
-    monkeypatch.setattr(
-        analyze,
-        "audit_velocity_sweep",
-        lambda *_args: called.update(proportional=True),
-    )
     monkeypatch.setattr(
         analyze,
         "audit_velocity_integral",
@@ -2891,113 +2873,10 @@ def test_amplitude_records_bypass_proportional_and_integral_replay(monkeypatch) 
 
     monkeypatch.setattr(analyze, "audit_fixed_gain_amplitude", amplitude)
 
-    analyze._velocity_sweep_audits({0: state})
     analyze._velocity_integral_audits({0: state})
     analyze._fixed_gain_amplitude_audits({0: state})
 
-    assert called == {"proportional": False, "integral": False, "amplitude": True}
-
-
-def test_proportional_schema_ten_is_bound_by_its_companion_integral_plan(monkeypatch) -> None:
-    from foci_trace import analyze
-
-    state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
-    payloads = (
-        {"record_kind": "plan", "run_sequence": 9},
-        {"record_kind": "proportional_terminal", "run_sequence": 9},
-        {
-            "record_kind": "integral_plan_core",
-            "run_sequence": 9,
-            "schema_revision": 10,
-        },
-    )
-    state.velocity_sweep_evidence = [
-        analyze._VelocitySweepEvidenceFrame(index, 0, bytes((index,)), payload)
-        for index, payload in enumerate(payloads, 1)
-    ]
-    monkeypatch.setattr(
-        analyze,
-        "audit_velocity_sweep",
-        lambda *_args: {
-            "proportional_replay": {"schema_revision": 9},
-            "terminal": {"outcome": 3, "cause": 0},
-        },
-    )
-
-    audit = analyze._velocity_sweep_audits({0: state})[0]
-
-    assert audit["proportional_replay"]["schema_revision"] == 10
-
-
-def test_selected_recovery_rest_binds_proportional_schema_eleven(monkeypatch) -> None:
-    from foci_trace import analyze
-
-    state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
-    payloads = (
-        {"record_kind": "plan", "run_sequence": 9},
-        {"record_kind": "recovery_rest", "run_sequence": 9, "stage": 0},
-        {"record_kind": "proportional_terminal", "run_sequence": 9},
-        {
-            "record_kind": "integral_plan_core",
-            "run_sequence": 9,
-            "schema_revision": 10,
-        },
-    )
-    state.velocity_sweep_evidence = [
-        analyze._VelocitySweepEvidenceFrame(index, 0, bytes((index,)), payload)
-        for index, payload in enumerate(payloads, 1)
-    ]
-    monkeypatch.setattr(
-        analyze,
-        "audit_velocity_sweep",
-        lambda *_args: {
-            "proportional_replay": {"schema_revision": 9},
-            "terminal": {"outcome": 1, "cause": 0},
-            "selected_recovery_rest": {"disposition": 0},
-            "plan": {
-                "nominal_workflow_ms": 271_423,
-                "maximum_workflow_ms": 298_632,
-            },
-            "matches_firmware": True,
-            "mismatches": [],
-        },
-    )
-
-    audit = analyze._velocity_sweep_audits({0: state})[0]
-
-    assert audit["proportional_replay"]["schema_revision"] == 11
-    assert audit["matches_firmware"] is True
-
-
-def test_recovery_wide_integral_plan_binds_proportional_schema_twelve(monkeypatch) -> None:
-    from foci_trace import analyze
-
-    state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
-    payloads = (
-        {"record_kind": "plan", "run_sequence": 10},
-        {"record_kind": "proportional_terminal", "run_sequence": 10},
-        {
-            "record_kind": "integral_plan_core",
-            "run_sequence": 10,
-            "schema_revision": 11,
-        },
-    )
-    state.velocity_sweep_evidence = [
-        analyze._VelocitySweepEvidenceFrame(index, 0, bytes((index,)), payload)
-        for index, payload in enumerate(payloads, 1)
-    ]
-    monkeypatch.setattr(
-        analyze,
-        "audit_velocity_sweep",
-        lambda *_args: {
-            "proportional_replay": {"schema_revision": 9},
-            "terminal": {"outcome": 1, "cause": 0},
-        },
-    )
-
-    audit = analyze._velocity_sweep_audits({0: state})[0]
-
-    assert audit["proportional_replay"]["schema_revision"] == 12
+    assert called == {"integral": False, "amplitude": True}
 
 
 def test_event_151_is_verified_against_its_causal_raw_suffixes() -> None:
@@ -3237,6 +3116,8 @@ def test_analyze_capture_reconstructs_a_breakaway_campaign_from_ftrc_frames() ->
     assert audit["probe_terminal"]["fault_checkpoint"] == 17
     assert audit["probe_terminal"]["fault_checkpoint_name"] == "probe_moving_encoder_sample"
     assert audit["confirmation_accepted"] is False
+    assert analysis.devices[0].decode_errors == 0
+    assert velocity_analysis_to_json(analysis).get("sweeps", []) == []
 
 
 def test_analyze_capture_rejects_in_phase_motion_before_the_breakaway_probe_plan() -> None:
@@ -3453,6 +3334,8 @@ def test_analyze_capture_does_not_flag_prior_phase_motion_as_premature() -> None
 
     assert len(analysis.breakaway_campaign_audits) == 1
     assert analysis.breakaway_campaign_audits[0]["matches_firmware"] is True
+    assert analysis.devices[0].decode_errors == 0
+    assert velocity_analysis_to_json(analysis).get("sweeps", []) == []
 
 
 def _status_payload_v22(pressure: int, max_cycles: int) -> bytes:

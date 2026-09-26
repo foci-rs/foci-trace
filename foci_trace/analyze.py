@@ -66,8 +66,6 @@ from .velocity_measurement import (
     VelocityObservation,
     analyze_velocity_observations,
     audit_breakaway_campaign,
-    audit_proportional_reproduction_pair,
-    audit_velocity_sweep,
     capture_rule_features,
     velocity_report_to_json,
     verify_scored_rest_selection,
@@ -349,7 +347,6 @@ class CaptureAnalysis:
     )
     contour_segments: list[ContourSegmentReport] = field(default_factory=list)
     velocity_reports: list[VelocityCaptureGroup] = field(default_factory=list)
-    velocity_sweep_audits: list[dict[str, object]] = field(default_factory=list)
     velocity_integral_audits: list[dict[str, object]] = field(default_factory=list)
     fixed_gain_amplitude_audits: list[dict[str, object]] = field(default_factory=list)
     outer_safety_timing_audits: list[dict[str, object]] = field(default_factory=list)
@@ -2201,23 +2198,13 @@ def _attach_rest_selection_audit(
     `rest_selection_raw_unverifiable_count` and never compared against the
     unrelated window that happens to precede them.
 
-    `stage` selects the schema namespace ("b" or "c") for resolving the
-    recording firmware's rule contract from the plan (see
-    `capture_rule_features`); the scored-rest walk grammar is applied when that
-    contract declares `BUILD_FEATURE_REST_CHAIN_ON_EVIDENCE`. `None` (no stage
-    known) falls back to the historical grammar, matching a capture that offers
-    no rule signal.
-
-    An Integral plan record states build_features on the wire (protocol decodes
-    it there), so an Integral rest selection reads the bit directly. A Proportional
-    trace plan record carries no rule-contract marker at all -- neither
-    build_features nor a schema_revision -- so a Proportional rest selection always
-    falls back to the historical grammar. That is correct for the combined flow,
-    whose Proportional runs at COMBINED_PROPORTIONAL_SCHEMA_REVISION (14), below the
-    rest-walk floor of 17, so it never walks. Resolving a breakaway Proportional walk
-    would require build_features on the Proportional plan record, which the wire does
-    not carry; that gap is tracked separately and is not what the combined
-    captures this change targets need.
+    `stage` selects the schema namespace for resolving the recording
+    firmware's rule contract from the plan (see `capture_rule_features`); the
+    scored-rest walk grammar is applied when that contract declares
+    `BUILD_FEATURE_REST_CHAIN_ON_EVIDENCE`. `None` (no stage known) falls back
+    to the historical grammar, matching a capture that offers no rule signal.
+    An Integral plan record states build_features on the wire, so an Integral
+    rest selection reads the bit directly.
     """
     plan = report.get("plan")
     build_features = (
@@ -2261,131 +2248,6 @@ def _attach_rest_selection_audit(
         if not isinstance(reported_mismatches, list):
             raise TypeError("audit mismatches must be a list")
         reported_mismatches.extend(mismatches)
-
-
-def _velocity_sweep_audits(states: dict[int, _DeviceState]) -> list[dict[str, object]]:
-    audits: list[dict[str, object]] = []
-    retained_candidates: dict[tuple[int, int], dict[str, object]] = {}
-    for device_index, state in sorted(states.items()):
-        run_sequences = sorted(
-            {
-                int(item.payload["run_sequence"])
-                for item in state.velocity_sweep_evidence
-                if "run_sequence" in item.payload
-                and item.payload.get("namespace") != "fixed_gain_amplitude"
-                and item.payload.get("record_kind") != "outer_safety_timing"
-                and (
-                    item.payload.get("record_kind") != "rung_origin_recovery"
-                    or int(item.payload.get("stage", -1)) == 0
-                )
-                and (
-                    item.payload.get("record_kind") != "velocity_primitive_current"
-                    or int(item.payload.get("stage", -1)) == 0
-                )
-                and (
-                    item.payload.get("record_kind") != "recovery_rest"
-                    or int(item.payload.get("stage", -1)) == 0
-                )
-                and (
-                    item.payload.get("record_kind") != "rest_selection"
-                    or int(item.payload.get("stage", -1)) == 0
-                )
-            }
-        )
-        for run_sequence in run_sequences:
-            evidence = [
-                item
-                for item in state.velocity_sweep_evidence
-                if int(item.payload.get("run_sequence", -1)) == run_sequence
-                and item.payload.get("namespace") != "fixed_gain_amplitude"
-                and item.payload.get("record_kind") != "outer_safety_timing"
-                and (
-                    not str(item.payload.get("record_kind", "")).startswith("integral_")
-                    and (
-                        item.payload.get("record_kind") != "rung_origin_recovery"
-                        or int(item.payload.get("stage", -1)) == 0
-                    )
-                    and (
-                        item.payload.get("record_kind") != "velocity_primitive_current"
-                        or int(item.payload.get("stage", -1)) == 0
-                    )
-                    and (
-                        item.payload.get("record_kind") != "recovery_rest"
-                        or int(item.payload.get("stage", -1)) == 0
-                    )
-                    and (
-                        item.payload.get("record_kind") != "rest_selection"
-                        or int(item.payload.get("stage", -1)) == 0
-                    )
-                )
-            ]
-            if not evidence:
-                continue
-            source_indexes = {item.source_index for item in evidence}
-            if len(source_indexes) != 1:
-                raise ValueError("velocity sweep evidence changed source index")
-            source_index = next(iter(source_indexes))
-            start = min(item.timestamp_ticks for item in evidence)
-            end = max(item.timestamp_ticks for item in evidence)
-            raw = [
-                item.observation
-                for item in state.velocity_observations
-                if item.source_index == source_index and start <= item.timestamp_ticks <= end
-            ]
-            report = audit_velocity_sweep(
-                raw,
-                [(item.raw_payload, item.payload) for item in evidence],
-            )
-            _attach_rest_selection_audit(
-                report,
-                state,
-                evidence,
-                source_index,
-                stage="b",
-            )
-            companion_integral = next(
-                (
-                    item.payload
-                    for item in state.velocity_sweep_evidence
-                    if item.source_index == source_index
-                    and int(item.payload.get("run_sequence", -1)) == run_sequence
-                    and item.payload.get("record_kind") == "integral_plan_core"
-                ),
-                None,
-            )
-            replay = report.get("proportional_replay")
-            if isinstance(companion_integral, dict) and isinstance(replay, dict):
-                companion_schema = int(companion_integral.get("schema_revision", 0))
-                if companion_schema == 11:
-                    replay["schema_revision"] = 12
-                elif companion_schema == 10:
-                    selected_rest = report.get("selected_recovery_rest")
-                    replay["schema_revision"] = 11 if isinstance(selected_rest, dict) else 10
-            report["device_index"] = device_index
-            report["source_index"] = source_index
-            report["serial"] = state.report.serial or state.report.metadata_serial
-            candidate_key = (device_index, source_index)
-            if report.get("reproduction") is not None:
-                previous = retained_candidates.get(candidate_key)
-                if previous is not None:
-                    pair_audit = audit_proportional_reproduction_pair(previous, report)
-                    report["reproduction_pair_audit"] = pair_audit
-                    if not pair_audit["matches_firmware"]:
-                        report["matches_firmware"] = False
-                        report["mismatches"].extend(pair_audit["mismatches"])
-                    report["caveats"] = [
-                        caveat for caveat in report["caveats"] if "prior capture" not in caveat
-                    ]
-            terminal = report.get("terminal")
-            if isinstance(terminal, dict):
-                outcome = int(terminal.get("outcome", -1))
-                cause = int(terminal.get("cause", -1))
-                if outcome == 0 or (outcome == 2 and cause == 5):
-                    retained_candidates[candidate_key] = report
-                else:
-                    retained_candidates.pop(candidate_key, None)
-            audits.append(report)
-    return audits
 
 
 def _velocity_integral_audits(states: dict[int, _DeviceState]) -> list[dict[str, object]]:
@@ -2977,7 +2839,6 @@ def analyze_capture(
         commissioning=commissioning_report,
         contour_segments=contour_segments,
         velocity_reports=_velocity_capture_groups(states, commissioning_report),
-        velocity_sweep_audits=_velocity_sweep_audits(states),
         velocity_integral_audits=_velocity_integral_audits(states),
         fixed_gain_amplitude_audits=_fixed_gain_amplitude_audits(states),
         outer_safety_timing_audits=_outer_safety_timing_audits(states),
@@ -3337,44 +3198,6 @@ def format_analysis(
     if commissioning_text:
         text = "\n".join(part for part in (text, commissioning_text) if part)
     proportional_lines = []
-    for sweep in analysis.velocity_sweep_audits:
-        replay = sweep.get("proportional_replay")
-        if not isinstance(replay, dict):
-            continue
-        proportional_lines.append(
-            "proportional dev={device} source={source} run={run} p={p} coverage={coverage} "
-            "matches_firmware={matches}".format(
-                device=sweep.get("device_index", "?"),
-                source=sweep.get("source_index", "?"),
-                run=sweep.get("run_sequence", "?"),
-                p=replay.get("nominated_p", 0),
-                coverage=",".join(str(value) for value in replay.get("coverage", [])),
-                matches=str(bool(sweep.get("matches_firmware"))).lower(),
-            )
-        )
-        pair_audit = sweep.get("reproduction_pair_audit")
-        if isinstance(pair_audit, dict) and isinstance(pair_audit.get("projection"), dict):
-            projection = pair_audit["projection"]
-            memberships = projection.get("memberships", [])
-            proportional_lines.append(
-                "proportional_core interpretation={interpretation} previous={previous} "
-                "current={current} core={core} selected={selected} fixed_p={fixed_p} "
-                "validity={validity} reason_mask={reason} reduced_margin={margin} "
-                "coverage={coverage} conservative_common={common} offline_derived={derived}".format(
-                    interpretation=projection.get("interpretation", "firmware-schema-3"),
-                    previous=[value["previous"] for value in memberships],
-                    current=[value["current"] for value in memberships],
-                    core=projection.get("core_masks", []),
-                    selected=projection.get("selected_joint_mask", "contiguous-core"),
-                    fixed_p=projection.get("fixed_p", 0),
-                    validity=projection.get("directional_validity", "legacy"),
-                    reason=projection.get("reason_mask", 0),
-                    margin=str(bool(projection.get("reduced_margin"))).lower(),
-                    coverage=projection.get("coverage", []),
-                    common=projection.get("firmware_conservative_common", []),
-                    derived=projection.get("offline_derived", "unavailable"),
-                )
-            )
     for integral in analysis.velocity_integral_audits:
         evidence = integral.get("run_evidence", {})
         masks = evidence.get("eligible_masks", []) if isinstance(evidence, dict) else []
@@ -3557,7 +3380,6 @@ def analysis_to_json(analysis: CaptureAnalysis) -> dict[str, object]:
 def velocity_analysis_to_json(analysis: CaptureAnalysis) -> dict[str, object]:
     """Convert velocity measurement groups to deterministic JSON-compatible values."""
     result = {
-        "sweeps": analysis.velocity_sweep_audits,
         "outer_safety_timing": analysis.outer_safety_timing_audits,
         "groups": [
             {

@@ -34,51 +34,6 @@ def test_summary_tracks_gaps_and_error_maxima() -> None:
     assert "voltage_limited=1" in text
 
 
-def test_summary_tracks_proportional_regions_nomination_and_terminal() -> None:
-    summary = LiveSummary()
-    payloads = [
-        {"record_kind": "directional_region", "region_kind": 0},
-        {"record_kind": "directional_region", "region_kind": 1},
-        {"record_kind": "handoff", "nominated_p": 1448},
-        {
-            "record_kind": "proportional_terminal",
-            "outcome": 0,
-            "cause": 4,
-            "recovery_unavailable": 1,
-        },
-    ]
-    for sequence, payload in enumerate(payloads, 1):
-        summary.observe(
-            0,
-            sequence,
-            Frame(
-                header=FrameHeader(
-                    9,
-                    32,
-                    FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE,
-                    0,
-                    0,
-                    1,
-                    0,
-                    sequence,
-                    sequence,
-                    1,
-                ),
-                payload=payload,
-                raw_payload=b"",
-            ),
-        )
-
-    text = summary.render()
-
-    assert "proportional_regions=1" in text
-    assert "proportional_fragments=1" in text
-    assert "proportional_p=1448" in text
-    assert "proportional_outcome=0" in text
-    assert "proportional_cause=4" in text
-    assert "proportional_recovery_unavailable=true" in text
-
-
 def test_summary_tracks_recovery_rest() -> None:
     summary = LiveSummary()
     summary.observe(

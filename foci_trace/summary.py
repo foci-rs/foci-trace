@@ -31,12 +31,6 @@ class DeviceSummary:
     endpoint_pressure: int = 0
     first_spi_cycles: int = 0
     max_spi_cycles: int = 0
-    proportional_regions: int = 0
-    proportional_fragments: int = 0
-    proportional_nominated_p: int = 0
-    proportional_outcome: int | None = None
-    proportional_cause: int | None = None
-    proportional_recovery_unavailable: bool = False
     selected_recovery_rest: tuple[int, int, int, int, int, int] | None = None
     proportional_directional_validity: tuple[int, int] | None = None
     proportional_reduced_margin: bool = False
@@ -101,20 +95,7 @@ class LiveSummary:
             device.max_spi_cycles = int(frame.payload["args"][1])
         elif frame.header.frame_type == FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE:
             kind = frame.payload.get("record_kind")
-            if kind == "directional_region":
-                if int(frame.payload["region_kind"]) == 0:
-                    device.proportional_regions += 1
-                else:
-                    device.proportional_fragments += 1
-            elif kind == "handoff":
-                device.proportional_nominated_p = int(frame.payload["nominated_p"])
-            elif kind == "proportional_terminal":
-                device.proportional_outcome = int(frame.payload["outcome"])
-                device.proportional_cause = int(frame.payload["cause"])
-                device.proportional_recovery_unavailable = bool(
-                    int(frame.payload["recovery_unavailable"])
-                )
-            elif kind == "recovery_rest":
+            if kind == "recovery_rest":
                 device.selected_recovery_rest = (
                     int(frame.payload["disposition"]),
                     int(frame.payload["lead_in_net_displacement_counts"]),
@@ -123,13 +104,6 @@ class LiveSummary:
                     int(frame.payload["scored_min_displacement_counts"]),
                     int(frame.payload["scored_max_displacement_counts"]),
                 )
-            elif kind == "reproduction_v4_header":
-                device.proportional_nominated_p = int(frame.payload["fixed_p"])
-                device.proportional_directional_validity = (
-                    int(frame.payload["forward_validity"]),
-                    int(frame.payload["reverse_validity"]),
-                )
-                device.proportional_reduced_margin = bool(frame.payload["reduced_margin"])
             elif kind == "integral_plan_core":
                 device.velocity_integral_test_p = int(frame.payload["fixed_p"])
                 if "directional_validity" in frame.payload:
@@ -197,10 +171,6 @@ class LiveSummary:
                 "voltage_limited={limited} status=0x{status:08x} spi_errors={spi} "
                 "qhi={qhi} endpoint_pressure={endpoint_pressure} "
                 "first_spi_cycles={first_spi} max_spi_cycles={max_spi} "
-                "proportional_regions={regions} proportional_fragments={fragments} "
-                "proportional_p={proportional_p} proportional_outcome={proportional_outcome} "
-                "proportional_cause={proportional_cause} "
-                "proportional_recovery_unavailable={proportional_recovery_unavailable} "
                 "selected_recovery_rest={selected_recovery_rest} "
                 "proportional_validity={proportional_validity} "
                 "proportional_reduced_margin={proportional_reduced_margin} "
@@ -232,18 +202,6 @@ class LiveSummary:
                     endpoint_pressure=item.endpoint_pressure,
                     first_spi=item.first_spi_cycles,
                     max_spi=item.max_spi_cycles,
-                    regions=item.proportional_regions,
-                    fragments=item.proportional_fragments,
-                    proportional_p=item.proportional_nominated_p,
-                    proportional_outcome=(
-                        "none" if item.proportional_outcome is None else item.proportional_outcome
-                    ),
-                    proportional_cause=(
-                        "none" if item.proportional_cause is None else item.proportional_cause
-                    ),
-                    proportional_recovery_unavailable=str(
-                        item.proportional_recovery_unavailable
-                    ).lower(),
                     selected_recovery_rest=(
                         "none"
                         if item.selected_recovery_rest is None

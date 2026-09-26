@@ -2413,9 +2413,6 @@ def test_reconstruct_build_features_maps_legacy_captures_by_namespace() -> None:
     assert reconstruct_build_features(CURRENT_Q4_12_BUILD, 13, stage="c") == 0b0011
     # Q4.12 breakaway Integral (schema 16) had all four rules.
     assert reconstruct_build_features(CURRENT_Q4_12_BUILD, 16, stage="c") == 0b1111
-    # Proportional numbers its own thresholds (14 drift / 16 suffix / 17 rest).
-    assert reconstruct_build_features(CURRENT_Q4_12_BUILD, 14, stage="b") == 0b0011
-    assert reconstruct_build_features(CURRENT_Q4_12_BUILD, 17, stage="b") == 0b1111
 
 
 def test_reconstruct_build_features_refuses_an_unknown_build() -> None:
