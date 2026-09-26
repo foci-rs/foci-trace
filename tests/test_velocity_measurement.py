@@ -560,13 +560,13 @@ def test_capture_rule_features_prefers_explicit_bits_then_reconstructs() -> None
 
     # A newer capture states build_features directly, returned verbatim
     # at any schema revision -- this is the case schema gating got wrong.
-    assert capture_rule_features({"build_features": 0xF, "schema_revision": 13}, stage="c") == 0xF
+    assert capture_rule_features({"build_features": 0xF, "schema_revision": 13}) == 0xF
 
     # A legacy Integral capture reconstructs from its own plan schema_revision. At
     # the suffix-walk floor the drift and suffix bits are set but rest-walk (16)
     # is not, and no build_revision is needed to say so.
     features = capture_rule_features(
-        {"schema_revision": INTEGRAL_SUFFIX_WALK_MIN_SCHEMA_REVISION}, stage="c"
+        {"schema_revision": INTEGRAL_SUFFIX_WALK_MIN_SCHEMA_REVISION},
     )
     assert features & BUILD_FEATURE_DRIFT_BOUND_GATE
     assert features & BUILD_FEATURE_SUFFIX_WALK_CONTINUES
@@ -574,7 +574,7 @@ def test_capture_rule_features_prefers_explicit_bits_then_reconstructs() -> None
 
     # No signal at all -- no build_features, no schema -- means the legacy gate,
     # reported as None, never a raise.
-    assert capture_rule_features({}, stage="c") is None
+    assert capture_rule_features({}) is None
 
 
 def test_scored_rest_selection_recomputes_all_suffixes_independently() -> None:

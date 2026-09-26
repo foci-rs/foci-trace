@@ -2946,7 +2946,7 @@ def test_rest_selection_audit_keys_the_walk_on_build_features(monkeypatch) -> No
         "mismatches": [],
         "plan": {"build_features": BUILD_FEATURE_REST_CHAIN_ON_EVIDENCE, "schema_revision": 13},
     }
-    analyze._attach_rest_selection_audit(report, state, evidence, 0, stage="c")
+    analyze._attach_rest_selection_audit(report, state, evidence, 0, integral_rule_contract=True)
 
     assert seen == [True]
     assert report["rest_selection_verified_count"] == 1

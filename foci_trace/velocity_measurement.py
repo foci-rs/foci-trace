@@ -51,52 +51,33 @@ class UnsupportedIntegralRepresentationError(ValueError):
     """Raised when a firmware build has no declared integral-gain domain."""
 
 
-_STAGE_RULE_THRESHOLDS: dict[str, tuple[int, int, int]] = {
-    "c": (
-        INTEGRAL_DRIFT_BOUND_MIN_SCHEMA_REVISION,
-        INTEGRAL_SUFFIX_WALK_MIN_SCHEMA_REVISION,
-        INTEGRAL_REST_WALK_MIN_SCHEMA_REVISION,
-    ),
-}
-
-
-def _rule_features_from_schema(schema_revision: int, stage: str) -> int:
+def _rule_features_from_schema(schema_revision: int) -> int:
     """Reconstruct just the analysis rule bits (drift/suffix/rest) a legacy
-    capture ran under, from its per-namespace schema thresholds.
+    capture ran under, from the Integral schema thresholds.
 
     This ignores the integral-representation bit and never consults
     `build_revision`: the stationarity gates read only the rule bits, so an
     archived capture with no representation signal must still resolve its gate
-    contract rather than raise. `stage` selects the namespace; "c" (Integral) is the
-    only one.
+    contract rather than raise.
     """
-    try:
-        drift, suffix, rest = _STAGE_RULE_THRESHOLDS[stage]
-    except KeyError:
-        raise ValueError(f"unknown schema namespace {stage!r}") from None
     features = 0
-    if schema_revision >= drift:
+    if schema_revision >= INTEGRAL_DRIFT_BOUND_MIN_SCHEMA_REVISION:
         features |= BUILD_FEATURE_DRIFT_BOUND_GATE
-    if schema_revision >= suffix:
+    if schema_revision >= INTEGRAL_SUFFIX_WALK_MIN_SCHEMA_REVISION:
         features |= BUILD_FEATURE_SUFFIX_WALK_CONTINUES
-    if schema_revision >= rest:
+    if schema_revision >= INTEGRAL_REST_WALK_MIN_SCHEMA_REVISION:
         features |= BUILD_FEATURE_REST_CHAIN_ON_EVIDENCE
     return features
 
 
-def reconstruct_build_features(
-    build_revision: int | None, schema_revision: int, *, stage: str
-) -> int:
+def reconstruct_build_features(build_revision: int | None, schema_revision: int) -> int:
     """Rebuild the rule contract a pre-`build_features` capture ran under.
 
     Bit 0 (integral representation) comes from the crate-version
-    `build_revision`; the three rule bits reconstruct from the per-namespace
-    schema thresholds, so an archived capture is analysed under exactly the gate
-    that recorded it. `stage` selects the schema namespace; "c" (Integral) is the
-    only one.
+    `build_revision`; the three rule bits reconstruct from the Integral schema
+    thresholds, so an archived capture is analysed under exactly the gate that
+    recorded it.
     """
-    if stage not in _STAGE_RULE_THRESHOLDS:
-        raise ValueError(f"unknown schema namespace {stage!r}")
     if build_revision == _CURRENT_Q4_12_BUILD_REVISION:
         features = BUILD_FEATURE_Q4_12_GAINS
     elif build_revision == _LEGACY_Q8_8_BUILD_REVISION:
@@ -109,20 +90,19 @@ def reconstruct_build_features(
         raise UnsupportedIntegralRepresentationError(
             f"unsupported integral-gain representation for build 0x{build_revision:08x}"
         )
-    return features | _rule_features_from_schema(schema_revision, stage)
+    return features | _rule_features_from_schema(schema_revision)
 
 
-def capture_rule_features(plan: dict[str, object], *, stage: str) -> int | None:
+def capture_rule_features(plan: dict[str, object]) -> int | None:
     """Effective analysis rule-bit contract for the stationarity gates.
 
     A newer capture states `build_features` directly; a legacy capture
-    reconstructs only its rule bits from the stage's schema thresholds. Unlike
+    reconstructs only its rule bits from the schema thresholds. Unlike
     `capture_build_features` this never consults `build_revision` and never
     raises on a missing integral-representation signal, because the gates read
     only the rule bits. Returns `None` when the capture offers no rule signal at
     all (no `build_features` and no schema revision), which the gates treat as
-    the legacy significance test. `stage` selects the namespace; "c" (Integral)
-    is the only one.
+    the legacy significance test.
     """
     explicit = plan.get("build_features")
     if explicit is not None:
@@ -130,16 +110,15 @@ def capture_rule_features(plan: dict[str, object], *, stage: str) -> int | None:
     schema_revision = plan.get("schema_revision")
     if schema_revision is None:
         return None
-    return _rule_features_from_schema(int(schema_revision), stage)  # type: ignore[arg-type]
+    return _rule_features_from_schema(int(schema_revision))  # type: ignore[arg-type]
 
 
-def capture_build_features(plan: dict[str, object], *, stage: str) -> int:
+def capture_build_features(plan: dict[str, object]) -> int:
     """Return the effective rule contract for one decoded capture.
 
     A newer capture states `build_features` directly; a legacy capture
     carries only `build_revision`, from which the contract is reconstructed via
-    the per-namespace schema thresholds. `stage` selects the namespace; "c"
-    (Integral) is the only one.
+    the schema thresholds.
     """
     explicit = plan.get("build_features")
     if explicit is not None:
@@ -148,7 +127,6 @@ def capture_build_features(plan: dict[str, object], *, stage: str) -> int:
     return reconstruct_build_features(
         int(build_revision) if isinstance(build_revision, int) else None,
         int(plan["schema_revision"]),  # type: ignore[arg-type]
-        stage=stage,
     )
 
 

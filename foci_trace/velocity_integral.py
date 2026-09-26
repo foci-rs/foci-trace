@@ -709,7 +709,7 @@ def reconstruct_observation(
     # namespace (schema_revision here is an Integral revision by construction,
     # never Proportional's). A partial test plan carrying neither resolves to None,
     # the fail-safe legacy gate, rather than raising.
-    build_features = capture_rule_features(plan, stage="c")
+    build_features = capture_rule_features(plan)
     stationarity = _stationary_suffix(raw[-256:], build_features=build_features)
     predicted = (
         max(item.peak_torque_target_abs or 0 for item in raw)
@@ -1017,7 +1017,7 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
     schema_revision = int(plan["schema_revision"])
     # Raises for a legacy capture whose build_revision names no known
     # representation, preserving the old refuse-to-guess behavior.
-    build_features = capture_build_features(plan, stage="c")
+    build_features = capture_build_features(plan)
     if not integral_schema_is_known(schema_revision):
         mismatches.append(
             f"plan schema revision {schema_revision} is outside the firmware Integral range"

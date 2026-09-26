@@ -2188,7 +2188,8 @@ def _attach_rest_selection_audit(
     state: _DeviceState,
     evidence: list[_VelocitySweepEvidenceFrame],
     source_index: int,
-    stage: str | None = None,
+    *,
+    integral_rule_contract: bool = False,
 ) -> None:
     """Compare each raw-verifiable Event 151 with the 256 samples before it.
 
@@ -2200,9 +2201,7 @@ def _attach_rest_selection_audit(
     """
     plan = report.get("plan")
     build_features = (
-        capture_rule_features(plan, stage=stage)
-        if stage is not None and isinstance(plan, dict)
-        else None
+        capture_rule_features(plan) if integral_rule_contract and isinstance(plan, dict) else None
     )
     rest_walk_revision = build_features is not None and bool(
         build_features & BUILD_FEATURE_REST_CHAIN_ON_EVIDENCE
@@ -2326,7 +2325,7 @@ def _velocity_integral_audits(states: dict[int, _DeviceState]) -> list[dict[str,
                 state,
                 evidence,
                 source_index,
-                stage="c",
+                integral_rule_contract=True,
             )
             report["device_index"] = device_index
             report["source_index"] = source_index

@@ -2189,27 +2189,27 @@ def test_build_features_bit0_selects_integral_representation() -> None:
 
 def test_reconstruct_build_features_maps_legacy_captures_by_namespace() -> None:
     # The legacy Q8.8 build predates every rule bit.
-    assert reconstruct_build_features(LEGACY_Q8_8_BUILD, 4, stage="c") == 0b0000
+    assert reconstruct_build_features(LEGACY_Q8_8_BUILD, 4) == 0b0000
     # Q4.12 combined Integral (schema 13) had only the drift bound, not the
     # suffix walk (>=15) or the rest walk (>=16).
-    assert reconstruct_build_features(CURRENT_Q4_12_BUILD, 13, stage="c") == 0b0011
+    assert reconstruct_build_features(CURRENT_Q4_12_BUILD, 13) == 0b0011
     # Q4.12 breakaway Integral (schema 16) had all four rules.
-    assert reconstruct_build_features(CURRENT_Q4_12_BUILD, 16, stage="c") == 0b1111
+    assert reconstruct_build_features(CURRENT_Q4_12_BUILD, 16) == 0b1111
 
 
 def test_reconstruct_build_features_refuses_an_unknown_build() -> None:
     with pytest.raises(UnsupportedIntegralRepresentationError):
-        reconstruct_build_features(0xDEADBEEF, 13, stage="c")
+        reconstruct_build_features(0xDEADBEEF, 13)
 
 
 def test_capture_build_features_prefers_explicit_field_else_reconstructs() -> None:
     # A newer capture states its rule contract directly.
     explicit = {"build_features": 0b1111, "schema_revision": 16}
-    assert capture_build_features(explicit, stage="c") == 0b1111
+    assert capture_build_features(explicit) == 0b1111
     # A legacy capture reconstructs from build_revision (bit 0) and the schema
     # thresholds: schema-13 combined had Q4.12 gains and the drift bound only.
     legacy = {"build_revision": CURRENT_Q4_12_BUILD, "schema_revision": 13}
-    assert capture_build_features(legacy, stage="c") == 0b0011
+    assert capture_build_features(legacy) == 0b0011
 
 
 def test_current_build_reconstructs_the_migrated_raw_q4_12_ladder() -> None:
@@ -3018,7 +3018,7 @@ def test_breakaway_rung_carrying_a_response_horizon_is_rejected() -> None:
         "tau_us": velocity_i_tau_us(
             int(decoded["i_raw"]),
             int(plan["pwm_hz"]),
-            capture_build_features(plan, stage="c"),
+            capture_build_features(plan),
         ),
         "moving_horizon_us": int(plan["moving_stroke_us"]),
         "horizon_class": 1,
