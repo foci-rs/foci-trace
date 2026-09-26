@@ -1849,7 +1849,7 @@ def test_assembler_reconstructs_frame_from_usb_packets() -> None:
     assert assembler.feed(frame[64:]) == [frame]
 
 
-def test_decodes_schema_eight_compact_plan_response_intervals() -> None:
+def test_retired_combined_compact_plan_marker_is_not_decoded() -> None:
     payload = bytearray([0])
     payload.extend(struct.pack("<IQH", 7, 0x1122_3344_5566_7788, 1_024))
     payload.extend(struct.pack("<IiIHBH", 4_394, 264, 25_000, 1, 13, 60))
@@ -1858,14 +1858,9 @@ def test_decodes_schema_eight_compact_plan_response_intervals() -> None:
     payload.extend(struct.pack("<BHH", 15, 2_816, 2_816))
     payload.extend(struct.pack("<Biiii", 1, 12_900_000, 13_200_000, -13_100_000, -12_800_000))
 
-    frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
-
-    assert frame.payload["record_kind"] == "integral_plan_marker"
-    assert frame.payload["combined_selected_response"] is True
-    assert frame.payload["selected_response_intervals_q"] == [
-        [12_900_000, 13_200_000],
-        [-13_100_000, -12_800_000],
-    ]
+    assert len(payload) == 82
+    with pytest.raises(DecodeError):
+        decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
 
 
 def test_decodes_gate_rejection_diagnostic_on_an_excluded_observation() -> None:
