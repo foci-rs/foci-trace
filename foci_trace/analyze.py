@@ -1164,10 +1164,10 @@ def _motion_segment_spans(
     motion_min_steps: int,
 ) -> list[_MotionSegmentSpan]:
     spans: list[_MotionSegmentSpan] = []
-    motion_groups = _ordered_motion_groups(
-        state.critical_observations, state.clock_hz, motion_gap_s, motion_min_steps
-    )
-    for motion_group, report in zip(motion_groups, state.report.motion_segments, strict=True):
+    motion_groups = _boot_motion_groups(state, motion_gap_s, motion_min_steps)
+    for (_boot, motion_group), report in zip(
+        motion_groups, state.report.motion_segments, strict=True
+    ):
         assert motion_group.source_key == report.source_key
         samples = motion_group.observations[motion_group.start_index : motion_group.end_index + 1]
         host_values = [sample.host_recv_ns for sample in samples]
@@ -1561,6 +1561,18 @@ def _evidence_by_boot(state: _DeviceState) -> list[_BootEvidence]:
             ],
         )
         for boot_id in boot_ids
+    ]
+
+
+def _boot_motion_groups(
+    state: _DeviceState, motion_gap_s: float, motion_min_steps: int
+) -> list[tuple[_BootEvidence, _MotionGroup]]:
+    return [
+        (boot, motion_group)
+        for boot in _evidence_by_boot(state)
+        for motion_group in _ordered_motion_groups(
+            boot.critical, state.clock_hz, motion_gap_s, motion_min_steps
+        )
     ]
 
 
@@ -1999,14 +2011,9 @@ def _finalize_motion_segments(
     motion_min_steps: int,
     decoupling_config: DecouplingConfig | None,
 ) -> None:
-    boot_motion_groups = [
-        (boot, motion_group)
-        for boot in _evidence_by_boot(state)
-        for motion_group in _ordered_motion_groups(
-            boot.critical, state.clock_hz, motion_gap_s, motion_min_steps
-        )
-    ]
-    for segment_index, (boot, motion_group) in enumerate(boot_motion_groups):
+    for segment_index, (boot, motion_group) in enumerate(
+        _boot_motion_groups(state, motion_gap_s, motion_min_steps)
+    ):
         current_paths = boot.current_paths
         details = boot.control_details
         source_key = motion_group.source_key

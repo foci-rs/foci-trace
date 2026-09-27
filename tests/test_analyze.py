@@ -3805,3 +3805,37 @@ def test_motion_segments_never_span_a_reboot() -> None:
     segments = reports[0].motion_segments
     assert [(s.step_delta, s.critical_samples) for s in segments] == [(12000, 4), (9000, 4)]
     assert [s.control_detail_samples for s in segments] == [0, 4]
+
+
+def test_contour_analysis_handles_a_capture_spanning_a_reboot() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-1", "FOCI OpenFFBoard (trace)", "PLUS", b"")
+    writer.write_device_table(1, 100, "1-2", "FOCI OpenFFBoard (trace)", "MINUS", b"")
+    clock = 84_000_000
+    seq = 0
+    host_ns = 10_000
+    for boot_id in (1111, 2222):
+        for index in range(4):
+            seq += 1
+            timestamp = clock * (index * 50) // 1000
+            payload = _critical_motion_payload(index * 3000, index * 3000, 100, 1000)
+            for device_index in (0, 1):
+                host_ns += 1_000
+                writer.write_firmware_frame(
+                    device_index,
+                    host_ns,
+                    _header(FRAME_TYPE_CRITICAL, payload, seq, timestamp, 1, 0, boot_id=boot_id)
+                    + payload,
+                )
+
+    analysis = analyze_capture(
+        io.BytesIO(output.getvalue()),
+        steady_after_s=0,
+        motion_gap_s=0.1,
+        motion_min_steps=1000,
+        corexy_plus="PLUS",
+        corexy_minus="MINUS",
+    )
+
+    assert [len(device.motion_segments) for device in analysis.devices] == [2, 2]
