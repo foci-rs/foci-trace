@@ -1,7 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -94,16 +94,46 @@ pub fn run_list(args: ListArgs) -> Result<(), RecordError> {
 /// Set from `handle_stop_signal` when SIGINT or SIGTERM arrives. Reader
 /// threads poll it every ~10ms (the USB read timeout already in place) and
 /// stop at the next frame boundary, so the writer drains what's already
-/// queued and flushes normally instead of the process dying mid-write.
+/// queued and flushes normally instead of the process dying mid-write. A
+/// second signal at least `REPEAT_STOP_MIN_GAP_NS` later exits immediately,
+/// for when that drain or flush is stuck.
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+static FIRST_STOP_NS: AtomicU64 = AtomicU64::new(0);
 
-extern "C" fn handle_stop_signal(_signum: libc::c_int) {
-    STOP_REQUESTED.store(true, Ordering::SeqCst);
+/// `sudo` relays a signal sent to it by another process, so `pkill -f`
+/// matching both `sudo` and the recorder delivers the same stop twice within
+/// microseconds. Only a later repeat is an operator insisting.
+const REPEAT_STOP_MIN_GAP_NS: u64 = 500_000_000;
+
+fn monotonic_ns() -> u64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `clock_gettime` is async-signal-safe and only writes `now`.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    let secs = u64::try_from(now.tv_sec).unwrap_or(0);
+    let nanos = u64::try_from(now.tv_nsec).unwrap_or(0);
+    (secs * 1_000_000_000 + nanos).max(1)
+}
+
+extern "C" fn handle_stop_signal(signum: libc::c_int) {
+    let now = monotonic_ns();
+    match FIRST_STOP_NS.compare_exchange(0, now, Ordering::SeqCst, Ordering::SeqCst) {
+        Ok(_) => STOP_REQUESTED.store(true, Ordering::SeqCst),
+        Err(first) if now.saturating_sub(first) >= REPEAT_STOP_MIN_GAP_NS => {
+            // SAFETY: `_exit` is async-signal-safe and skips every destructor,
+            // so a stalled writer cannot block it.
+            unsafe { libc::_exit(128 + signum) };
+        }
+        Err(_) => {}
+    }
 }
 
 fn install_signal_handlers() {
-    // SAFETY: the handler only performs an atomic store, which is
-    // async-signal-safe; no allocation, locking, or I/O happens in it.
+    // SAFETY: the handler only reads the monotonic clock, updates atomics, and
+    // may call `_exit`, all async-signal-safe; no allocation, locking, or I/O
+    // happens in it.
     unsafe {
         libc::signal(
             libc::SIGINT,
@@ -391,6 +421,53 @@ mod tests {
             libc::raise(libc::SIGINT);
         }
         assert!(STOP_REQUESTED.load(Ordering::SeqCst));
+    }
+
+    fn child_exit_status_after_raising(gaps_between_signals: &[Duration]) -> libc::c_int {
+        // SAFETY: the child only calls async-signal-safe functions (signal,
+        // raise, nanosleep, _exit) and touches atomics before exiting, so
+        // forking a multithreaded test process is sound here.
+        unsafe {
+            let pid = libc::fork();
+            assert!(pid >= 0, "fork failed");
+            if pid == 0 {
+                STOP_REQUESTED.store(false, Ordering::SeqCst);
+                FIRST_STOP_NS.store(0, Ordering::SeqCst);
+                install_signal_handlers();
+                libc::raise(libc::SIGINT);
+                for gap in gaps_between_signals {
+                    let pause = libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: libc::c_long::try_from(gap.as_nanos()).unwrap_or(0),
+                    };
+                    libc::nanosleep(&pause, std::ptr::null_mut());
+                    libc::raise(libc::SIGINT);
+                }
+                libc::_exit(0);
+            }
+            let mut status = 0;
+            assert_eq!(libc::waitpid(pid, &mut status, 0), pid);
+            assert!(libc::WIFEXITED(status), "child did not exit normally");
+            libc::WEXITSTATUS(status)
+        }
+    }
+
+    #[test]
+    fn first_stop_signal_lets_the_recorder_finish() {
+        assert_eq!(child_exit_status_after_raising(&[]), 0);
+    }
+
+    #[test]
+    fn immediate_duplicate_stop_signal_is_ignored() {
+        assert_eq!(child_exit_status_after_raising(&[Duration::ZERO]), 0);
+    }
+
+    #[test]
+    fn later_second_stop_signal_force_quits() {
+        assert_eq!(
+            child_exit_status_after_raising(&[Duration::from_millis(600)]),
+            128 + libc::SIGINT
+        );
     }
 
     #[test]
