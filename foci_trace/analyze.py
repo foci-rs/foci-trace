@@ -399,6 +399,7 @@ class _CurrentPathObservation:
     foc_iwy: int
     adc_i0_raw: int
     adc_i1_raw: int
+    boot_id: int
 
 
 @dataclass(frozen=True)
@@ -410,6 +411,7 @@ class _PhaseAdvanceObservation:
     gain_ppm: int
     max_counts: int
     deadband: int
+    boot_id: int
 
 
 @dataclass(frozen=True)
@@ -438,6 +440,7 @@ class _ControlDetailObservation:
     velocity_pidout_target: int
     voltage_limit: int
     torque_limit: int
+    boot_id: int
 
 
 @dataclass(frozen=True)
@@ -672,6 +675,7 @@ def _observe_critical(
             foc_iwy,
             adc_i0_raw,
             adc_i1_raw,
+            boot_id,
         )
     velocity_actual = int(payload["pid_velocity_actual"])
     velocity_error = int(payload["velocity_error"])
@@ -744,6 +748,7 @@ def _observe_current_path_values(
     foc_iwy: int,
     adc_i0_raw: int,
     adc_i1_raw: int,
+    boot_id: int,
 ) -> None:
     state.current_path_observations.append(
         _CurrentPathObservation(
@@ -755,6 +760,7 @@ def _observe_current_path_values(
             foc_iwy=foc_iwy,
             adc_i0_raw=adc_i0_raw,
             adc_i1_raw=adc_i1_raw,
+            boot_id=boot_id,
         )
     )
     if _relative_seconds(state, timestamp_ticks) < steady_after_s:
@@ -776,6 +782,7 @@ def _observe_current_path(
     timestamp_ticks: int,
     source_key: tuple[int, int],
     steady_after_s: float,
+    boot_id: int,
 ) -> None:
     foc_id, foc_iq = _split_i16_pair(int(payload["interim_foc_iq_id"]))
     foc_iux, foc_iwy = _split_i16_pair(int(payload["interim_foc_iwy_iux"]))
@@ -791,6 +798,7 @@ def _observe_current_path(
         foc_iwy,
         adc_i0_raw,
         adc_i1_raw,
+        boot_id,
     )
 
 
@@ -799,6 +807,7 @@ def _observe_phase_advance(
     payload: dict[str, object],
     timestamp_ticks: int,
     source_key: tuple[int, int],
+    boot_id: int,
 ) -> None:
     state.phase_advance_observations.append(
         _PhaseAdvanceObservation(
@@ -809,6 +818,7 @@ def _observe_phase_advance(
             gain_ppm=int(payload["phase_advance_gain_ppm"]),
             max_counts=int(payload["phase_advance_max_counts"]),
             deadband=int(payload["phase_advance_deadband"]),
+            boot_id=boot_id,
         )
     )
 
@@ -845,6 +855,7 @@ def _observe_control_detail(
     payload: dict[str, object],
     timestamp_ticks: int,
     source_key: tuple[int, int],
+    boot_id: int,
 ) -> None:
     voltage_limits = _split_i16_pair(int(payload["pidout_uq_ud_limits"]))
     torque_limits = _split_i16_pair(int(payload["pid_torque_flux_limits"]))
@@ -857,6 +868,7 @@ def _observe_control_detail(
             velocity_pidout_target=int(payload["interim_pidout_target_velocity"]),
             voltage_limit=max(abs(voltage_limits[0]), abs(voltage_limits[1])),
             torque_limit=max(abs(torque_limits[0]), abs(torque_limits[1])),
+            boot_id=boot_id,
         )
     )
 
@@ -1511,18 +1523,45 @@ def _longest_plateau_run(
     return longest_run
 
 
-def _boot_scoped_phase_evidence(
-    state: _DeviceState, segment_samples: list[_CriticalObservation]
-) -> tuple[list[_PhaseBoundaryObservation], list[_StatusObservation], list[int]]:
-    boots = {sample.boot_id for sample in segment_samples}
-    if len(boots) != 1:
-        return [], [], []
-    boot_id = boots.pop()
-    return (
-        [obs for obs in state.phase_boundary_observations if obs.boot_id == boot_id],
-        [obs for obs in state.status_observations if obs.boot_id == boot_id],
-        [tick for boot, tick in state.event_drop_gap_ticks if boot == boot_id],
-    )
+@dataclass(frozen=True)
+class _BootEvidence:
+    """One boot's observations: the MCU tick clock restarts on every boot, so
+    tick ranges are only comparable within a single boot."""
+
+    critical: list[_CriticalObservation]
+    current_paths: list[_CurrentPathObservation]
+    phase_advances: list[_PhaseAdvanceObservation]
+    control_details: list[_ControlDetailObservation]
+    phase_boundaries: list[_PhaseBoundaryObservation]
+    statuses: list[_StatusObservation]
+    event_drop_gap_ticks: list[int]
+
+
+def _evidence_by_boot(state: _DeviceState) -> list[_BootEvidence]:
+    boot_ids = list(dict.fromkeys(obs.boot_id for obs in state.critical_observations))
+
+    def ticks_sorted(items, boot_id):
+        return sorted(
+            (item for item in items if item.boot_id == boot_id),
+            key=lambda item: item.timestamp_ticks,
+        )
+
+    return [
+        _BootEvidence(
+            critical=[obs for obs in state.critical_observations if obs.boot_id == boot_id],
+            current_paths=ticks_sorted(state.current_path_observations, boot_id),
+            phase_advances=ticks_sorted(state.phase_advance_observations, boot_id),
+            control_details=ticks_sorted(state.control_detail_observations, boot_id),
+            phase_boundaries=[
+                obs for obs in state.phase_boundary_observations if obs.boot_id == boot_id
+            ],
+            statuses=[obs for obs in state.status_observations if obs.boot_id == boot_id],
+            event_drop_gap_ticks=[
+                tick for boot, tick in state.event_drop_gap_ticks if boot == boot_id
+            ],
+        )
+        for boot_id in boot_ids
+    ]
 
 
 def _marker_based_phase_bounds(
@@ -1960,17 +1999,16 @@ def _finalize_motion_segments(
     motion_min_steps: int,
     decoupling_config: DecouplingConfig | None,
 ) -> None:
-    current_paths = sorted(
-        state.current_path_observations, key=lambda sample: sample.timestamp_ticks
-    )
-    phase_advances = sorted(
-        state.phase_advance_observations, key=lambda sample: sample.timestamp_ticks
-    )
-    details = sorted(state.control_detail_observations, key=lambda sample: sample.timestamp_ticks)
-    motion_groups = _ordered_motion_groups(
-        state.critical_observations, state.clock_hz, motion_gap_s, motion_min_steps
-    )
-    for segment_index, motion_group in enumerate(motion_groups):
+    boot_motion_groups = [
+        (boot, motion_group)
+        for boot in _evidence_by_boot(state)
+        for motion_group in _ordered_motion_groups(
+            boot.critical, state.clock_hz, motion_gap_s, motion_min_steps
+        )
+    ]
+    for segment_index, (boot, motion_group) in enumerate(boot_motion_groups):
+        current_paths = boot.current_paths
+        details = boot.control_details
         source_key = motion_group.source_key
         observations = motion_group.observations
         segment_samples = observations[motion_group.start_index : motion_group.end_index + 1]
@@ -2062,7 +2100,7 @@ def _finalize_motion_segments(
         phase_reports = _motion_phase_reports(
             observations,
             current_paths,
-            phase_advances,
+            boot.phase_advances,
             details,
             segment_samples,
             transform,
@@ -2071,7 +2109,9 @@ def _finalize_motion_segments(
             motion_group.next_start_tick,
             velocity_tracking_available,
             decoupling_config,
-            *_boot_scoped_phase_evidence(state, segment_samples),
+            boot.phase_boundaries,
+            boot.statuses,
+            boot.event_drop_gap_ticks,
             source_key[1],
         )
         state.report.motion_segments.append(
@@ -2724,6 +2764,7 @@ def analyze_capture(
                 header.timestamp_ticks,
                 (header.source_kind, header.source_index),
                 steady_after_s,
+                header.boot_id,
             )
         elif header.frame_type == FRAME_TYPE_PHASE_ADVANCE:
             _observe_phase_advance(
@@ -2731,6 +2772,7 @@ def analyze_capture(
                 frame.payload,
                 header.timestamp_ticks,
                 (header.source_kind, header.source_index),
+                header.boot_id,
             )
         elif header.frame_type == FRAME_TYPE_VELOCITY_OBSERVATION:
             _observe_velocity_observation(
@@ -2763,6 +2805,7 @@ def analyze_capture(
                 frame.payload,
                 header.timestamp_ticks,
                 (header.source_kind, header.source_index),
+                header.boot_id,
             )
             commissioning.observe_control_detail(
                 record.device_index,

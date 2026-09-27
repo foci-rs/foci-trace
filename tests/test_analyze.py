@@ -3765,3 +3765,43 @@ def test_analysis_reports_a_truncated_capture_tail() -> None:
     assert analysis_to_json(analysis)["truncated_tail_bytes"] == 5
     assert velocity_analysis_to_json(analysis)["truncated_tail_bytes"] == 5
     assert "5 bytes" in format_analysis(analysis)
+
+
+def test_motion_segments_never_span_a_reboot() -> None:
+    output = io.BytesIO()
+    writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
+    writer.write_device_table(0, 100, "1-50", "FOCI Ouroboros (trace)", "ABC", b"")
+    clock = 84_000_000
+    seq = 0
+    for boot_id, steps in ((1111, (0, 4000, 8000, 12000)), (2222, (0, 3000, 6000, 9000))):
+        for index, step in enumerate(steps):
+            seq += 1
+            timestamp = clock * (index * 50) // 1000
+            payload = _critical_motion_payload(step, step, torque_actual=0, uq_limited=0)
+            writer.write_firmware_frame(
+                0,
+                seq,
+                _header(FRAME_TYPE_CRITICAL, payload, seq, timestamp, 1, 0, boot_id=boot_id)
+                + payload,
+            )
+        if boot_id == 2222:
+            for index in range(4):
+                seq += 1
+                timestamp = clock * (index * 50) // 1000
+                detail = _control_detail_payload(100, 1000, 1000)
+                writer.write_firmware_frame(
+                    0,
+                    seq,
+                    _header(
+                        FRAME_TYPE_CONTROL_DETAIL, detail, seq, timestamp, 1, 0, boot_id=boot_id
+                    )
+                    + detail,
+                )
+
+    reports = summarize_capture(
+        io.BytesIO(output.getvalue()), steady_after_s=0, motion_gap_s=0.1, motion_min_steps=1000
+    )
+
+    segments = reports[0].motion_segments
+    assert [(s.step_delta, s.critical_samples) for s in segments] == [(12000, 4), (9000, 4)]
+    assert [s.control_detail_samples for s in segments] == [0, 4]
