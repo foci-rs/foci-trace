@@ -154,7 +154,12 @@ pub fn run_record(args: RecordArgs) -> Result<(), RecordError> {
         return Err(RecordError::NoTraceDevices);
     }
 
-    warmup(&mut devices, args.packet_size, args.warmup_s);
+    warmup(
+        &mut devices,
+        args.packet_size,
+        args.warmup_s,
+        &STOP_REQUESTED,
+    );
 
     let clock = CaptureClock::new()?;
     let output = create_capture_output(&args.output)?;
@@ -204,6 +209,7 @@ pub fn run_record(args: RecordArgs) -> Result<(), RecordError> {
         reader_count,
         args.ready_file.as_deref(),
         &args.output,
+        &STOP_REQUESTED,
     )?;
 
     let mut counters = HostCounters::default();
@@ -251,11 +257,21 @@ pub fn write_ready_file(ready_file: Option<&Path>, output: &Path) -> io::Result<
     Ok(())
 }
 
+/// Wait for every reader to start, then announce the capture as live.
+///
+/// Nothing is announced when `stop_requested` is already set: a capture that
+/// is stopping must not look live to a wrapper waiting on `ready_file`.
+///
+/// # Errors
+///
+/// Returns `TraceReaderStartupFailed` if any reader fails to start, or an I/O
+/// error if the ready file cannot be written.
 pub fn wait_for_reader_startups_then_write_ready(
     startup_rx: Receiver<ReaderStartup>,
     expected_readers: usize,
     ready_file: Option<&Path>,
     output: &Path,
+    stop_requested: &AtomicBool,
 ) -> Result<(), RecordError> {
     for _ in 0..expected_readers {
         match startup_rx.recv() {
@@ -265,7 +281,9 @@ pub fn wait_for_reader_startups_then_write_ready(
             }
         }
     }
-    write_ready_file(ready_file, output)?;
+    if !stop_requested.load(Ordering::SeqCst) {
+        write_ready_file(ready_file, output)?;
+    }
     Ok(())
 }
 
@@ -279,7 +297,12 @@ fn create_parent_dir(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn warmup(devices: &mut [OpenTraceDevice], packet_size: usize, warmup_s: f64) {
+fn warmup(
+    devices: &mut [OpenTraceDevice],
+    packet_size: usize,
+    warmup_s: f64,
+    stop_requested: &AtomicBool,
+) {
     if warmup_s <= 0.0 {
         return;
     }
@@ -288,7 +311,7 @@ fn warmup(devices: &mut [OpenTraceDevice], packet_size: usize, warmup_s: f64) {
     // Warmup drains devices serially; keep this scratch buffer local unless
     // warmup is redesigned as a parallel read path.
     let mut scratch = vec![0u8; packet_size];
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !stop_requested.load(Ordering::SeqCst) {
         for device in devices.iter_mut() {
             if let Ok(mut reader) = device.bulk_reader(packet_size, Duration::from_millis(10)) {
                 let _ = reader.read(&mut scratch);

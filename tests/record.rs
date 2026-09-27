@@ -1,4 +1,5 @@
 use std::fs;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -59,6 +60,7 @@ fn ready_file_waits_for_reader_startup() {
             1,
             Some(&ready_for_thread),
             &output_for_thread,
+            &AtomicBool::new(false),
         )
     });
 
@@ -72,6 +74,20 @@ fn ready_file_waits_for_reader_startup() {
         fs::read_to_string(ready).unwrap(),
         format!("{}\n", output.display())
     );
+}
+
+#[test]
+fn ready_file_is_not_written_once_a_stop_is_pending() {
+    let temp = tempfile::tempdir().unwrap();
+    let ready = temp.path().join("capture.ready");
+    let output = temp.path().join("capture.bin");
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    tx.send(ReaderStartup::Started).unwrap();
+
+    wait_for_reader_startups_then_write_ready(rx, 1, Some(&ready), &output, &AtomicBool::new(true))
+        .unwrap();
+
+    assert!(!ready.exists());
 }
 
 #[test]
