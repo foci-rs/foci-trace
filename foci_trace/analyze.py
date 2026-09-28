@@ -1039,32 +1039,6 @@ def _nearest_critical(
     return min(samples, key=lambda sample: abs(sample.timestamp_ticks - timestamp_ticks))
 
 
-def _nearest_current_path(
-    samples: list[_CurrentPathObservation], sample: _CriticalObservation
-) -> _CurrentPathObservation | None:
-    source_samples = [
-        current_path for current_path in samples if current_path.source_key == sample.source_key
-    ]
-    if not source_samples:
-        return None
-    return min(
-        source_samples,
-        key=lambda current_path: abs(current_path.timestamp_ticks - sample.timestamp_ticks),
-    )
-
-
-def _foc_iq_id_for_sample(
-    sample: _CriticalObservation,
-    current_paths: list[_CurrentPathObservation],
-) -> tuple[int, int] | None:
-    if sample.foc_iq is not None and sample.foc_id is not None:
-        return sample.foc_iq, sample.foc_id
-    current_path = _nearest_current_path(current_paths, sample)
-    if current_path is None:
-        return None
-    return current_path.foc_iq, current_path.foc_id
-
-
 def _nearest_control_detail(
     samples: list[_ControlDetailObservation], timestamp_ticks: int
 ) -> _ControlDetailObservation | None:
