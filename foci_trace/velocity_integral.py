@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import enum
 from itertools import combinations
 from typing import Any
 
@@ -10,6 +11,7 @@ from .velocity_measurement import (
     _LEGACY_Q8_8_BUILD_REVISION,
     BUILD_FEATURE_Q4_12_GAINS,
     BUILD_FEATURE_STANDARD_METER_QUANTUM,
+    OFFLINE_FITTED_EXCLUSION_DETAIL_KEY,
     UnsupportedIntegralRepresentationError,
     VelocityObservation,
     _confidence_half_width,
@@ -23,14 +25,15 @@ from .velocity_measurement import (
     capture_build_features,
     capture_rule_features,
     plan_rung_origin_recovery,
+    require_int,
+    require_mapping,
+    require_sequence,
     summarize_recovery_rest_diagnostics,
 )
 
 _MICROS_PER_SECOND = 1_000_000
 _LEGACY_Q8_8_I_NUMERATOR = 65_536
 _CURRENT_Q4_12_I_NUMERATOR = 1_048_576
-# Standard velocity meter (VELOCITY_METER_SELECTION=0) quantum: one encoder count
-# per 65536/15 Hz differentiation sample, so 60 * 65536 / 15 counts per minute.
 _STANDARD_VELOCITY_METER_COUNTS_PER_MINUTE = 262_144
 _I_MAX_POSITIVE_RUNGS = 30
 _I_CONFIDENCE_FAMILY_MAX = 128
@@ -44,11 +47,6 @@ _PLAN_PROBE_CONSTRAINED_TEST_POINT = 1 << 1
 _PLAN_SLOT_ORDER_SHIFT = 2
 _PLAN_SLOT_ORDER_MASK = 0b11 << _PLAN_SLOT_ORDER_SHIFT
 
-# Decode-only mirror of firmware's `IntegralSlotOrder` discriminants.
-# The `ReverseFirst`/`PairedOutAndBack` variants were deleted
-# outright (foci-firmware commit 77a204d proved both unproducible by any
-# surviving plan); firmware no longer defines these two. They stay here only
-# so archived pre-removal captures that recorded them still decode.
 SLOT_ORDER_FORWARD_FIRST = 0
 SLOT_ORDER_REVERSE_FIRST = 1
 SLOT_ORDER_PAIRED_OUT_AND_BACK = 2
@@ -72,55 +70,7 @@ _REST_REJECTION_OWNER_NAMES = {
 }
 _U128_MAX = (1 << 128) - 1
 
-# Integral evidence schema revisions, mirrored from firmware. Every revision
-# belongs to exactly one acquisition workflow, and no two workflows share one.
-# The ranges are named by the constants below rather than by literals, so a
-# firmware bump widens a range without stranding this comment:
-#
-#   through _STANDALONE_INTEGRAL_SCHEMA_REVISION
-#         standalone Integral, planned by `plan_velocity_integral_response`
-#         with `combined_selected_response: None`. Decode-only mirror: this
-#         builder named the `IntegralAcquisition::ReproducedProportional` acquisition
-#         kind, removed once it was left with no live installer. Firmware no
-#         longer defines this workflow; this constant exists here only so
-#         archived captures keep decoding.
-#   _FIRST_COMBINED_INTEGRAL_SCHEMA_REVISION through
-#   _COMBINED_INTEGRAL_SCHEMA_REVISION
-#         the retired combined P-then-I workflow. These captures are no
-#         longer audited: `integral_schema_is_known` rejects the range.
-#   above the combined range, through _BREAKAWAY_INTEGRAL_SCHEMA_REVISION
-#         the breakaway-seeded campaign (`combined_plan.rs:40`), planned by
-#         `plan_breakaway_velocity_integral_response` with
-#         `combined_selected_response: None`.
-#   above the breakaway range, through _HALF_OCTAVE_INTEGRAL_SCHEMA_REVISION
-#         the same now-removed standalone `ReproducedProportional` workflow, now
-#         with a half-octave rung inserted below the ladder's top gap. Same
-#         builder and workflow as the original standalone range; only the
-#         ladder geometry differs, which is why this is a new range rather
-#         than a widening of the first one.
-#   above the half-octave range, through
-#   _UNIFIED_REST_INTEGRAL_SCHEMA_REVISION
-#         the breakaway-seeded campaign again, now with rung-origin recovery
-#         unified onto the stabilized rest schedule. Same builder and workflow
-#         as the breakaway range, so the breakaway predicates below admit both;
-#         what differs is the evidence grammar, since every recovery that
-#         completes a scored rest now emits its rest record where the earlier
-#         range emitted one only for fixed-gain-amplitude runs. A grammar change
-#         cannot widen a range -- that is exactly the distinction a range is
-#         supposed to preserve -- so this is a new one, and it is not
-#         contiguous with the breakaway range it continues because the
-#         half-octave range was numbered in between.
-#
-# Revisions inside one range differ only in measurement rules -- which suffix a
-# walk selects, which evidence closes a chain -- never in workflow, builder, or
-# record layout. That is why a range widens rather than a new one appearing, and
-# why the workflow mapping here does not change when firmware bumps.
-#
-# The workflow is therefore a property of the schema revision alone. Deriving
-# it from the capture's own `combined_selected_response` instead lets a
-# self-consistent schema-8-to-13 capture that simply omits the selected
-# response -- a shape firmware cannot emit -- claim the standalone workflow and
-# escape every combined-terminal rule.
+_RECOVERY_REST_EVIDENCE_MIN_SCHEMA_REVISION = 12
 _STANDALONE_INTEGRAL_SCHEMA_REVISION = 7
 _FIRST_COMBINED_INTEGRAL_SCHEMA_REVISION = 8
 _COMBINED_INTEGRAL_SCHEMA_REVISION = 13
@@ -133,9 +83,6 @@ _RESUMABLE_INTEGRAL_SCHEMA_REVISIONS = (
     _UNIFIED_REST_INTEGRAL_SCHEMA_REVISION,
 )
 
-# Every schema whose ladder carries the half-octave insertion and hashes
-# `i_top_cap`. All three are response-ladder plans; they are listed rather than
-# ranged because the breakaway workflow's two ranges are not contiguous.
 _RESPONSE_LADDER_INTEGRAL_SCHEMA_REVISIONS = (
     _BREAKAWAY_INTEGRAL_SCHEMA_REVISION,
     _HALF_OCTAVE_INTEGRAL_SCHEMA_REVISION,
@@ -214,12 +161,54 @@ def plan_slot_order(plan: dict[str, object]) -> int:
 
 def integral_schema_is_known(schema_revision: int) -> bool:
     """Return whether one Integral evidence schema revision is audited here."""
-    retired_combined = (
-        _FIRST_COMBINED_INTEGRAL_SCHEMA_REVISION
-        <= schema_revision
-        <= _COMBINED_INTEGRAL_SCHEMA_REVISION
+    return (
+        1 <= schema_revision <= _UNIFIED_REST_INTEGRAL_SCHEMA_REVISION
+        and integral_workflow(schema_revision) is not IntegralWorkflow.RETIRED_COMBINED
     )
-    return not retired_combined and 1 <= schema_revision <= _UNIFIED_REST_INTEGRAL_SCHEMA_REVISION
+
+
+class IntegralWorkflow(enum.Enum):
+    STANDALONE = enum.auto()
+    RETIRED_COMBINED = enum.auto()
+    BREAKAWAY = enum.auto()
+
+
+def integral_workflow(schema_revision: int) -> IntegralWorkflow:
+    """Return the acquisition workflow that owns one schema revision.
+
+    The half-octave revision sits between the breakaway revisions but belongs to
+    the standalone workflow, so the breakaway revisions are not contiguous.
+    """
+    if schema_revision <= _STANDALONE_INTEGRAL_SCHEMA_REVISION:
+        return IntegralWorkflow.STANDALONE
+    if schema_revision <= _COMBINED_INTEGRAL_SCHEMA_REVISION:
+        return IntegralWorkflow.RETIRED_COMBINED
+    if schema_revision <= _BREAKAWAY_INTEGRAL_SCHEMA_REVISION:
+        return IntegralWorkflow.BREAKAWAY
+    if schema_revision == _HALF_OCTAVE_INTEGRAL_SCHEMA_REVISION:
+        return IntegralWorkflow.STANDALONE
+    return IntegralWorkflow.BREAKAWAY
+
+
+def _fault_terminal_reset_its_evidence(
+    faulted: bool,
+    schema_revision: int,
+    terminal_eligible_masks: list[object],
+    terminal_opening_mask: int,
+    terminal_bookend_mask: int,
+) -> bool:
+    """Whether a fault terminal carries the zeroed evidence its reset paths build.
+
+    A faulted terminal is either reset (empty evidence) or preserved (the run's
+    evidence with only outcome and cause overwritten); the terminal alone cannot
+    say which. Reset evidence is accepted unexamined, preserved evidence must
+    still agree with the replay.
+    """
+    return (
+        faulted
+        and terminal_eligible_masks == [0, 0]
+        and (schema_revision < 4 or (terminal_opening_mask == 0 and terminal_bookend_mask == 0))
+    )
 
 
 def integral_stabilized_recovery_rest(schema_revision: int) -> bool:
@@ -290,27 +279,26 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     _append_integer(encoded, int(plan["channel"]), 1)
     _append_integer(encoded, int(plan["proportional_plan_digest"]), 8)
     _append_integer(encoded, int(plan["fixed_p"]), 2)
-    for membership in plan["directional_memberships"]:  # type: ignore[union-attr]
+    for membership in require_sequence(plan["directional_memberships"]):
         _append_integer(encoded, int(membership), 4)
     if schema_revision >= 7:
         _append_integer(encoded, int(plan["proportional_joint_membership"]), 4)
     _append_integer(encoded, int(plan["joint_membership"]), 4)
     if schema_revision >= 4:
-        for validity in plan["directional_validity"]:  # type: ignore[union-attr]
+        for validity in require_sequence(plan["directional_validity"]):
             _append_integer(encoded, int(validity), 1)
         _append_integer(encoded, int(bool(plan["reduced_margin"])), 1)
-    for interval in plan["directional_pooled_intervals"]:  # type: ignore[union-attr]
-        _append_integer(encoded, int(interval[0]), 4, signed=True)
-        _append_integer(encoded, int(interval[1]), 4, signed=True)
+    for interval in map(require_sequence, require_sequence(plan["directional_pooled_intervals"])):
+        _append_integer(encoded, require_int(interval[0]), 4, signed=True)
+        _append_integer(encoded, require_int(interval[1]), 4, signed=True)
     if states_build_features or schema_revision >= _FIRST_COMBINED_INTEGRAL_SCHEMA_REVISION:
         _append_integer(encoded, _RETIRED_COMBINED_RESPONSE_PRESENCE, 1)
     _append_integer(encoded, int(plan["planned_velocity_mrev_s"]), 4)
     _append_integer(encoded, int(plan["target_velocity_rpm"]), 4, signed=True)
     _append_integer(encoded, int(plan["pwm_hz"]), 4)
     _append_integer(encoded, int(plan["encoder_counts_per_rev"]), 4)
-    positive_i = plan["positive_i"]
     _append_integer(encoded, int(plan["positive_rung_count"]), 1)
-    for gain in positive_i:  # type: ignore[union-attr]
+    for gain in require_sequence(plan["positive_i"]):
         _append_integer(encoded, int(gain), 2)
     _append_integer(encoded, int(plan["family_size"]), 2)
     _append_integer(encoded, int(plan["total_rung_count"]), 1)
@@ -354,9 +342,6 @@ def integral_plan_digest(plan: dict[str, object]) -> int:
     ):
         _append_integer(encoded, int(plan[name]), 4)
     _append_integer(encoded, int(plan["max_duration_ms"]), 2)
-    # Hashed only when the order is not forward-first, matching firmware.
-    # Forward-first is the historical order, so omitting it keeps every archived
-    # plan digest valid.
     slot_order = plan_slot_order(plan)
     if slot_order:
         _append_integer(encoded, slot_order, 1)
@@ -446,11 +431,6 @@ def derive_integral_ladder(
     while candidate <= i_top_cap:
         rungs.append(candidate)
         candidate <<= 1
-    # Mirrors `integral_top_gap_candidate` (`integral_plan.rs`): a
-    # response-ladder plan (Breakaway or ReproducedProportional) inserts one
-    # half-octave rung immediately below the ladder's top native octave rung,
-    # but only when that gap is entirely within the pure-octave region (never
-    # inside the fixed 1, 2, 3 prefix).
     is_response_ladder_schema = schema_revision in _RESPONSE_LADDER_INTEGRAL_SCHEMA_REVISIONS
     if is_response_ladder_schema and len(rungs) >= 2:
         upper_octave = rungs[-1]
@@ -704,11 +684,6 @@ def reconstruct_observation(
     rung_index = int(identity["rung_index"])
     slot = int(identity["slot"])
     direction = slot_direction_index(plan_slot_order(plan), slot)
-    # A newer Integral plan states build_features directly; a legacy plan
-    # reconstructs its rule bits from schema_revision under Integral's own
-    # namespace (schema_revision here is an Integral revision by construction,
-    # never Proportional's). A partial test plan carrying neither resolves to None,
-    # the fail-safe legacy gate, rather than raising.
     build_features = capture_rule_features(plan)
     stationarity = _stationary_suffix(raw[-256:], build_features=build_features)
     predicted = (
@@ -740,13 +715,13 @@ def reconstruct_observation(
             **common,
             "classification": classification,
             "stationarity_code": int(stationarity["exclusion"]) + 1,
-            # Offline-derived, and only where a fit was reached: firmware zeroes
-            # these on its own excluded records, so they are diagnostics rather
-            # than reported values. Without them an excluded observation says
-            # that it failed but never how.
             **(
-                {"offline_exclusion_detail": stationarity["offline_exclusion_detail"]}
-                if "offline_exclusion_detail" in stationarity
+                {
+                    OFFLINE_FITTED_EXCLUSION_DETAIL_KEY: stationarity[
+                        OFFLINE_FITTED_EXCLUSION_DETAIL_KEY
+                    ]
+                }
+                if OFFLINE_FITTED_EXCLUSION_DETAIL_KEY in stationarity
                 else {}
             ),
             "settled_rate_interval_q": [0, 0],
@@ -854,6 +829,15 @@ def _validate_run_evidence(evidence: dict[str, object], positive_rung_count: int
         raise ValueError("integral evidence mask exceeds the declared ladder")
 
 
+def _interval(value: object) -> tuple[int, int]:
+    low, high = require_sequence(value)
+    return (require_int(low), require_int(high))
+
+
+def _interval_or_none(value: object) -> tuple[int, int] | None:
+    return None if value is None else _interval(value)
+
+
 def compare_integral_runs(
     previous: dict[str, object],
     current: dict[str, object],
@@ -865,8 +849,12 @@ def compare_integral_runs(
         raise ValueError("positive rung count is outside the retained domain")
     _validate_run_evidence(previous, positive_rung_count)
     _validate_run_evidence(current, positive_rung_count)
-    previous_masks = list(previous["eligible_masks"])
-    current_masks = list(current["eligible_masks"])
+    previous_masks = list(require_sequence(previous["eligible_masks"]))
+    current_masks = list(require_sequence(current["eligible_masks"]))
+    previous_positive = require_sequence(previous["positive"])
+    current_positive = require_sequence(current["positive"])
+    previous_opening = require_sequence(previous["opening"])
+    current_opening = require_sequence(current["opening"])
     valid_mask = (1 << positive_rung_count) - 1
     shared_masks = [previous_masks[index] & current_masks[index] for index in range(2)]
     previous_only_masks = [
@@ -890,12 +878,14 @@ def compare_integral_runs(
             bit = 1 << rung
             if not shared_masks[direction] & bit:
                 continue
-            prior_interval = previous["positive"][direction][rung]  # type: ignore[index]
-            current_interval = current["positive"][direction][rung]  # type: ignore[index]
+            prior_interval = _interval_or_none(require_sequence(previous_positive[direction])[rung])
+            current_interval = _interval_or_none(
+                require_sequence(current_positive[direction])[rung]
+            )
             if prior_interval is None or current_interval is None:
                 raise ValueError("eligible integral rung lacks an exact interval")
-            prior_delta = delta_e(prior_interval, previous["opening"][direction])  # type: ignore[index]
-            active_delta = delta_e(current_interval, current["opening"][direction])  # type: ignore[index]
+            prior_delta = delta_e(prior_interval, _interval(previous_opening[direction]))
+            active_delta = delta_e(current_interval, _interval(current_opening[direction]))
             previous_delta_e[direction][rung] = prior_delta
             current_delta_e[direction][rung] = active_delta
             overlap = _closed_intersection(prior_delta, active_delta)
@@ -950,7 +940,7 @@ def _compact_plan_marker(plan: dict[str, object], run_sequence: int) -> bytes:
     _append_integer(record, int(plan["planned_velocity_mrev_s"]), 4)
     _append_integer(record, int(plan["target_velocity_rpm"]), 4, signed=True)
     _append_integer(record, int(plan["pwm_hz"]), 4)
-    _append_integer(record, int(plan["positive_i"][0]), 2)  # type: ignore[index]
+    _append_integer(record, require_int(require_sequence(plan["positive_i"])[0]), 2)
     _append_integer(record, int(plan["positive_rung_count"]), 1)
     _append_integer(record, int(plan["family_size"]), 2)
     for name in (
@@ -1015,8 +1005,6 @@ def _direction_consensus(
 
 def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
     schema_revision = int(plan["schema_revision"])
-    # Raises for a legacy capture whose build_revision names no known
-    # representation, preserving the old refuse-to-guess behavior.
     build_features = capture_build_features(plan)
     if not integral_schema_is_known(schema_revision):
         mismatches.append(
@@ -1052,7 +1040,7 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
     except ValueError as error:
         mismatches.append(f"plan ladder reconstruction failed: {error}")
         return
-    positive_i = list(plan["positive_i"])  # type: ignore[arg-type]
+    positive_i = list(require_sequence(plan["positive_i"]))
     if positive_i != ladder["positive_i"]:
         mismatches.append(f"plan ladder: firmware={positive_i} offline={ladder['positive_i']}")
     expected_rungs = len(positive_i) + 2
@@ -1069,11 +1057,6 @@ def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
         if schema_revision >= 7:
             known_flags |= _PLAN_PROBE_CONSTRAINED_TEST_POINT
         if schema_revision >= 12:
-            # Mirrored and paired plans already exist at schema 12 (Integral's
-            # current revision is 13, one ahead of the slot-order rollout), so
-            # every affected capture -- including the ones the drift-bound
-            # replay depends on -- was taken at schema 12. Gating this at 13
-            # would preserve the defect for exactly those captures.
             known_flags |= _PLAN_SLOT_ORDER_MASK
         if flags < 0 or flags & ~known_flags:
             mismatches.append("plan recovery flags contain reserved bits")
@@ -1262,6 +1245,10 @@ def _audit_failed_integral_admission(
     }
 
 
+def _first_component(result: dict[str, object]) -> tuple[int, int]:
+    return _interval(require_sequence(result["components"])[0])
+
+
 def _retained_integral_evidence(
     rung_results: dict[int, list[dict[str, object]]],
     positive_count: int,
@@ -1281,15 +1268,12 @@ def _retained_integral_evidence(
             if len(directions) == 2 and all(
                 int(result["classification"]) == 0 for result in directions
             ):
-                opening = [
-                    tuple(result["components"][0])  # type: ignore[index]
-                    for result in directions
-                ]
+                opening = [_first_component(result) for result in directions]
             continue
         for direction, result in enumerate(directions):
             if int(result["classification"]) != 0:
                 continue
-            interval = tuple(result["components"][0])  # type: ignore[index]
+            interval = _first_component(result)
             if rung_index == positive_count + 1:
                 bookend[direction] = interval
             else:
@@ -1444,23 +1428,13 @@ def audit_velocity_integral(
             "velocity_primitive_current",
         )
     ]
-    # Decode-only mirror: firmware unified rung-origin recovery onto the
-    # stabilized rest schedule, deleting `RecoveryRestSchedule` and the
-    # `integral_recovery_rest_schedule` selector that used to pick between it
-    # and `ImmediateScored`. That changed the grammar rather than a measurement
-    # rule, so it came with a schema bump: captures at and above the
-    # unified-rest revision carry a rest record for every completed scored
-    # rest, and archived captures below it keep the schedule their firmware
-    # actually ran. The `audit_scored_rest_grammar` call below still gates on
-    # `schema_floor=12` -- the revision recovery-rest evidence first exists at
-    # all -- so below that floor this value is inert.
     stabilized_recovery_rest = integral_stabilized_recovery_rest(schema_revision)
     mismatches.extend(
         audit_scored_rest_grammar(
             [value for _raw, value in nonterminal],
             terminal,
             schema_revision=schema_revision,
-            schema_floor=12,
+            schema_floor=_RECOVERY_REST_EVIDENCE_MIN_SCHEMA_REVISION,
             expected_stage=1,
             ordinary_owners=(3, 4, 6),
             recovery_owners=(5,),
@@ -1488,7 +1462,9 @@ def audit_velocity_integral(
         slot = int(boundary["slot"])
         if not 0 <= positive_rung_index < int(plan["positive_rung_count"]):
             mismatches.append("integral rest boundary rung is outside the positive ladder")
-        elif int(boundary["i_raw"]) != int(plan["positive_i"][positive_rung_index]):  # type: ignore[index]
+        elif int(boundary["i_raw"]) != require_int(
+            require_sequence(plan["positive_i"])[positive_rung_index]
+        ):
             mismatches.append("integral rest boundary carries the wrong I gain")
         if not 0 <= slot < 8:
             mismatches.append("integral rest boundary slot is outside the fixed schedule")
@@ -1561,7 +1537,7 @@ def audit_velocity_integral(
         (int(value["rung_index"]), int(value["slot"])): value for value in current_records
     }
     reconstructed: dict[tuple[int, int], dict[str, object]] = {}
-    expected_gains = [0, *plan["positive_i"], 0]  # type: ignore[list-item]
+    expected_gains = [0, *require_sequence(plan["positive_i"]), 0]
     for record in observation_records:
         key = (int(record["rung_index"]), int(record["slot"]))
         if key in reconstructed:
@@ -1900,10 +1876,10 @@ def audit_velocity_integral(
                 0 if rung_index == 0 else 2 if rung_index == len(expected_gains) - 1 else 1
             )
             expected["observation_classes"] = [item["classification"] for item in observations]
-            reported = dict(record["directions"][direction])  # type: ignore[index]
+            reported = dict(require_mapping(require_sequence(record["directions"])[direction]))
             reported["components"] = [
-                tuple(component)
-                for component in reported["components"]  # type: ignore[union-attr]
+                tuple(require_sequence(component))
+                for component in require_sequence(reported["components"])
             ]
             _compare_fields(
                 expected,
@@ -1939,32 +1915,12 @@ def audit_velocity_integral(
     terminal_eligible_masks = list(terminal["eligible_masks"])
     terminal_opening_mask = int(terminal.get("opening_available_mask", -1))
     terminal_bookend_mask = int(terminal.get("bookend_available_mask", -1))
-    # A fault terminal reports one of two evidence shapes, and which one it is
-    # cannot be read back off the terminal.
-    #
-    # Reset: `integral_fault_terminal` (`integral_sweep.rs:1001`) and
-    # `evidence_terminal`'s materialization-error arm (`:1143`) both build the
-    # terminal from `IntegralRunEvidence::new([ExactRateInterval::EMPTY; 2])`,
-    # which zeroes `eligible_masks`, `opening`, and `bookend`
-    # (`integral_evidence.rs:165-175`).
-    #
-    # Preserved: `evidence_terminal`'s assessment-error arm (`:1211`) passes
-    # the materialized evidence through unchanged, and every dispatch-level
-    # promotion overwrites only `outcome`/`cause` on an already-built terminal
-    # -- `apply_integral_terminal` (`commission_dispatch/integral.rs:273`, `:283`,
-    # `:338`, `:358`) and the disarm-failure paths in
-    # `commission_dispatch/mod.rs` (`:606`, `:1417`, `:1430`, `:1467`). A
-    # complete, fully sufficient run whose dispatcher found no Integral
-    # authority is faulted this way with all of its evidence intact.
-    #
-    # Both a reset path and a preserved path report cause 4, so demanding the
-    # reset shape rejected real captures. The rule is instead: reset evidence
-    # is accepted unexamined, and any other evidence must agree with the
-    # replay, exactly as it must for a run that did not fault.
-    fault_evidence_reset = (
-        faulted
-        and terminal_eligible_masks == [0, 0]
-        and (schema_revision < 4 or (terminal_opening_mask == 0 and terminal_bookend_mask == 0))
+    fault_evidence_reset = _fault_terminal_reset_its_evidence(
+        faulted,
+        schema_revision,
+        terminal_eligible_masks,
+        terminal_opening_mask,
+        terminal_bookend_mask,
     )
     if not fault_evidence_reset and eligible_masks != terminal_eligible_masks:
         mismatches.append(
@@ -1982,10 +1938,6 @@ def audit_velocity_integral(
         (1 << direction) for direction, interval in enumerate(bookend) if interval is not None
     )
     if schema_revision >= 4 and not fault_evidence_reset:
-        # Same rule as the eligible masks above: the anchor availability masks
-        # are folded from the very evidence struct the two reset paths empty
-        # (`replies.rs:1420-1438`), so they are compared unless the terminal
-        # reported the reset shape.
         if terminal_opening_mask != opening_available_mask:
             mismatches.append("terminal opening-anchor availability mask differs from replay")
         if terminal_bookend_mask != bookend_available_mask:
@@ -2045,14 +1997,6 @@ def audit_velocity_integral(
         "recovery_rest_diagnostics": [dict(record) for record in recovery_rest_records],
         "recovery_rest_distribution": summarize_recovery_rest_diagnostics(recovery_rest_records),
         "current_evidence": [dict(record) for record in current_records],
-        # The independently reconstructed observations, not firmware's reported
-        # ones: every field above was compared against these, so emitting the
-        # replay's own values keeps the output an audit rather than an echo.
-        #
-        # Aggregates cannot replace these. `run_evidence.positive` is indexed
-        # [direction][rung] and pools the slots, while a stroke's outbound or
-        # inbound role is carried by its slot position within the rung. Anything
-        # asking how role and direction differ needs the per-slot rate.
         "observations": [dict(reconstructed[key]) for key in sorted(reconstructed)],
         "rest_boundary": dict(rest_boundary[1]) if rest_boundary is not None else None,
         "limit_evidence_capabilities": sorted(
@@ -2091,49 +2035,44 @@ def audit_integral_reproduction_pair(
     previous_evidence = previous.get("run_evidence")
     current_evidence = current.get("run_evidence")
     current_terminal = current.get("terminal")
-    if not all(
-        isinstance(value, dict)
-        for value in (
-            previous_plan,
-            current_plan,
-            previous_evidence,
-            current_evidence,
-            current_terminal,
-        )
+    if not (
+        isinstance(previous_plan, dict)
+        and isinstance(current_plan, dict)
+        and isinstance(previous_evidence, dict)
+        and isinstance(current_evidence, dict)
+        and isinstance(current_terminal, dict)
     ):
         return {
             "matches_firmware": False,
             "mismatches": ["complete plan, terminal, and run evidence are required for pairing"],
         }
-    if previous_plan["plan_digest"] != current_plan["plan_digest"]:  # type: ignore[index]
+    if previous_plan["plan_digest"] != current_plan["plan_digest"]:
         return {
             "matches_firmware": False,
             "mismatches": ["integral reproduction plans do not match"],
         }
-    positive_count = int(current_plan["positive_rung_count"])  # type: ignore[index]
+    positive_count = require_int(current_plan["positive_rung_count"])
     comparison = compare_integral_runs(
-        previous_evidence,  # type: ignore[arg-type]
-        current_evidence,  # type: ignore[arg-type]
+        previous_evidence,
+        current_evidence,
         positive_rung_count=positive_count,
     )
     expected_outcome = 1 if comparison["reproduces"] else 2
-    current_boundary = current_evidence.get("rest_boundary")  # type: ignore[union-attr]
+    current_boundary = current_evidence.get("rest_boundary")
     expected_cause = (
         10
         if comparison["reproduces"] and current_boundary is not None
         else (0 if comparison["reproduces"] else 2)
     )
-    if int(current_terminal["outcome"]) != expected_outcome:  # type: ignore[index]
+    if require_int(current_terminal["outcome"]) != expected_outcome:
         mismatches.append("terminal outcome differs from integral reproduction comparison")
-    if int(current_terminal["cause"]) != expected_cause:  # type: ignore[index]
+    if require_int(current_terminal["cause"]) != expected_cause:
         mismatches.append("terminal cause differs from integral reproduction comparison")
     return {
         "matches_firmware": not mismatches,
         "mismatches": mismatches,
         "comparison": comparison,
-        "previous_rest_boundary": previous_evidence.get("rest_boundary"),  # type: ignore[union-attr]
+        "previous_rest_boundary": previous_evidence.get("rest_boundary"),
         "current_rest_boundary": current_boundary,
-        "rest_boundary_equal": (
-            previous_evidence.get("rest_boundary") == current_boundary  # type: ignore[union-attr]
-        ),
+        "rest_boundary_equal": (previous_evidence.get("rest_boundary") == current_boundary),
     }

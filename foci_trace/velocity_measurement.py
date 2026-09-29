@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import enum
 import itertools
 import math
 import struct
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from statistics import median
 
@@ -15,34 +17,42 @@ RECOVERY_MOVING_ALLOWANCE_US = 512_000
 RECOVERY_ZERO_SETTLE_US = 500_000
 RECOVERY_ANALYSIS_BUDGET_US = 236_000
 MIN_SELECTED_BLOCKS = 16
-# Parts-per-million of settled rate a moving stroke may drift across its
-# regression span. Mirrors firmware's MAX_MOVING_DRIFT_PPM.
 MAX_MOVING_DRIFT_PPM = 200_000
-# Reported drift ratio when no regression produced one, or when the settled
-# interval contains zero (the Inert condition bypasses the drift bound
-# entirely). Mirrors firmware's NO_REPORTABLE_DRIFT_RATIO_PPM: a zero would
-# read as "measured, and tiny", the opposite of the truth here.
 NO_REPORTABLE_DRIFT_RATIO_PPM = 0xFFFFFFFF
-INTEGRAL_DRIFT_BOUND_MIN_SCHEMA_REVISION = 13  # firmware: INTEGRAL_PLAN_SCHEMA_REVISION
+INTEGRAL_DRIFT_BOUND_MIN_SCHEMA_REVISION = 13
 INTEGRAL_SUFFIX_WALK_MIN_SCHEMA_REVISION = 15
 INTEGRAL_REST_WALK_MIN_SCHEMA_REVISION = 16
 
-# Firmware build_features bitset, mirrored from foci-firmware's BuildFeatures.
-# Each bit names one analysis rule the recording firmware compiled in, stated
-# explicitly on the wire so a capture carries its own rule contract instead of
-# being dated by schema revision. Captures recorded before the field existed
-# reconstruct these bits from their build_revision (bit 0) and the per-namespace
-# schema thresholds above (bits 1-3); see `reconstruct_build_features`.
+
+def require_mapping(value: object) -> dict[str, object]:
+    """Narrow one decoded record field to a string-keyed mapping."""
+    if not isinstance(value, dict):
+        raise TypeError(f"expected a decoded mapping, got {type(value).__name__}")
+    return value
+
+
+def require_sequence(value: object) -> Sequence[object]:
+    """Narrow one decoded record field to a list or tuple."""
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(f"expected a decoded sequence, got {type(value).__name__}")
+    return value
+
+
+def require_int(value: object) -> int:
+    """Narrow one decoded record field to an integer, coercing like `int()`."""
+    if not isinstance(value, (int, float, str, bytes)):
+        raise TypeError(f"expected a decoded integer, got {type(value).__name__}")
+    return int(value)
+
+
+OFFLINE_FITTED_EXCLUSION_DETAIL_KEY = "offline_exclusion_detail"
+
 BUILD_FEATURE_Q4_12_GAINS = 1 << 0
 BUILD_FEATURE_DRIFT_BOUND_GATE = 1 << 1
 BUILD_FEATURE_SUFFIX_WALK_CONTINUES = 1 << 2
 BUILD_FEATURE_REST_CHAIN_ON_EVIDENCE = 1 << 3
 BUILD_FEATURE_STANDARD_METER_QUANTUM = 1 << 4
 
-# The two firmware crate-version hashes every archived capture carries in its
-# `build_revision` field, retained here to reconstruct `build_features` for
-# captures recorded before firmware emitted it. build_revision was later retired
-# from new captures in favour of build_identity + build_features.
 _LEGACY_Q8_8_BUILD_REVISION = 0x75536758
 _CURRENT_Q4_12_BUILD_REVISION = 0x05E21F75
 
@@ -106,11 +116,11 @@ def capture_rule_features(plan: dict[str, object]) -> int | None:
     """
     explicit = plan.get("build_features")
     if explicit is not None:
-        return int(explicit)  # type: ignore[arg-type]
+        return require_int(explicit)
     schema_revision = plan.get("schema_revision")
     if schema_revision is None:
         return None
-    return _rule_features_from_schema(int(schema_revision))  # type: ignore[arg-type]
+    return _rule_features_from_schema(require_int(schema_revision))
 
 
 def capture_build_features(plan: dict[str, object]) -> int:
@@ -122,11 +132,11 @@ def capture_build_features(plan: dict[str, object]) -> int:
     """
     explicit = plan.get("build_features")
     if explicit is not None:
-        return int(explicit)  # type: ignore[arg-type]
+        return require_int(explicit)
     build_revision = plan.get("build_revision")
     return reconstruct_build_features(
         int(build_revision) if isinstance(build_revision, int) else None,
-        int(plan["schema_revision"]),  # type: ignore[arg-type]
+        require_int(plan["schema_revision"]),
     )
 
 
@@ -388,22 +398,8 @@ def audit_rung_origin_recovery(
         try:
             runtime_us = recovery_runtime_us(return_distance, lower_rate_q, maximum_slot_us)
         except ValueError:
-            # The declared geometry does not fit the primitive cap, so the
-            # attempt is contained before any motion.
             expected = ((3, 3),)
         else:
-            # Plan-time inputs cannot decide which of these firmware reports.
-            # The return may reach the origin band (Recovered), complete its
-            # move and settle outside it or exhaust the moving deadline
-            # (ContainedDeadline/Deadline), or be refused before motion for a
-            # start beyond the outer-safety position window
-            # (ContainedDeadline/LocalTravel). Only the run knows.
-            #
-            # Naming just the Recovered pair asserted more than the inputs
-            # support and reported every contained run as a mismatch. What the
-            # record can still be held to is internal consistency, checked
-            # below: whether its timings match the motion its outcome implies,
-            # and whether its final offset matches the band semantics.
             expected = ((1, 1), (1, 5), (3, 3), (3, 4))
     if historical_schema_five_contact:
         expected = ((4, 6),)
@@ -417,11 +413,6 @@ def audit_rung_origin_recovery(
     if outcome in (0, 1, 5) and abs(final) > origin_band:
         mismatches.append("successful recovery final offset is outside origin band")
     moved = moving_us != 0 or settle_us != 0 or total_us != 0
-    # Outcomes 0 and 2 are decided before the gain write, and outcome 3 bound by
-    # LocalTravel is refused at the same point. Outcome 3 bound by Deadline has
-    # two producers: one before motion when the geometry exceeds the primitive
-    # cap, and one after a completed move, so it is the only outcome whose
-    # timings are not fixed by the outcome alone.
     if (outcome in (0, 2) or (outcome == 3 and binding == 4)) and moved:
         mismatches.append("nonmoving recovery reports nonzero timing")
     if outcome in (4, 5) and schema_six_contact or outcome == 1 or (outcome == 3 and moved):
@@ -939,9 +930,6 @@ def _stationarity_fit(
         "lag_one_q": _round_away(_f32(lag_one * _f32(1_000_000))),
         "lag_one_half_width_q": math.ceil(_f32(lag_half_width * _f32(1_000_000))),
         "residual_magnitude_q2": math.ceil(_f32(residual_sum / _f32(n))),
-        # Significance is decided against the raw float margin, not the
-        # rounded Q value: rounding either side independently can flip a
-        # boundary case relative to the exact firmware comparison.
         "slope_passed": abs(slope_per_second) <= slope_half_width,
         "lag_one_passed": abs(_f32(lag_one - lag_null)) <= lag_half_width,
         "drift_ratio_ppm": _drift_ratio_ppm(slope_q, span_x2_us, mean_rate_q),
@@ -987,9 +975,6 @@ def _classify_stationarity(
             build_features & BUILD_FEATURE_DRIFT_BOUND_GATE
         )
         if use_drift_bound:
-            # The settled interval containing zero is exactly the Inert
-            # condition, which bypasses the drift bound entirely rather than
-            # reporting a meaningless ratio against a near-zero denominator.
             interval_contains_zero = abs(mean_rate_q) <= half_width_rate_q
             if not interval_contains_zero and fit["drift_ratio_ppm"] > MAX_MOVING_DRIFT_PPM:
                 return 5
@@ -1003,6 +988,15 @@ def _classify_stationarity(
     if not fit["lag_one_passed"]:
         return 3
     return None
+
+
+def _rejection_before_any_regression(exclusion: int, tested_suffixes: int) -> dict[str, int]:
+    return {
+        "usable": 0,
+        "exclusion": exclusion,
+        "tested_suffixes": tested_suffixes,
+        "drift_ratio_ppm": NO_REPORTABLE_DRIFT_RATIO_PPM,
+    }
 
 
 def _stationary_suffix(
@@ -1023,7 +1017,6 @@ def _stationary_suffix(
         build_features & BUILD_FEATURE_SUFFIX_WALK_CONTINUES
     )
     selected: dict[str, int] | None = None
-    # Reported when the walk runs out of windows without selecting one.
     last_rejection: dict[str, int] | None = None
     tested = 0
     for suffix_len in (64, 128, 256):
@@ -1039,15 +1032,9 @@ def _stationary_suffix(
             if selected is not None:
                 selected["tested_suffixes"] = tested
                 return selected
-            last_rejection = {
-                "usable": 0,
-                "exclusion": 1 if _has_two_doubling_plateau(levels) else 0,
-                "tested_suffixes": tested,
-                # No regression was ever attempted, so there is no ratio to
-                # report. Mirrors firmware's poll_blocking, which reports this
-                # same sentinel when select_plateau() finds nothing.
-                "drift_ratio_ppm": NO_REPORTABLE_DRIFT_RATIO_PPM,
-            }
+            last_rejection = _rejection_before_any_regression(
+                1 if _has_two_doubling_plateau(levels) else 0, tested
+            )
             if not walk_past_rejection:
                 return last_rejection
             continue
@@ -1062,14 +1049,7 @@ def _stationary_suffix(
             if selected is not None:
                 selected["tested_suffixes"] = tested
                 return selected
-            last_rejection = {
-                "usable": 0,
-                "exclusion": fit,
-                "tested_suffixes": tested,
-                # Same as above: the plateau was too thin for a regression, so
-                # slope_q and span_x2_us never existed to form a ratio from.
-                "drift_ratio_ppm": NO_REPORTABLE_DRIFT_RATIO_PPM,
-            }
+            last_rejection = _rejection_before_any_regression(fit, tested)
             if not walk_past_rejection:
                 return last_rejection
             continue
@@ -1088,31 +1068,12 @@ def _stationary_suffix(
                 "usable": 0,
                 "exclusion": exclusion,
                 "tested_suffixes": tested,
-                # A post-fit rejection evaluated a ratio, so it reports it,
-                # matching firmware's finish_on_exclusion call sites that pass
-                # metrics.drift_ratio_ppm rather than the sentinel.
                 "drift_ratio_ppm": fit["drift_ratio_ppm"],
-                # The fit succeeded and only the classification refused it, so
-                # every statistic behind the verdict exists. Firmware zeroes
-                # these on its own excluded records, so they cannot join the
-                # fields above without the replay disagreeing with the device it
-                # exists to verify. They are offline-derived diagnostics, kept
-                # under their own key and excluded from every field comparison.
-                #
-                # The two earlier returns carry no such key. Neither reached a
-                # regression, so there is nothing to derive, and a zero there
-                # would read as a measurement of no structure rather than an
-                # absence of evidence.
-                "offline_exclusion_detail": {
+                OFFLINE_FITTED_EXCLUSION_DETAIL_KEY: {
                     "suffix_len": suffix_len,
                     "selected_level": level,
                     "selected_blocks": levels[level].moments.count,
                     "variance_of_mean_q2": variance,
-                    # The rate this observation would have carried had the gate
-                    # admitted it. Both were computed before the classification
-                    # refused, so reporting them asks what the refusal cost
-                    # rather than inventing a value: it is what makes "would
-                    # admitting this have changed the rung decision" answerable.
                     "would_be_rate_mean_q": mean_rate_q,
                     "would_be_rate_half_width_q": half_width_rate_q,
                     "slope_q": fit["slope_q"],
@@ -1150,12 +1111,7 @@ def _stationary_suffix(
     if last_rejection is not None:
         last_rejection["tested_suffixes"] = tested
         return last_rejection
-    return {
-        "usable": 0,
-        "exclusion": 1,
-        "tested_suffixes": tested,
-        "drift_ratio_ppm": NO_REPORTABLE_DRIFT_RATIO_PPM,
-    }
+    return _rejection_before_any_regression(1, tested)
 
 
 def analyze_scored_rest_selection(
@@ -1376,9 +1332,6 @@ def audit_scored_rest_grammar(
         elif owner in recovery_owners:
             rejected = int(record["disposition"]) == 2
             if rejected and not stabilized_recovery_rest:
-                # An immediate-scored rejection faults straight to the terminal,
-                # with no recovery record and no Event 150. Require exactly that
-                # rather than exempting the case.
                 if successor is not terminal or int(terminal.get("cause", -1)) != 53:
                     mismatches.append(
                         f"{label} rejected recovery selection lacks its causal terminal"
@@ -1439,87 +1392,44 @@ def _encode_rate_values(values: tuple[int, int, int, int, int]) -> tuple[tuple[i
     return (-(1 << 31), 0, (1 << 31) - 1, -(1 << 31), (1 << 31) - 1), 63
 
 
-# --- Breakaway-seeded P ladder --------------------------------------------
-#
-# Independent, from-scratch reconstruction of the breakaway campaign's search,
-# planning, discovery, and confirmation math against the canonical evidence
-# records `assemble_breakaway_ticks` bundles (see `protocol.py`). Every
-# constant below is copied from the firmware source it mirrors (cited in each
-# docstring) rather than derived from wire evidence, because none of these
-# fixed planning constants ride the wire -- reconstructing the firmware's
-# decision requires using the same constants the firmware itself used.
-
-# `HALF_OCTAVE_NUM` / `HALF_OCTAVE_DEN_SHIFT` (sweep_plan.rs): half-octave
-# step factor 181/128, used to regenerate the probe's search grid.
 _BW_HALF_OCTAVE_NUM = 181
 _BW_HALF_OCTAVE_DEN_SHIFT = 7
 
-# `MIN_STRUCTURAL_RUNGS` / `MAX_SWEEP_RUNGS` (sweep_plan.rs).
 _BW_MIN_STRUCTURAL_RUNGS = 5
 _BW_MAX_SWEEP_RUNGS = 32
 
-# `MAX_ADDITIVE_GAIN_RATIO_NUM` / `_DEN` (breakaway_plan.rs): provisional
-# additive first-gap resolution guard, 3/2.
 _BW_MAX_ADDITIVE_GAIN_RATIO_NUM = 3
 _BW_MAX_ADDITIVE_GAIN_RATIO_DEN = 2
 
-# `SWEEP_DIRECTION_COUNT` (sweep_plan.rs).
 _BW_SWEEP_DIRECTION_COUNT = 2
 
-# `CONSENSUS_OBSERVATIONS_PER_DIRECTION` (sweep_consensus.rs): observations
-# collected per direction at one discovery rung -- the raw-observation octet
-# (4 forward + 4 reverse) a nomination recompute needs.
 _BW_CONSENSUS_OBSERVATIONS_PER_DIRECTION = 4
 
-# `MAX_CONFIDENCE_FAMILY_SIZE` (autotune/velocity_measurement/decision.rs).
 _BW_MAX_CONFIDENCE_FAMILY_SIZE = 128
 
-# `MOVING_STROKE_US` / `ZERO_SETTLE_US` / `SETTLE_ANALYSIS_BUDGET_US`
-# (sweep_plan.rs): fixed per-primitive duration budget, also spec section 8's
-# verified 1,248,000 us total.
 _BW_MOVING_STROKE_US = 512_000
 _BW_ZERO_SETTLE_US = 500_000
 _BW_SETTLE_ANALYSIS_BUDGET_US = 236_000
 
-# `CONFIRMATION_FAMILY_SIZE` / band edges / capture profile / acceptance rule
-# / slot order (band_confirmation.rs). The predeclared confirmation family is
-# always 8, never `rung_count * observations_per_direction`.
 _BW_CONFIRMATION_FAMILY_SIZE = 8
 _BW_CONFIRMATION_BAND_LOWER_PERCENT = 70
 _BW_CONFIRMATION_BAND_UPPER_PERCENT = 80
-# Four forward observations (direction code 0) then four reverse (code 1).
 _BW_CONFIRMATION_SLOT_ORDER_CODES = (0, 0, 0, 0, 1, 1, 1, 1)
 
-# `CONFIDENCE_MULTIPLIERS_95_DF15[7]` (autotune/velocity_measurement/decision.rs):
-# the two-sided 95% family-wise Bonferroni Student-t critical value at df=15
-# for family size 8, matching spec section 7's `m(8) = 3.177104`.
 _BW_CONFIRMATION_MULTIPLIER_95_DF15 = 3.177104
 
-# `REQUIRED_HALF_WIDTH_FRACTION` (breakaway_reporting.rs): `(80-70)/(80+70)`.
 _BW_REQUIRED_HALF_WIDTH_FRACTION = 1.0 / 15.0
 
-# `BreakawayTerminalCause::Accepted` (breakaway_reporting.rs).
 _BW_TERMINAL_CAUSE_ACCEPTED = 21
 _BW_STATIONARITY_EXCESSIVE_DRIFT = 6
 
-# `BREAKAWAY_PROPORTIONAL_SCHEMA_REVISION` (combined_plan.rs): the rules revision
-# `AdditiveDiscoveryPlanned.schema_revision` reports, so an offline decoder can
-# confirm it is regenerating the ladder under the exact rules the firmware
-# applied rather than a stale or newer revision.
 _BW_PROPORTIONAL_MIN_SCHEMA_REVISION = 15
 _BW_PROPORTIONAL_SCHEMA_REVISION = 17
 
-# `NOMINATION_SCREEN_C_SIGMA` (band_confirmation.rs): the pointwise 95%
-# scale-inflation heuristic the nomination screen applies on top of the
-# family-eight multiplier, `sqrt(15 / chi2_0.05,15)`.
 _BW_NOMINATION_SCREEN_C_SIGMA = 1.4373055
 
-# `INTERVAL_ENDPOINT_ROUNDING_SCALE` (band_confirmation.rs): the granularity
-# at which interval endpoints are conservatively widened before containment is
-# judged -- the lower endpoint always rounds down, the upper always up.
 _BW_INTERVAL_ENDPOINT_ROUNDING_SCALE = 1.0e4
 
-# `PERCENT_MILLI_SATURATION_BOUND` / permille saturation (breakaway_reporting.rs).
 _BW_PERCENT_MILLI_SATURATION_BOUND = 1_000_000.0
 _BW_RELATIVE_SE_PERMILLE_SATURATION_BOUND = 65_535.0
 
@@ -1621,8 +1531,53 @@ def _bw_observation_interval_percent(
     return low_raw, high_raw
 
 
-# Depth-three triples over the four per-direction slots (sweep_consensus.rs:12).
+_NO_CONSENSUS_INCLUDED_MASK = 0
 _BW_CONSENSUS_TRIPLES = (0b0111, 0b1011, 0b1101, 0b1110)
+
+
+class _BwObservationVerdict(enum.Enum):
+    """Firmware's `classify_velocity_observation` cascade, in check order."""
+
+    INVALID_EVIDENCE_FAULT = enum.auto()
+    HARD_CLIP_FAULT = enum.auto()
+    WRONG_DIRECTION_FAULT = enum.auto()
+    STATIONARITY_EXCLUDED = enum.auto()
+    INERT = enum.auto()
+    CURRENT_HEADROOM = enum.auto()
+    DEFICIT_UNRESOLVED = enum.auto()
+    NO_DISTURBANCE = enum.auto()
+    ELIGIBLE = enum.auto()
+
+
+def _bw_classify_observation(observation: dict[str, object]) -> _BwObservationVerdict:
+    settled_low = int(observation["settled_rate_low_q"])
+    settled_high = int(observation["settled_rate_high_q"])
+    deficit_low = int(observation["deficit_low_q"])
+    deficit_high = int(observation["deficit_high_q"])
+    usable = int(observation["usable_torque_limit"])
+    hard = int(observation["hard_torque_limit"])
+    predicted = int(observation["predicted_torque_target_abs"])
+    forward = int(observation["direction"]) == 0
+
+    if not (settled_low <= settled_high and deficit_low <= deficit_high and usable <= hard):
+        return _BwObservationVerdict.INVALID_EVIDENCE_FAULT
+    if predicted >= hard:
+        return _BwObservationVerdict.HARD_CLIP_FAULT
+    if (settled_high < 0) if forward else (settled_low > 0):
+        return _BwObservationVerdict.WRONG_DIRECTION_FAULT
+    if int(observation["stationarity_code"]) != 0:
+        return _BwObservationVerdict.STATIONARITY_EXCLUDED
+    moving = settled_low > 0 if forward else settled_high < 0
+    if not moving:
+        return _BwObservationVerdict.INERT
+    if predicted >= usable:
+        return _BwObservationVerdict.CURRENT_HEADROOM
+    deficit_resolved = deficit_low > 0 if forward else deficit_high < 0
+    if not deficit_resolved:
+        return _BwObservationVerdict.DEFICIT_UNRESOLVED
+    if int(observation["disturbance_present"]) == 0:
+        return _BwObservationVerdict.NO_DISTURBANCE
+    return _BwObservationVerdict.ELIGIBLE
 
 
 def _bw_classify_is_inert(observation: dict[str, object]) -> bool:
@@ -1638,26 +1593,9 @@ def _bw_classify_is_inert(observation: dict[str, object]) -> bool:
     is what makes the new number comparable to the old one. Folding in the other
     exclusions would inflate it, and they have different remedies -- a hard clip
     or a headroom stop is a ceiling problem, not a dead zone.
-    """
-    settled_low = int(observation["settled_rate_low_q"])
-    settled_high = int(observation["settled_rate_high_q"])
-    deficit_low = int(observation["deficit_low_q"])
-    deficit_high = int(observation["deficit_high_q"])
-    usable = int(observation["usable_torque_limit"])
-    hard = int(observation["hard_torque_limit"])
-    predicted = int(observation["predicted_torque_target_abs"])
-    forward = int(observation["direction"]) == 0
 
-    if not (settled_low <= settled_high and deficit_low <= deficit_high and usable <= hard):
-        return False  # InvalidEvidenceFault
-    if predicted >= hard:
-        return False  # HardClipFault
-    if (settled_high < 0) if forward else (settled_low > 0):
-        return False  # WrongDirectionFault
-    if int(observation["stationarity_code"]) != 0:
-        return False  # StationarityExcluded
-    moving = settled_low > 0 if forward else settled_high < 0
-    return not moving
+    """
+    return _bw_classify_observation(observation) is _BwObservationVerdict.INERT
 
 
 def _bw_discovery_inert_fraction(
@@ -1681,10 +1619,6 @@ def _bw_discovery_inert_fraction(
     eliminate, so a nonzero ratio means the seed or the additive spacing is not
     doing its job, whatever the gross figure looks like.
     """
-    # Observations name their ladder index; the gain itself lives in the
-    # independently regenerated ladder, which is what makes the breakaway
-    # comparison below meaningful rather than a restatement of firmware's own
-    # rung numbering.
     by_rung: dict[int, list[dict[str, object]]] = {}
     for observation in observations:
         rung_index = int(observation["rung_index"])
@@ -1735,35 +1669,7 @@ def _bw_classify_is_eligible(observation: dict[str, object]) -> bool:
     to the one verdict the consensus needs: a stroke is `Eligible` iff it passes
     every gate the firmware cascade checks before its `else` arm. Reproduced from
     the frozen inputs the raw-observation record now carries."""
-    settled_low = int(observation["settled_rate_low_q"])
-    settled_high = int(observation["settled_rate_high_q"])
-    deficit_low = int(observation["deficit_low_q"])
-    deficit_high = int(observation["deficit_high_q"])
-    usable = int(observation["usable_torque_limit"])
-    hard = int(observation["hard_torque_limit"])
-    predicted = int(observation["predicted_torque_target_abs"])
-    forward = int(observation["direction"]) == 0
-
-    valid_intervals = settled_low <= settled_high and deficit_low <= deficit_high and usable <= hard
-    if not valid_intervals:
-        return False  # InvalidEvidenceFault
-    if predicted >= hard:
-        return False  # HardClipFault
-    wrong_direction = settled_high < 0 if forward else settled_low > 0
-    if wrong_direction:
-        return False  # WrongDirectionFault
-    if int(observation["stationarity_code"]) != 0:
-        return False  # StationarityExcluded
-    moving = settled_low > 0 if forward else settled_high < 0
-    if not moving:
-        return False  # Inert
-    if predicted >= usable:
-        return False  # CurrentHeadroom
-    deficit_resolved = deficit_low > 0 if forward else deficit_high < 0
-    if not deficit_resolved:
-        return False  # DeficitUnresolved
-    # False: InvalidEvidenceFault (no representable disturbance). True: Eligible.
-    return int(observation["disturbance_present"]) != 0
+    return _bw_classify_observation(observation) is _BwObservationVerdict.ELIGIBLE
 
 
 def _bw_directional_included_mask(direction_observations: list[dict[str, object]]) -> int:
@@ -1789,9 +1695,9 @@ def _bw_directional_included_mask(direction_observations: list[dict[str, object]
                 int(obs["disturbance_high_q16"]),
             )
     if collected_mask != 0b1111:
-        return 0  # IncompleteRung
+        return _NO_CONSENSUS_INCLUDED_MASK
     if bin(eligible_mask).count("1") < 3:
-        return 0  # InsufficientConsensus
+        return _NO_CONSENSUS_INCLUDED_MASK
     intersections: list[tuple[int, int]] = []
     for triple in _BW_CONSENSUS_TRIPLES:
         if triple & eligible_mask != triple:
@@ -1820,7 +1726,7 @@ def _bw_directional_included_mask(direction_observations: list[dict[str, object]
         else:
             components.append([low, high])
     if len(components) != 1:
-        return 0  # zero (Insufficient) or multiple (Ambiguous) components
+        return _NO_CONSENSUS_INCLUDED_MASK
     comp_low, comp_high = components[0]
     included_mask = 0
     for slot in range(4):
@@ -1957,12 +1863,6 @@ BREAKAWAY_EVENT_ID_NAMES = {
     164: "recovery_origin_mismatch",
 }
 
-# Phase rank per marker event id: probe (0) must never follow discovery (1),
-# which must never follow confirmation (2); the campaign terminal (3) is
-# always the campaign's last tick, from any phase. The raw-observation marker
-# (160) is shared by probe, discovery, and confirmation strokes, so its rank is not
-# fixed here -- `_bw_tick_phase_rank` resolves it from the streamed record's own
-# `phase` field. The discovery-margin marker (161) is discovery-only.
 _BW_EVENT_PHASE_RANK = {
     152: 0,
     153: 0,
@@ -1976,17 +1876,11 @@ _BW_EVENT_PHASE_RANK = {
     162: 0,
 }
 
-# Raw-observation record `phase` field values (BreakawayPhase as u8): the
-# streamed marker-160 tick belongs to whichever phase its record names.
 _BW_RAW_OBSERVATION_PHASE_PROBE = 0
 _BW_RAW_OBSERVATION_PHASE_DISCOVERY = 1
 _BW_RAW_OBSERVATION_PHASE_CONFIRMATION = 2
 
 
-# Markers whose owning phase is carried by the record rather than the id.
-# The raw-observation stream (160) shares one id across all three phases, and
-# the two protocol-18 recovery diagnostics (163, 164) are emitted from whichever
-# phase was running when their gate refused.
 _BW_PHASE_BEARING_MARKERS = {
     160: "breakaway_raw_observation",
     163: "breakaway_recovery_rest_rejected",
@@ -2089,13 +1983,12 @@ def _bw_validate_streamed_marker_identity(ticks: list[dict[str, object]]) -> Non
         event_id = tick["event_id"]
         if event_id not in (160, 161, 162):
             continue
-        records = tick["records"]  # type: ignore[assignment]
-        if len(records) != 1:  # type: ignore[arg-type]
+        records = _bw_tick_records(tick)
+        if len(records) != 1:
             raise ValueError(
                 f"streamed marker {event_id} tick must carry exactly one record, got {len(records)}"
-                # type: ignore[arg-type]
             )
-        record = records[0][1]  # type: ignore[index]
+        record = records[0][1]
         if int(record["run_sequence"]) != campaign_run:
             raise ValueError(
                 f"streamed marker {event_id} record run_sequence does not match the campaign run"
@@ -2114,12 +2007,12 @@ def _bw_validate_streamed_marker_identity(ticks: list[dict[str, object]]) -> Non
             expected = discovery_digest
             what = "discovery margin"
         elif event_id == 162:
-            expected = int(ticks[0]["records"][0][1]["plan_digest"])  # type: ignore[index]
+            expected = int(_bw_tick_records(ticks[0])[0][1]["plan_digest"])
             what = "probe decision"
         else:
             phase = int(record["phase"])
             if phase == _BW_RAW_OBSERVATION_PHASE_PROBE:
-                expected = int(ticks[0]["records"][0][1]["plan_digest"])  # type: ignore[index]
+                expected = int(_bw_tick_records(ticks[0])[0][1]["plan_digest"])
             elif phase == _BW_RAW_OBSERVATION_PHASE_DISCOVERY:
                 expected = discovery_digest
             else:
@@ -2397,7 +2290,7 @@ def breakaway_replay_upward_probe(
         if committed > maximum_observations:
             raise ValueError("probe evidence exceeds its planned observation budget")
         if step == "resolved":
-            resolved_rung_index = int(value)  # type: ignore[arg-type]
+            resolved_rung_index = require_int(value)
         elif step == "terminal":
             expected_terminal = {"terminal_cause": int(value)}
             if index + 2 != len(streamed):
@@ -2429,7 +2322,7 @@ def breakaway_realize_candidate_additive_ladder(
     if remaining_intervals <= 0:
         raise ValueError("candidate rung count leaves no additive intervals")
     span = ceiling_raw - breakaway_raw
-    step = -(-span // remaining_intervals)  # ceil division, matches `div_ceil`
+    step = -(-span // remaining_intervals)
     first_additive_gain = min(breakaway_raw + step, ceiling_raw)
 
     gains: list[int] = []
@@ -2587,11 +2480,56 @@ def breakaway_required_relative_se_permille() -> int:
     return max(0, min(scaled, 0xFFFF))
 
 
+def _bw_step_from_immediate_predecessor(
+    mid: int,
+    previous_mid: int | None,
+    collected_index: int,
+    previous_collected_index: int | None,
+) -> int:
+    if (
+        previous_mid is None
+        or previous_collected_index is None
+        or collected_index != previous_collected_index + 1
+    ):
+        return 0
+    return mid - previous_mid
+
+
+def _bw_regenerate_discovery_ladder(
+    discovery_planned: dict[str, object],
+) -> dict[str, object] | None:
+    return breakaway_plan_additive_discovery_ladder(
+        int(discovery_planned["floor_p_raw"]),
+        int(discovery_planned["breakaway_p_raw"]),
+        int(discovery_planned["ceiling_p_raw"]),
+        int(discovery_planned["observations_per_direction"]),
+        int(discovery_planned["maximum_workflow_ms"]),
+    )
+
+
+def _bw_discovery_digest_over_regenerated_ladder(
+    regenerated_gains: list[int],
+    discovery_planned: dict[str, object],
+    probe_plan_digest: int,
+) -> int:
+    return breakaway_discovery_plan_digest(
+        regenerated_gains,
+        int(discovery_planned["observations_per_direction"]),
+        int(discovery_planned["family_size"]),
+        probe_plan_digest,
+    )
+
+
+def _bw_tick_records(tick: dict[str, object]) -> list[tuple[object, dict[str, object]]]:
+    return [
+        (pair[0], require_mapping(pair[1]))
+        for pair in map(require_sequence, require_sequence(tick["records"]))
+    ]
+
+
 def _bw_tick_records_by_kind(tick: dict[str, object], record_kind: str) -> list[dict[str, object]]:
     return [
-        decoded
-        for _raw, decoded in tick["records"]  # type: ignore[union-attr]
-        if decoded["record_kind"] == record_kind
+        decoded for _raw, decoded in _bw_tick_records(tick) if decoded["record_kind"] == record_kind
     ]
 
 
@@ -2656,7 +2594,7 @@ def audit_breakaway_campaign(
             )
         previous_rank = rank
     if motion_timestamps:
-        plan_ticks_time = int(ticks[0]["timestamp_ticks"])  # type: ignore[arg-type]
+        plan_ticks_time = require_int(ticks[0]["timestamp_ticks"])
         if any(timestamp < plan_ticks_time for timestamp in motion_timestamps):
             raise ValueError("motion observed before the breakaway probe plan was frozen")
 
@@ -2822,32 +2760,13 @@ def audit_breakaway_campaign(
                 f"{int(_BW_PROPORTIONAL_SCHEMA_REVISION)} (offline replay regenerates the ladder "
                 f"under a different rules revision than the firmware applied)"
             )
-        floor_raw = int(discovery_planned["floor_p_raw"])
         breakaway_raw = int(discovery_planned["breakaway_p_raw"])
-        ceiling_raw = int(discovery_planned["ceiling_p_raw"])
         if resolved_breakaway_raw is not None and breakaway_raw != resolved_breakaway_raw:
             mismatches.append(
                 f"discovery breakaway_p_raw: reported={int(breakaway_raw)} offline upward "
                 f"replay={int(resolved_breakaway_raw)}"
             )
-        # The per-rung ladder no longer rides the wire: the
-        # only per-campaign evidence for the ladder's shape is this plan's own
-        # summary (floor/breakaway/ceiling/observations_per_direction/
-        # maximum_workflow_ms) plus `plan_digest` itself. Regenerate the exact
-        # `gains[]` independently from that summary -- never from a
-        # firmware-reported per-rung list -- and fold the REGENERATED gains
-        # (not anything firmware reported) into the digest this function
-        # compares against `plan_digest`. A tampered `plan_digest` with
-        # self-consistent summary fields is caught here because the digest
-        # folds the regenerated ladder; a tampered summary field is caught
-        # because it changes the regenerated ladder the digest is taken over.
-        best = breakaway_plan_additive_discovery_ladder(
-            floor_raw,
-            breakaway_raw,
-            ceiling_raw,
-            int(discovery_planned["observations_per_direction"]),
-            int(discovery_planned["maximum_workflow_ms"]),
-        )
+        best = _bw_regenerate_discovery_ladder(discovery_planned)
         if best is None:
             mismatches.append("no candidate additive ladder survives every planning guard")
         else:
@@ -2871,13 +2790,10 @@ def audit_breakaway_campaign(
                     f"{int(discovery_planned['first_additive_step_raw'])} offline="
                     f"{int(expected_first_step)}"
                 )
-            expected_discovery_digest = breakaway_discovery_plan_digest(
-                ladder_gains,
-                int(discovery_planned["observations_per_direction"]),
-                int(discovery_planned["family_size"]),
-                int(probe_planned["plan_digest"]),
+            expected_discovery_digest = _bw_discovery_digest_over_regenerated_ladder(
+                ladder_gains, discovery_planned, int(probe_planned["plan_digest"])
             )
-            if expected_discovery_digest != int(discovery_planned["plan_digest"]):
+            if expected_discovery_digest != require_int(discovery_planned["plan_digest"]):
                 mismatches.append(
                     f"discovery plan_digest: firmware=0x{discovery_planned['plan_digest']:016x}"
                     f" offline=0x{expected_discovery_digest:016x}"
@@ -2890,50 +2806,23 @@ def audit_breakaway_campaign(
         discovery_terminal = _bw_single_record(
             discovery_terminal_tick, "breakaway_discovery_terminal"
         )
-        if int(discovery_terminal["plan_digest"]) != int(discovery_planned["plan_digest"]):
+        if int(discovery_terminal["plan_digest"]) != require_int(discovery_planned["plan_digest"]):
             raise ValueError("breakaway discovery terminal does not chain to its own plan digest")
         if int(discovery_terminal["prior_plan_digest"]) != int(probe_planned["plan_digest"]):
             raise ValueError("breakaway discovery terminal does not chain to the probe plan digest")
-        # Margins stream one per tick on their own marker (161), not bundled
-        # into this terminal tick; gather them across the campaign and order by
-        # collected index.
         margin_records = sorted(
             _bw_collect_margins(ticks),
             key=lambda record: int(record["collected_index"]),
         )
-        # `rung_nomination_bounds` (band_confirmation.rs:306-325) can return
-        # `nominatable: false` for a genuinely in-band rung (either
-        # direction's pooled interval isn't judgeable); `discovery_rung_
-        # margin_report` (breakaway_reporting.rs:416-417) then emits no wire
-        # record for that `collected_index` at all, while `collected_count`
-        # (breakaway_reporting.rs:521) still counts it. So a gap in
-        # `collected_index` is normal, wire-invisible firmware behavior, not
-        # a capture defect: the wire evidence alone cannot distinguish "N
-        # collected, all nominatable" from "N+k collected, k not
-        # nominatable" -- only `<=` is checkable, not exact equality.
-        if len(margin_records) > int(discovery_terminal["collected_count"]):
+        nominatable_margin_count = len(margin_records)
+        collected_count = int(discovery_terminal["collected_count"])
+        if nominatable_margin_count > collected_count:
             mismatches.append(
                 f"discovery collected_count: firmware="
-                f"{int(discovery_terminal['collected_count'])} offline has more margin records "
-                f"({len(margin_records)})"
+                f"{collected_count} offline has more margin records "
+                f"({nominatable_margin_count})"
             )
 
-        # Independent nomination recompute: every
-        # `BreakawayDiscoveryRungMargin`'s `lower_percent_milli`/
-        # `upper_percent_milli` above is firmware's OWN reduction of the raw
-        # evidence -- the `breakaway_discovery_rung_margin` check just above
-        # only verifies `M_i`/half-width are correctly *derived from* those
-        # reported bounds, never that the bounds themselves are honest. Group
-        # the streamed discovery `BreakawayRawObservation` records (one per
-        # collected stroke on marker 160, phase == Discovery) by ladder
-        # rung_index, fold each rung's octet through the SAME nomination formula
-        # the firmware uses (multiplier m(8), `NOMINATION_SCREEN_C_SIGMA`,
-        # outward rounding -- see `_bw_rung_response_bounds_percent`'s own doc
-        # comment for the one modeling gap, depth-three `included_mask`
-        # exclusion, this cannot replicate), and compare the recomputed bounds
-        # against the firmware-reported ones. A rung whose p_raw doesn't land on
-        # the independently regenerated ladder, or whose raw evidence disagrees
-        # with the reported bounds, is a mismatch.
         raw_discovery_observations = _bw_collect_raw_observations(
             ticks, _BW_RAW_OBSERVATION_PHASE_DISCOVERY
         )
@@ -2944,7 +2833,7 @@ def audit_breakaway_campaign(
             raw_discovery_observations, ladder_gains, resolved_breakaway_raw
         )
         for observation in raw_discovery_observations:
-            if int(observation["plan_digest"]) != int(discovery_planned["plan_digest"]):
+            if int(observation["plan_digest"]) != require_int(discovery_planned["plan_digest"]):
                 raise ValueError(
                     "breakaway discovery raw observation does not chain to its own plan digest"
                 )
@@ -3027,18 +2916,8 @@ def audit_breakaway_campaign(
                             )
             mid = (int(record["lower_percent_milli"]) + int(record["upper_percent_milli"])) // 2
             collected_index = int(record["collected_index"])
-            # `discovery_rung_margin_report` (breakaway_reporting.rs:426-439)
-            # only computes a nonzero step against the IMMEDIATE predecessor
-            # position (`collected_index - 1`); when that specific
-            # predecessor wasn't nominatable (a wire-invisible gap, see
-            # above) it defaults to 0, even though a nominatable rung exists
-            # further back. Comparing against the previous *emitted* record
-            # unconditionally would compute a step across the gap instead.
-            expected_step = (
-                mid - previous_mid
-                if previous_collected_index is not None
-                and collected_index == previous_collected_index + 1
-                else 0
+            expected_step = _bw_step_from_immediate_predecessor(
+                mid, previous_mid, collected_index, previous_collected_index
             )
             firmware_step = int(record["adjacent_rate_step_percent_milli"])
             if expected_step != firmware_step:
@@ -3062,7 +2941,7 @@ def audit_breakaway_campaign(
     confirmation_planned: dict[str, object] | None = None
     confirmation_accepted = False
     if confirmation_plan_ticks:
-        if discovery_terminal is None:
+        if discovery_terminal is None or discovery_planned is None:
             raise ValueError("breakaway confirmation plan has no matching discovery terminal")
         confirmation_planned = _bw_single_record(
             confirmation_plan_ticks[0], "breakaway_confirmation_planned"
@@ -3072,12 +2951,14 @@ def audit_breakaway_campaign(
                 f"breakaway confirmation family_size={int(confirmation_planned['family_size'])}"
                 f", want the fixed family of 8"
             )
-        if int(confirmation_planned["prior_plan_digest"]) != int(discovery_planned["plan_digest"]):  # type: ignore[index]
+        if require_int(confirmation_planned["prior_plan_digest"]) != require_int(
+            discovery_planned["plan_digest"]
+        ):
             raise ValueError(
                 "breakaway confirmation plan does not chain to the discovery plan digest"
             )
         expected_confirmation_digest = breakaway_confirmation_plan_digest(
-            int(discovery_planned["plan_digest"]),  # type: ignore[index]
+            require_int(discovery_planned["plan_digest"]),
             int(confirmation_planned["nominated_p_raw"]),
             int(confirmation_planned["capture_profile"]),
             int(confirmation_planned["family_size"]),
@@ -3093,12 +2974,6 @@ def audit_breakaway_campaign(
                 f"{expected_confirmation_digest:016x}"
             )
 
-    # The fixed eight-stroke schedule must hold before any slot-keyed collapse
-    # (mask OR, per-slot dict) can hide a duplicate or a ninth stroke. Run this
-    # whenever confirmation raw observations exist, not only when a confirmation
-    # terminal was reached: a safety-aborted confirmation emits its partial raw
-    # strokes and then only the campaign closure (breakaway_campaign.rs), so a
-    # validator gated on the terminal would never see the malformed prefix.
     _bw_validate_confirmation_slot_schedule(ticks)
 
     if confirmation_terminal_ticks:
@@ -3118,14 +2993,6 @@ def audit_breakaway_campaign(
             ),
             key=lambda record: int(record["slot_index"]),
         )
-        # Reconcile the reported collected masks with the slots actually
-        # received, for every outcome (not just an accepted one): the forward
-        # accumulator records schedule slots 0-3, the reverse 4-7. Reconstruct
-        # from the streamed RAW observations, which are total for every completed
-        # stroke -- not from the reduced observation records, which
-        # confirmation_observation_report omits for an honest zero or wrong-sign
-        # mean (breakaway_reporting.rs). A collected inert-zero stroke would
-        # otherwise look absent and read as a false mismatch.
         raw_confirmation_collected = _bw_collect_raw_observations(
             ticks, _BW_RAW_OBSERVATION_PHASE_CONFIRMATION
         )
@@ -3150,12 +3017,6 @@ def audit_breakaway_campaign(
                 f"received slots={format(reconstructed_reverse_collected, '#06b')}"
             )
         if confirmation_accepted:
-            # `included_mask` is deliberately absent: it is the depth-three
-            # consensus over the DISTURBANCE intervals, a different measured
-            # quantity than the proportional response confirmation tests, and
-            # `directional_input_is_complete` (band_confirmation.rs) does not
-            # gate on it. The independent containment recompute below is what
-            # verifies all eight responses belong in [70, 80].
             for mask_name in (
                 "forward_collected_mask",
                 "forward_eligible_mask",
@@ -3173,16 +3034,6 @@ def audit_breakaway_campaign(
                     f"want the full family of 8"
                 )
 
-        # Independent confirmation recompute. The checks above only verify
-        # firmware's OWN reported numbers are mutually consistent (complete
-        # masks, an accepted block reporting all eight observations); none of
-        # them touch whether the confirmed gain actually belongs in [70, 80].
-        # Recompute each of the eight held-out strokes' response interval
-        # from its raw evidence -- multiplier m(8), c_sigma = 1.0, outward
-        # rounding, exactly `confirmation_observation_report`'s own
-        # parameters, no nomination-style inflation -- and independently
-        # verify containment, the candidate/confirmed P match, and the fixed
-        # four-forward-then-four-reverse `CONFIRMATION_SLOT_ORDER` schedule.
         raw_confirmation_observations = {
             int(decoded["slot_index"]): decoded
             for decoded in _bw_collect_raw_observations(
@@ -3312,12 +3163,6 @@ def audit_breakaway_campaign(
 
     campaign_terminal = _bw_single_record(ticks[-1], "breakaway_campaign_terminal")
     campaign_accepted = int(campaign_terminal["accepted"]) == 1
-    # A confirmed acceptance whose Integral plan build is later refused
-    # legitimately leaves campaign_accepted=False with confirmation_accepted=
-    # True -- confirmation and Integral admission are deliberately
-    # separate, stacked gates. Only the reverse direction (an Integral plan
-    # materializing without a confirmed acceptance) is structurally
-    # impossible and remains a genuine validator error.
     if campaign_accepted and not confirmation_accepted:
         raise ValueError(
             f"breakaway campaign terminal accepted={int(campaign_terminal['accepted'])} does "
@@ -3336,14 +3181,6 @@ def audit_breakaway_campaign(
     elif int(campaign_terminal["integral_plan_digest"]) != 0:
         mismatches.append("campaign terminal reports no accept but a nonzero integral_plan_digest")
 
-    # `TargetBandSkipped` (cause 7) and `AdditiveLadderResolutionBudgetExceeded`
-    # (cause 10) are decoded as distinct `terminal_cause` values already, but
-    # spec section 9 draws a structural line between them that's worth
-    # checking, not just trusting the numeric code: budget-exceeded is a
-    # planning refusal *before motion*, so it can only appear on a zero-plan
-    # campaign terminal (no discovery plan was ever frozen); target-band-
-    # skipped is a genuine discovery *result*, so it requires a real discovery
-    # terminal record reporting that same cause.
     campaign_cause = int(campaign_terminal["terminal_cause"])
     additive_ladder_resolution_budget_exceeded = campaign_cause == 10
     discovery_target_band_skipped = discovery_terminal is not None and (
@@ -3360,8 +3197,8 @@ def audit_breakaway_campaign(
             f"(campaign terminal_cause={campaign_cause})"
         )
 
-    workflow_duration_ticks = int(ticks[-1]["timestamp_ticks"]) - int(  # type: ignore[arg-type]
-        ticks[0]["timestamp_ticks"]  # type: ignore[arg-type]
+    workflow_duration_ticks = require_int(ticks[-1]["timestamp_ticks"]) - int(
+        ticks[0]["timestamp_ticks"]
     )
     if workflow_duration_ticks < 0:
         raise ValueError("breakaway campaign terminal precedes its own probe plan in time")

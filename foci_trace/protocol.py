@@ -15,33 +15,13 @@ from .velocity_integral import (
 __all__ = ["BREAKAWAY_PHASE_NAMES", "PHASE_NAMES"]
 
 FRAME_MAGIC = 0x43525446
-# Version 23 adds EVENT_PHASE_BOUNDARY (event id 12, subsystem
-# SUBSYSTEM_STEP_TIMER): a one-shot marker for an accel/cruise/decel
-# phase-class transition, detected in the step-queue ISR independent of
-# the critical-frame sampler's rate.
-# Version 22 appends `trace_deadline_pressure_count` and `max_spi_sample_cycles`
-# to the status payload, and repurposes the critical payload's `position_error`
-# to the TMC4671 chip's own PID_POSITION_ERROR register read (byte layout
-# unchanged).
-# Version 21 adds `stop_rung_index` to the breakaway discovery terminal: the
-# rung the discovery walk had reached when it stopped, distinct from the
-# breakaway probe's rung (constant per ladder, decoded elsewhere in the
-# record).
-# Version 20 adds the velocity feedforward clamp-engaged flag to the critical
-# payload.
-# Version 19 adds `error_code` to the breakaway campaign terminal and a new
-# ConfirmationIntegralPlanRefused (26) terminal cause, so a confirmed
-# acceptance whose Integral plan build was refused is attributable instead of
-# reporting a self-contradictory Accepted cause.
-# Version 17 adds `error_code` to the breakaway discovery terminal, so a
-# `*_internal_fault` terminal names the CommissionError behind it instead of
-# leaving the fault unattributable.
-# Version 16 added the measured `moving_pid_output_peak` to the breakaway
-# raw-observation record, so a current-headroom terminus can be attributed to
-# the open-loop model term or to measured demand.
-# Version 15 replaced the productive-boundary probe with physical excursion.
-# Historical versions remain readable through their versioned record shapes.
-PROTOCOL_VERSION = 23
+PROTOCOL_VERSION_PHYSICAL_EXCURSION_PROBE = 15
+PROTOCOL_VERSION_RAW_OBSERVATION_PID_OUTPUT_PEAK = 16
+PROTOCOL_VERSION_CAMPAIGN_TERMINAL_ERROR_CODE = 19
+PROTOCOL_VERSION_CRITICAL_FEEDFORWARD_CLAMP_FLAG = 20
+PROTOCOL_VERSION_STATUS_DEADLINE_PRESSURE = 22
+PROTOCOL_VERSION_PHASE_BOUNDARY_EVENT = 23
+PROTOCOL_VERSION = PROTOCOL_VERSION_PHASE_BOUNDARY_EVENT
 SUPPORTED_PROTOCOL_VERSIONS = (
     1,
     2,
@@ -79,16 +59,11 @@ FRAME_TYPE_PHASE_ADVANCE = 7
 FRAME_TYPE_VELOCITY_OBSERVATION = 8
 FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE = 9
 
-# FOCI and Klipper status samples never populate dropped_event_log_count
-# (firmware builds them with ..StatusSample::default()); only board and USB
-# carry the real counter, so only those two are exposed here.
 SOURCE_KIND_BOARD = 0
 SOURCE_KIND_USB = 2
 
 FLAG_DROP_GAP_BEFORE_THIS_FRAME = 1 << 0
 
-# Reserved, historical-only: no live firmware producer sets these; the decoder
-# keeps them so archived captures still decode their diagnostic value.
 VELOCITY_OBSERVATION_FLAG_PID_VELOCITY_ACTUAL_VALID = 1 << 1
 VELOCITY_OBSERVATION_FLAG_PPTM_ACTUAL_VALID = 1 << 2
 
@@ -100,9 +75,6 @@ EVENT_COMMISSION_ENGINE_START = 100
 EVENT_COMMISSION_PHASE_START = 101
 EVENT_COMMISSION_PHASE_END = 102
 EVENT_COMMISSION_ENGINE_TERMINAL = 103
-# Reserved, historical-only: production firmware no longer emits these events.
-# Keep the ids stable and decodable so archived MechanicalId captures still
-# decode; do not reuse 110-113 for anything else.
 EVENT_COMMISSION_MECHANICAL_ID_RESULT = 110
 EVENT_COMMISSION_MECHANICAL_ID_ATTEMPT = 111
 EVENT_COMMISSION_MECHANICAL_ID_RESPONSE = 112
@@ -121,8 +93,6 @@ EVENT_COMMISSION_POSITION_TUNE_RESULT = 130
 EVENT_COMMISSION_POSITION_TUNE_TARGET = 131
 EVENT_COMMISSION_POSITION_TUNE_METRICS = 132
 EVENT_COMMISSION_POSITION_TUNE_LIMITS = 133
-# Reserved, historical-only: production firmware no longer emits this event;
-# do not reuse 134 for anything else.
 EVENT_COMMISSION_VELOCITY_INTEGRAL_PLAN = 134
 EVENT_COMMISSION_VELOCITY_INTEGRAL_OBSERVATION = 135
 EVENT_COMMISSION_VELOCITY_INTEGRAL_RUNG = 136
@@ -156,19 +126,9 @@ EVENT_COMMISSION_BREAKAWAY_RECOVERY_REST_REJECTED = 163
 EVENT_COMMISSION_BREAKAWAY_RECOVERY_ORIGIN_MISMATCH = 164
 EVENT_COMMISSION_DIAGNOSTIC_WARNING = 200
 
-# Emitted from the step-queue ISR on an accel/cruise/decel phase-class
-# transition. subsystem_id is SUBSYSTEM_STEP_TIMER, not
-# SUBSYSTEM_COMMISSIONING.
 EVENT_PHASE_BOUNDARY = 12
 EVENT_SPI_SAMPLE_DURATION = 11
 
-# Every breakaway-campaign marker event id (152-162), in phase-emission order.
-# The FTRC marker granularity is one `CommissionTraceEvent` per tick -- these
-# ids are what the offline assembler uses to claim the raw velocity-sweep-
-# evidence frames immediately preceding each marker. Per-observation and
-# per-margin evidence stream on their own dedicated markers (160 raw
-# observation, 161 discovery margin), one record per tick, so the assembler must
-# recognize those markers or it silently discards the streamed records.
 BREAKAWAY_CAMPAIGN_EVENT_IDS = (
     EVENT_COMMISSION_BREAKAWAY_PROBE_PLAN,
     EVENT_COMMISSION_BREAKAWAY_PROBE_RESULT,
@@ -204,8 +164,6 @@ _COMMISSIONING_EVENT_NAMES = {
     EVENT_COMMISSION_PHASE_START: "commission_phase_start",
     EVENT_COMMISSION_PHASE_END: "commission_phase_end",
     EVENT_COMMISSION_ENGINE_TERMINAL: "commission_engine_terminal",
-    # Reserved, historical-only: retained so archived MechanicalId captures
-    # still decode; production firmware no longer emits these.
     EVENT_COMMISSION_MECHANICAL_ID_RESULT: "commission_mechanical_id_result",
     EVENT_COMMISSION_MECHANICAL_ID_ATTEMPT: "commission_mechanical_id_attempt",
     EVENT_COMMISSION_MECHANICAL_ID_RESPONSE: "commission_mechanical_id_response",
@@ -274,7 +232,7 @@ COMMISSION_STATUS_NAMES = {
     7: "encoder_fault",
     8: "electrical_id_failed",
     9: "current_validation_failed",
-    10: "mechanical_id_failed",  # Reserved, historical-only; new captures never emit this status.
+    10: "mechanical_id_failed",
     11: "velocity_validation_failed",
     12: "position_tune_failed",
     13: "encoder_not_aligned",
@@ -410,22 +368,24 @@ def _decode_payload(version: int, frame_type: int, payload: bytes) -> dict[str, 
     if frame_type == FRAME_TYPE_VELOCITY_OBSERVATION:
         return _decode_velocity_observation(version, payload)
     if frame_type == FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE:
-        try:
-            return _decode_velocity_sweep_evidence(payload)
-        except DecodeError as legacy_error:
-            # The breakaway-campaign family's local tags (spec section 10) are
-            # scoped to the marker `event_id` (152-159) that follows a bundle
-            # of these records, not globally unique against the older
-            # velocity-sweep-evidence tag space -- see
-            # `breakaway_trace_reporting.rs`'s module doc. Every breakaway
-            # record fails every (kind, length) branch above and lands here.
-            # If the breakaway decoder also rejects the payload, the original
-            # error is what callers see, preserving corrupt-payload behavior.
-            try:
-                return decode_breakaway_record(payload, protocol_version=version)
-            except DecodeError:
-                raise legacy_error from None
+        return _decode_sweep_or_breakaway_evidence(version, payload)
     return {"raw": payload}
+
+
+def _decode_sweep_or_breakaway_evidence(version: int, payload: bytes) -> dict[str, Any]:
+    """Decode a payload from the tag space breakaway records share with sweep evidence.
+
+    Breakaway tags are only unique within their marker event, so a breakaway
+    record fails every sweep-evidence branch; the sweep decoder's error is the
+    one reported when neither decoder accepts the payload.
+    """
+    try:
+        return _decode_velocity_sweep_evidence(payload)
+    except DecodeError as sweep_error:
+        try:
+            return decode_breakaway_record(payload, protocol_version=version)
+        except DecodeError:
+            raise sweep_error from None
 
 
 def _require(payload: bytes, size: int, name: str) -> None:
@@ -485,7 +445,7 @@ def _decode_critical(version: int, payload: bytes) -> dict[str, Any]:
         ) = struct.unpack_from("<III", payload, 84)
     if version >= 6:
         decoded["cached_velocity_transient_offset"] = struct.unpack_from("<i", payload, 84)[0]
-    if version >= 20:
+    if version >= PROTOCOL_VERSION_CRITICAL_FEEDFORWARD_CLAMP_FLAG:
         decoded["cached_velocity_clamped"] = bool(payload[83] & 0x01)
     return decoded
 
@@ -582,11 +542,6 @@ def _take_fields(cursor: _EvidenceCursor, fields: tuple[tuple[str, str], ...]) -
     return {name: cursor.take(fmt) for name, fmt in fields}
 
 
-# The only two build_revision values that ever existed: FNV-1a of the crate
-# versions "0.1.0" and "0.2.0" (mirrors velocity_measurement's legacy build
-# constants). The field was later retired, so a u32 at the build position equal to
-# one of these marks a legacy capture; any other value is a build_features
-# (u16) + build_identity (u32) pair.
 _LEGACY_BUILD_REVISIONS = (0x75536758, 0x05E21F75)
 
 
@@ -682,17 +637,11 @@ def _try_decode_fixed_gain_amplitude(payload: bytes) -> dict[str, Any] | None:
     return decoded
 
 
-# Lengths of the Integral ("integral_observation") record from before the drift
-# ratio field existed. These must keep decoding: replacing this set instead of
-# extending it would silently stop decoding every capture taken before the
-# field was added, including the six exported as design evidence.
 _INTEGRAL_OBSERVATION_LEGACY_LENGTHS = (46, 47, 77, 80, 96)
 
-# Each legacy length plus the four bytes of the inserted `drift_ratio_ppm` u32.
 _INTEGRAL_OBSERVATION_LENGTHS_WITH_DRIFT = (50, 51, 81, 84, 100)
 
 
-# Reserved, historical-only: never reassign.
 RETIRED_VELOCITY_SWEEP_EVIDENCE_KINDS = frozenset({1, 6, 7, 8, *range(12, 21)})
 
 
@@ -795,9 +744,6 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         else:
             raise DecodeError("amplitude plan fragment shape is invalid")
         if "order" in decoded:
-            # Slot order rides in the high nibble of the amplitude-order byte, so
-            # forward-first runs keep the byte they had before it was recorded.
-            # `order` stays raw because the plan digest hashes the packed value.
             packed = int(decoded["order"])
             amplitude_order = packed & 0x0F
             slot_order = packed >> 4
@@ -961,9 +907,6 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             )
             if cursor.offset < len(payload):
                 decoded["flags"] = cursor.take("B")
-                # Bits 2 and 3 carry the observation slot order. Captures made
-                # before the field existed leave them clear, which is
-                # forward-first.
                 decoded["slot_order"] = (int(decoded["flags"]) >> 2) & 0b11
             decoded["record_kind"] = "integral_plan_recovery"
         else:
@@ -998,10 +941,6 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ("predicted_torque_target_abs", "H"),
             ),
         )
-        # Firmware inserts the u32 drift ratio between predicted_torque_target_abs
-        # and stationarity_code. Captures from before the field existed have no
-        # such value, and that absence must decode as None, not as the u32::MAX
-        # "no finite reportable ratio" sentinel the firmware also emits.
         if len(payload) in _INTEGRAL_OBSERVATION_LENGTHS_WITH_DRIFT:
             decoded["drift_ratio_ppm"] = cursor.take("I")
         else:
@@ -1038,8 +977,6 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 )
             )
         elif cursor.offset < len(payload):
-            # Firmware emitting gate statistics for rejected tails. Captures made
-            # before that keep the shorter record and carry no presence flag.
             decoded["rejection_present"] = cursor.take("B")
             if decoded["rejection_present"] not in (0, 1):
                 raise DecodeError("observation rejection presence is invalid")
@@ -1061,8 +998,6 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ]
                 decoded["rejection_slope_margin_q"] = cursor.take("q")
                 decoded["rejection_lag_one_margin_q"] = cursor.take("i")
-                # Present from the second revision of this block. A margin is
-                # half_width - |slope| and recovers neither term on its own.
                 if cursor.offset < len(payload):
                     decoded["rejection_slope_q"] = cursor.take("q")
                     decoded["rejection_slope_half_width_q"] = cursor.take("Q")
@@ -1171,9 +1106,6 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             direction["components"] = components[: direction["component_count"]]
             directions.append(direction)
         decoded["directions"] = directions
-        # Diagnostic trailing byte (schema >= the target-terminus build): the
-        # recorder's one-based target terminus after this rung, zero for none.
-        # Absent on older captures, which decode as None.
         if cursor.offset < len(payload):
             target_terminus_plus_one = cursor.take("B")
             decoded["target_terminus"] = (
@@ -1397,8 +1329,6 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                 ),
             )
         )
-        # Retained-sample-count instrumentation shipped after the original
-        # 78-byte record; older captures carry no such field.
         decoded["retained_sample_count"] = cursor.take("H") if len(payload) == 80 else None
         decoded["intervals_q"] = [[cursor.take("q"), cursor.take("q")] for _ in range(3)]
 
@@ -1567,11 +1497,6 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
     return decoded
 
 
-# Unified wire terminal-cause taxonomy spanning every breakaway probe,
-# discovery, and confirmation terminal variant plus the campaign-level accept
-# outcome (`BreakawayTerminalCause` in
-# `breakaway_reporting.rs`). One shared table, matching the firmware's own
-# rationale for not needing three separate cause enums.
 BREAKAWAY_TERMINAL_CAUSE_NAMES = {
     0: "none",
     1: "probe_no_motion_at_authority",
@@ -1605,7 +1530,7 @@ BREAKAWAY_TERMINAL_CAUSE_NAMES = {
 
 
 def _breakaway_terminal_cause_name(cause: int, protocol_version: int) -> str:
-    if cause == 1 and protocol_version >= 15:
+    if cause == 1 and protocol_version >= PROTOCOL_VERSION_PHYSICAL_EXCURSION_PROBE:
         return "probe_no_repeatable_motion_at_authority"
     if cause == 1 and protocol_version == 14:
         return "probe_no_productive_response_at_authority"
@@ -1615,23 +1540,15 @@ def _breakaway_terminal_cause_name(cause: int, protocol_version: int) -> str:
 def _breakaway_terminal_cause_is_valid(cause: object, protocol_version: int) -> bool:
     if not isinstance(cause, int):
         return False
-    if protocol_version >= 19:
-        # 26 is the confirmed-but-Integral-refused cause.
+    if protocol_version >= PROTOCOL_VERSION_CAMPAIGN_TERMINAL_ERROR_CODE:
         return cause in (0, 1) or 5 <= cause <= 26
-    if protocol_version >= 16:
-        # 23-25 split the non-safety internal faults out of the `*_safety_fault`
-        # causes, which previously reported `has_safety_fault = 0`.
+    if protocol_version >= PROTOCOL_VERSION_RAW_OBSERVATION_PID_OUTPUT_PEAK:
         return cause in (0, 1) or 5 <= cause <= 25
-    if protocol_version == 15:
+    if protocol_version == PROTOCOL_VERSION_PHYSICAL_EXCURSION_PROBE:
         return cause in (0, 1) or 5 <= cause <= 22
     return 0 <= cause <= 21
 
 
-# `CommissionError::status_code()` values reachable from a breakaway terminal.
-# Deliberately a subset, not a copy of the host's full table: klipper-foci's
-# `COMMISSION_REASON_NAMES` is authoritative and duplicating all of it here would
-# drift. An unlisted code decodes with `error_code` set and `error_code_name`
-# `None`, so nothing is lost.
 COMMISSION_REASON_NAMES = {
     3: "spi",
     11: "velocity_validation_failed",
@@ -1660,8 +1577,6 @@ COMMISSION_REASON_NAMES = {
     72: "recovery_origin_mismatch",
 }
 
-# Persistent `BreakawayCheckpoint` codes. Values are append-only because they
-# appear both in warm-reset breadcrumbs and in the handled probe terminal.
 BREAKAWAY_CHECKPOINT_NAMES = {
     0: "none",
     1: "campaign_installed",
@@ -1723,21 +1638,11 @@ BREAKAWAY_PROBE_EXCLUSION_REASON_NAMES = {
     10: "moving_excessive_drift",
 }
 
-# Local wire tags for the breakaway-campaign canonical-record family
-# (`breakaway_trace_reporting.rs`). These are scoped to the surrounding
-# `EVENT_COMMISSION_BREAKAWAY_*` marker, not globally unique against the
-# older velocity-sweep-evidence tag space -- see `decode_breakaway_record`.
 BREAKAWAY_TAG_PROBE_PLANNED = 0
 BREAKAWAY_TAG_PROBE_RESULT = 1
 BREAKAWAY_TAG_PROBE_TERMINAL = 2
 BREAKAWAY_TAG_DISCOVERY_PLANNED = 3
 BREAKAWAY_TAG_CEILING_SOURCE = 4
-# Tag 5 previously carried a per-rung resolved-ladder record (`p_raw` only);
-# that fan-out was dropped in favor of the raw-observation stream that lets
-# an offline decoder independently recompute nomination margins and
-# confirmation containment instead of trusting firmware's reduced bounds.
-# See `decode_breakaway_record`'s tag-5 branch and
-# `breakaway_trace_reporting.rs::encode_raw_observation`'s own doc comment.
 BREAKAWAY_TAG_RAW_OBSERVATION = 5
 BREAKAWAY_TAG_DISCOVERY_TERMINAL = 6
 BREAKAWAY_TAG_DISCOVERY_RUNG_MARGIN = 7
@@ -1747,12 +1652,7 @@ BREAKAWAY_TAG_CONFIRMATION_TERMINAL = 10
 BREAKAWAY_TAG_CONFIRMATION_OBSERVATION = 11
 BREAKAWAY_TAG_CAMPAIGN_TERMINAL = 12
 BREAKAWAY_TAG_PROBE_DECISION = 13
-# Protocol 18. Emitted only when the scored-rest selector rejected a recovery
-# rest window, so an accepted campaign carries none and a failing one
-# normally carries exactly the single rejection that ended it.
 BREAKAWAY_TAG_RECOVERY_REST_REJECTED = 14
-# Protocol 18. Emitted immediately before a `RecoveryOriginMismatch` fault,
-# carrying the measurement the fault itself does not.
 BREAKAWAY_TAG_RECOVERY_ORIGIN_MISMATCH = 15
 
 
@@ -1776,7 +1676,11 @@ def decode_breakaway_record(
     _require(payload, 1, "breakaway evidence")
     cursor = _EvidenceCursor(payload)
     tag = cursor.take("B")
-    if tag == BREAKAWAY_TAG_PROBE_PLANNED and protocol_version >= 15 and len(payload) == 53:
+    if (
+        tag == BREAKAWAY_TAG_PROBE_PLANNED
+        and protocol_version >= PROTOCOL_VERSION_PHYSICAL_EXCURSION_PROBE
+        and len(payload) == 53
+    ):
         decoded = _take_fields(
             cursor,
             (
@@ -1799,7 +1703,11 @@ def decode_breakaway_record(
         )
         decoded["family_size"] = None
         decoded["record_kind"] = "breakaway_probe_planned"
-    elif tag == BREAKAWAY_TAG_PROBE_PLANNED and protocol_version <= 14 and len(payload) in (23, 47):
+    elif (
+        tag == BREAKAWAY_TAG_PROBE_PLANNED
+        and protocol_version < PROTOCOL_VERSION_PHYSICAL_EXCURSION_PROBE
+        and len(payload) in (23, 47)
+    ):
         decoded = _take_fields(
             cursor,
             (
@@ -1841,7 +1749,11 @@ def decode_breakaway_record(
         decoded["motion_threshold_counts"] = None
         decoded["max_capture_interval_us"] = None
         decoded["record_kind"] = "breakaway_probe_planned"
-    elif tag == BREAKAWAY_TAG_PROBE_RESULT and protocol_version >= 15 and len(payload) == 23:
+    elif (
+        tag == BREAKAWAY_TAG_PROBE_RESULT
+        and protocol_version >= PROTOCOL_VERSION_PHYSICAL_EXCURSION_PROBE
+        and len(payload) == 23
+    ):
         decoded = _take_fields(
             cursor,
             (
@@ -1857,7 +1769,7 @@ def decode_breakaway_record(
         decoded["record_kind"] = "breakaway_probe_resolved"
     elif (
         tag == BREAKAWAY_TAG_PROBE_RESULT
-        and protocol_version <= 14
+        and protocol_version < PROTOCOL_VERSION_PHYSICAL_EXCURSION_PROBE
         and (
             (protocol_version >= 14 and len(payload) == 23)
             or (protocol_version <= 13 and len(payload) == 22)
@@ -1887,7 +1799,11 @@ def decode_breakaway_record(
         ):
             raise DecodeError("breakaway directional-breakaway disposition mask is invalid")
         decoded["record_kind"] = "breakaway_directional_breakaway"
-    elif tag == BREAKAWAY_TAG_PROBE_TERMINAL and protocol_version >= 15 and len(payload) == 18:
+    elif (
+        tag == BREAKAWAY_TAG_PROBE_TERMINAL
+        and protocol_version >= PROTOCOL_VERSION_PHYSICAL_EXCURSION_PROBE
+        and len(payload) == 18
+    ):
         decoded = _take_fields(
             cursor,
             (
@@ -1913,7 +1829,7 @@ def decode_breakaway_record(
         decoded["record_kind"] = "breakaway_probe_terminal"
     elif (
         tag == BREAKAWAY_TAG_PROBE_TERMINAL
-        and protocol_version <= 14
+        and protocol_version < PROTOCOL_VERSION_PHYSICAL_EXCURSION_PROBE
         and len(payload) in (19, 20, 21)
     ):
         decoded = _take_fields(
@@ -1980,8 +1896,11 @@ def decode_breakaway_record(
             raise DecodeError("breakaway ceiling binding source is invalid")
         decoded["record_kind"] = "breakaway_ceiling_source"
     elif tag == BREAKAWAY_TAG_RAW_OBSERVATION and (
-        (protocol_version >= 16 and len(payload) == 118)
-        or (protocol_version == 15 and len(payload) == 116)
+        (
+            protocol_version >= PROTOCOL_VERSION_RAW_OBSERVATION_PID_OUTPUT_PEAK
+            and len(payload) == 118
+        )
+        or (protocol_version == PROTOCOL_VERSION_PHYSICAL_EXCURSION_PROBE and len(payload) == 116)
         or (protocol_version == 14 and len(payload) == 104)
         or (protocol_version <= 13 and len(payload) == 99)
     ):
@@ -1998,8 +1917,6 @@ def decode_breakaway_record(
                 ("mean_rate_q", "q"),
                 ("variance_of_mean_q2", "U"),
                 ("target_rate_q", "q"),
-                # Frozen classify/consensus inputs so the
-                # decoder derives the consensus masks itself.
                 ("stationarity_code", "B"),
                 ("settled_rate_low_q", "q"),
                 ("settled_rate_high_q", "q"),
@@ -2034,7 +1951,7 @@ def decode_breakaway_record(
         else:
             decoded["drift_ratio_ppm"] = None
             decoded["post_fit_lag_one_state"] = None
-        if protocol_version >= 15:
+        if protocol_version >= PROTOCOL_VERSION_PHYSICAL_EXCURSION_PROBE:
             decoded.update(
                 _take_fields(
                     cursor,
@@ -2055,11 +1972,7 @@ def decode_breakaway_record(
             decoded["stroke_min_displacement_counts"] = None
             decoded["stroke_max_displacement_counts"] = None
             decoded["capture_max_interval_us"] = None
-        if protocol_version >= 16:
-            # Measured peak velocity-controller output. `predicted_torque_target_abs`
-            # above is `max(P * rpm / 256, moving_pid_output_peak)` in firmware, so
-            # only carrying both makes a current-headroom terminus attributable to
-            # the model term or to measured demand. Absent before v16.
+        if protocol_version >= PROTOCOL_VERSION_RAW_OBSERVATION_PID_OUTPUT_PEAK:
             decoded["moving_pid_output_peak"] = cursor.take("H")
         else:
             decoded["moving_pid_output_peak"] = None
@@ -2083,13 +1996,8 @@ def decode_breakaway_record(
         decoded["terminal_cause_name"] = _breakaway_terminal_cause_name(
             int(decoded["terminal_cause"]), protocol_version
         )
-        # Present from protocol 17. Absent records report `None` rather than 0,
-        # so "no error" and "this capture predates the field" stay distinct.
         decoded["error_code"] = cursor.take("B") if len(payload) >= 29 else None
         decoded["error_code_name"] = COMMISSION_REASON_NAMES.get(decoded["error_code"])
-        # Present from protocol 21. Absent records report `None` rather than 0,
-        # so "stopped at rung zero" and "this capture predates the field"
-        # stay distinct.
         decoded["stop_rung_index"] = cursor.take("B") if len(payload) == 30 else None
         decoded["record_kind"] = "breakaway_discovery_terminal"
     elif tag == BREAKAWAY_TAG_DISCOVERY_RUNG_MARGIN and len(payload) == 38:
@@ -2223,8 +2131,6 @@ def decode_breakaway_record(
         )
         if decoded["accepted"] not in (0, 1):
             raise DecodeError("breakaway campaign terminal accepted flag is invalid")
-        # Present from protocol 19. Absent records report `None` rather than 0,
-        # so "no error" and "this capture predates the field" stay distinct.
         decoded["error_code"] = cursor.take("B") if len(payload) == 19 else None
         decoded["error_code_name"] = COMMISSION_REASON_NAMES.get(decoded["error_code"])
         decoded["record_kind"] = "breakaway_campaign_terminal"
@@ -2242,7 +2148,9 @@ def decode_breakaway_record(
         )
         if decoded["direction"] not in (0, 1):
             raise DecodeError("breakaway probe decision direction is invalid")
-        valid_dispositions = (0, 1) if protocol_version >= 15 else (0, 1, 2)
+        valid_dispositions = (
+            (0, 1) if protocol_version >= PROTOCOL_VERSION_PHYSICAL_EXCURSION_PROBE else (0, 1, 2)
+        )
         if decoded["disposition"] not in valid_dispositions:
             raise DecodeError("breakaway probe decision disposition is invalid")
         decoded["record_kind"] = "breakaway_probe_decision"
@@ -2290,8 +2198,6 @@ def decode_breakaway_record(
             raise DecodeError("rejected recovery rest phase is invalid")
         if decoded["direction"] not in (0, 1):
             raise DecodeError("rejected recovery rest direction is invalid")
-        # Only rejections are ever reported; an acceptance reaching the wire
-        # would mean the firmware-side gate regressed.
         if decoded["disposition"] != 2:
             raise DecodeError("rejected recovery rest carries a non-rejected disposition")
 
@@ -2311,16 +2217,12 @@ def decode_breakaway_record(
         }
         if any(value & ~0b111 for value in masks.values()):
             raise DecodeError("rejected recovery rest mask has a reserved bit set")
-        # A rejection is exactly the absence of a selected suffix.
         if masks["selected_mask"] != 0 or int(decoded["selected_suffix_len"]) != 0:
             raise DecodeError("rejected recovery rest names a selected suffix")
-        # Zero-compatibility is a refinement of usability, and both refine
-        # interval presence, so each mask must be a subset of the last.
         if masks["zero_compatible_mask"] & ~masks["usable_mask"]:
             raise DecodeError("rejected recovery rest zero mask exceeds its usable mask")
         if masks["usable_mask"] & ~masks["interval_present_mask"]:
             raise DecodeError("rejected recovery rest usable mask exceeds its present mask")
-        # A structurally usable suffix is exactly one whose code is `Usable`.
         expected_usable = sum(1 << index for index, code in enumerate(structural) if code == 0)
         if masks["usable_mask"] != expected_usable:
             raise DecodeError("rejected recovery rest usable mask contradicts its codes")
@@ -2342,14 +2244,10 @@ def decode_breakaway_record(
         scored_net = int(decoded["scored_net_displacement_counts"])
         if not scored_min <= scored_net <= scored_max:
             raise DecodeError("rejected recovery rest scored displacement is inconsistent")
-        # The firmware accumulator clamps its running sum to this band.
         if not all(-2 <= value <= 2 for value in (scored_min, scored_net, scored_max)):
             raise DecodeError("rejected recovery rest displacement escapes its clamp")
 
         decoded["structural_codes"] = structural
-        # The decisive derived fact: the one-count fallback is only offered when
-        # the scored window's displacement span is at most one count, so a span
-        # of two or more means the statistical route was the only route.
         decoded["scored_displacement_span_counts"] = scored_max - scored_min
         decoded["one_count_fallback_available"] = scored_max - scored_min <= 1
         decoded["record_kind"] = "breakaway_recovery_rest_rejected"
@@ -2385,18 +2283,12 @@ def decode_breakaway_record(
         delta = int(decoded["delta_counts"])
         if observed - expected != delta:
             raise DecodeError("recovery origin mismatch delta contradicts its offsets")
-        # The fault fires on exact inequality, so a zero delta cannot reach here.
         if delta == 0:
             raise DecodeError("recovery origin mismatch reports no discrepancy")
-        # The window check runs first, so a start offset beyond the window is
-        # contained rather than faulted and must never reach this record.
         window = int(decoded["position_window_counts"])
         if abs(expected) > window:
             raise DecodeError("recovery origin mismatch start offset exceeds its window")
         decoded["delta_abs_counts"] = abs(delta)
-        # The decisive derived fact: a single-count discrepancy is one
-        # outer-safety encoder sample landing between the tick that captured the
-        # origin and the tick recovery began -- a race, not a runaway.
         decoded["single_sample_race"] = abs(delta) == 1
         decoded["record_kind"] = "breakaway_recovery_origin_mismatch"
     else:
@@ -2459,14 +2351,6 @@ def assemble_breakaway_ticks(
         if event_id not in BREAKAWAY_CAMPAIGN_EVENT_IDS:
             pending = []
             continue
-        # `request_commission_event` (usb_trace.rs) packs a commissioning
-        # event's four wire args as `[source_index, engine_kind,
-        # event.payload[0], event.payload[1]]`; for a breakaway marker,
-        # `event.payload[0]` is the `evidence_sequence` this function reports
-        # as `sequence`. This is the same convention `commissioning.py`
-        # already relies on (`source_index = args[0]`) -- the marker's own
-        # frame header carries a fixed "not applicable" source index
-        # (`SOURCE_KIND_BOARD`/`SOURCE_INDEX_NA`), never the real one.
         args = decoded_payload.get("args") or []
         sequence = int(args[2]) if len(args) > 2 else 0
         records = [
@@ -2517,7 +2401,7 @@ def _decode_status(version: int, payload: bytes) -> dict[str, Any]:
         "suppressed_status_change_count",
     )
     decoded = dict(zip(names, fields, strict=True))
-    if version >= 22:
+    if version >= PROTOCOL_VERSION_STATUS_DEADLINE_PRESSURE:
         _require(payload, 48, "status")
         pressure, max_cycles = struct.unpack_from("<II", payload, 40)
         decoded["trace_deadline_pressure_count"] = pressure

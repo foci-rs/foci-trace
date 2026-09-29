@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import enum
 import io
 import itertools
 import json
@@ -71,6 +72,8 @@ from .velocity_measurement import (
     analyze_velocity_observations,
     audit_breakaway_campaign,
     capture_rule_features,
+    require_int,
+    require_sequence,
     velocity_report_to_json,
     verify_scored_rest_selection,
 )
@@ -116,7 +119,7 @@ def audit_outer_safety_timing(
             "mismatches": mismatches,
         }
 
-    bins = [int(value) for value in summary["bin_counts"]]  # type: ignore[index]
+    bins = [int(value) for value in require_sequence(summary["bin_counts"])]
     sample_count = int(summary["sample_count"])
     zero_count = int(summary["zero_count"])
     over_bound_count = int(summary["over_bound_count"])
@@ -184,7 +187,6 @@ class CurrentAuthorityReport:
     uq_delta_range: tuple[int, int]
     uq_to_limit_abs_median: float | None
     voltage_rail_samples: int
-    # Raw ADC movement around the segment median, not calibrated current.
     adc_i0_delta_range: tuple[int, int] | None
     adc_i1_delta_range: tuple[int, int] | None
 
@@ -468,13 +470,6 @@ class _DeviceState:
     velocity_observations: list[_VelocityFrameObservation] = field(default_factory=list)
     velocity_sweep_evidence: list[_VelocitySweepEvidenceFrame] = field(default_factory=list)
     outer_safety_timing_markers: list[tuple[int, int, int, int]] = field(default_factory=list)
-    # `(source_index, frame_type, timestamp_ticks, raw_payload, decoded_payload)`
-    # for every `FRAME_TYPE_EVENT`/`FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE` frame,
-    # kept separately from `velocity_sweep_evidence` because breakaway-campaign
-    # records need `assemble_breakaway_ticks`'s marker-adjacency context to
-    # decode correctly (see `protocol.decode_breakaway_record`'s docstring on
-    # the one wire-tag collision) rather than the generic per-frame decode
-    # `velocity_sweep_evidence` already carries.
     breakaway_frame_log: list[tuple[int, int, int, bytes, dict[str, object] | None]] = field(
         default_factory=list
     )
@@ -1441,6 +1436,57 @@ def _boot_motion_groups(
     ]
 
 
+class _PhaseClass(enum.IntEnum):
+    """Firmware `PhaseClass` wire values, ordered by progression through a stroke."""
+
+    ACCEL = 0
+    CRUISE = 1
+    DECEL = 2
+
+
+def _phase_classes_never_regress(classes: list[int]) -> bool:
+    return all(earlier <= later for earlier, later in itertools.pairwise(classes))
+
+
+_STATUS_SOURCE_KINDS_REPORTING_DROPPED_EVENT_LOG = (SOURCE_KIND_BOARD, SOURCE_KIND_USB)
+
+
+def _event_log_lossless_across_window(
+    status_observations: list[_StatusObservation], start_tick: int, end_tick: int
+) -> bool:
+    """Whether no event-log drops are attributable to a window.
+
+    Fails closed when no status frame precedes the window (no baseline) or none
+    follows it (nothing confirms the count).
+    """
+    authoritative_status = [
+        status
+        for status in status_observations
+        if status.source_key[0] in _STATUS_SOURCE_KINDS_REPORTING_DROPPED_EVENT_LOG
+    ]
+    baseline = next(
+        (
+            status
+            for status in sorted(authoritative_status, key=lambda s: -s.timestamp_ticks)
+            if status.timestamp_ticks <= start_tick
+        ),
+        None,
+    )
+    if baseline is None:
+        return False
+    confirming = next(
+        (
+            status
+            for status in sorted(authoritative_status, key=lambda s: s.timestamp_ticks)
+            if status.timestamp_ticks > end_tick
+        ),
+        None,
+    )
+    if confirming is None:
+        return False
+    return confirming.dropped_event_log_count == baseline.dropped_event_log_count
+
+
 def _marker_based_phase_bounds(
     boundary_observations: list[_PhaseBoundaryObservation],
     status_observations: list[_StatusObservation],
@@ -1459,23 +1505,13 @@ def _marker_based_phase_bounds(
     )
     if not window:
         return None
-    valid_classes = {0, 1, 2}
+    valid_classes = {phase.value for phase in _PhaseClass}
     if any(
         obs.old_class not in valid_classes
         or obs.new_class not in valid_classes
         or obs.old_class == obs.new_class
         for obs in window
     ):
-        # Untrusted wire data, decoded from a capture file, not an internal
-        # invariant: a malformed capture, a bit flip, or a future
-        # firmware/decoder mismatch could produce an old_class/new_class
-        # outside the known PhaseClass range, or a no-op "transition" whose
-        # old_class equals its new_class. The algorithm assumes every
-        # transition actually changes class -- a no-op has no Cruise or
-        # Decel lookup of its own, would return a None timestamp despite the
-        # tuple[int, int] | None contract, and a repeated no-op could
-        # overwrite a real phase's transition_tick entry. Fail closed rather
-        # than let either case reach the monotonicity/lookup logic below.
         return None
     if any(start_tick <= tick <= end_tick for tick in event_drop_gap_ticks):
         return None
@@ -1483,72 +1519,21 @@ def _marker_based_phase_bounds(
         if previous.new_class != current.old_class:
             return None
 
-    # FOCI- and Klipper-source status frames never populate
-    # dropped_event_log_count on the firmware side (built with
-    # ..StatusSample::default()), so they always read 0 regardless of the
-    # actual drop count. Only board and USB sources carry the real counter.
-    authoritative_status = [
-        status
-        for status in status_observations
-        if status.source_key[0] in (SOURCE_KIND_BOARD, SOURCE_KIND_USB)
-    ]
-    baseline = next(
-        (
-            status
-            for status in sorted(authoritative_status, key=lambda s: -s.timestamp_ticks)
-            if status.timestamp_ticks <= start_tick
-        ),
-        None,
-    )
-    if baseline is None:
-        # No status frame at all preceded the window: there is no baseline
-        # to compare a post-window count against, so a nonzero confirming
-        # count cannot be attributed specifically to this window. Fail
-        # closed rather than guess.
-        return None
-    confirming = next(
-        (
-            status
-            for status in sorted(authoritative_status, key=lambda s: s.timestamp_ticks)
-            if status.timestamp_ticks > end_tick
-        ),
-        None,
-    )
-    if confirming is None:
-        return None
-    if confirming.dropped_event_log_count != baseline.dropped_event_log_count:
+    if not _event_log_lossless_across_window(status_observations, start_tick, end_tick):
         return None
 
-    CRUISE = 1
-    DECEL = 2
-
-    # _motion_phase_reports's buckets are structurally fixed in
-    # accel-then-decel order: an accel bucket before cruise_start, a cruise
-    # bucket between cruise_start and cruise_end, a decel bucket after.
-    # That order can represent a class sequence if and
-    # only if it never decreases -- PhaseClass's numeric encoding
-    # (Accel=0 < Cruise=1 < Decel=2) is chosen so "never decreases" is a
-    # plain numeric comparison. Any decrease (Decel -> Accel,
-    # Accel -> Cruise -> Accel, Decel -> Cruise -> Accel, etc.) is a
-    # topology the fixed bucket order cannot represent without mislabeling
-    # samples, so it falls back to kinematic reconstruction instead.
     classes = [window[0].old_class, *(obs.new_class for obs in window)]
-    if any(classes[i] > classes[i + 1] for i in range(len(classes) - 1)):
+    if not _phase_classes_never_regress(classes):
         return None
 
-    # Each transition's `new_class` is reached at most once in a
-    # non-decreasing sequence (a transition always changes class, so a
-    # repeated value would itself be a decrease caught above), so this map
-    # has at most one entry per class.
     transition_tick = {obs.new_class: obs.timestamp_ticks for obs in window}
-    if classes[0] == CRUISE:
+    if classes[0] == _PhaseClass.CRUISE:
         cruise_start = start_tick
     else:
-        # Cruise's own transition tick if the window passes through Cruise;
-        # otherwise (a direct Accel -> Decel skip) Decel's transition tick,
-        # giving the zero-width cruise interval that case requires.
-        cruise_start = transition_tick.get(CRUISE, transition_tick.get(DECEL))
-    cruise_end = transition_tick.get(DECEL, end_tick)
+        cruise_start = transition_tick.get(
+            _PhaseClass.CRUISE, transition_tick.get(_PhaseClass.DECEL)
+        )
+    cruise_end = transition_tick.get(_PhaseClass.DECEL, end_tick)
     return cruise_start, cruise_end
 
 
@@ -2058,31 +2043,7 @@ def _velocity_capture_groups(
     return groups
 
 
-# Scored-rest owners whose scored samples never reach the trace stream, so
-# no raw window in a capture belongs to them.
-#
-# Every recovery selection is decided by `step_rung_origin_recovery`
-# (`commissioning/outer/velocity/recovery/controller.rs`), which pushes each
-# scored sample into the `VelocityObservationRing` it later analyzes
-# (`resources.observations.push(delta, elapsed_us)`, `controller.rs:351`) and
-# never calls `record_velocity_trace_observation`. That call appears only on
-# the ordinary observation paths -- `sweep.rs:962`, `sweep.rs:1213`,
-# `integral_sweep.rs:1603`, `integral_sweep.rs:1891`, and `validate.rs:208`
-# -- none of which is reachable from the recovery controller.
-#
-# The 256 samples preceding a recovery selection in the capture are therefore
-# the *preceding ordinary stroke's* samples, not the recovery window the
-# firmware scored. Raw-verifying against them compares unrelated data: it
-# agreed for two months only because both windows happened to be all-zero,
-# and diverged the moment one of them was not. These selections are reported
-# as raw-unverifiable instead; every structural check still applies to them
-# through `audit_scored_rest_grammar` (identity, ordering, disposition, and
-# mask coherence), which reads the record itself rather than raw samples.
-#
-# Only owners whose scoring path emits its own raw samples may be verified.
-# Defaulting unknown owners to unverifiable keeps a new untraced path from
-# being compared against an unrelated preceding window.
-_RAW_VERIFIABLE_REST_SELECTION_OWNERS = frozenset({0, 3, 4, 7})
+_REST_SELECTION_OWNERS_WITH_TRACED_RAW_SAMPLES = frozenset({0, 3, 4, 7})
 
 
 def _attach_rest_selection_audit(
@@ -2097,7 +2058,7 @@ def _attach_rest_selection_audit(
 
     `rest_selection_verified_count` counts only selections checked against
     their own traced samples. Owners outside
-    `_RAW_VERIFIABLE_REST_SELECTION_OWNERS` are counted separately in
+    `_REST_SELECTION_OWNERS_WITH_TRACED_RAW_SAMPLES` are counted separately in
     `rest_selection_raw_unverifiable_count` and never compared against the
     unrelated window that happens to precede them.
     """
@@ -2114,7 +2075,10 @@ def _attach_rest_selection_audit(
     for event in evidence:
         if event.payload.get("record_kind") != "rest_selection":
             continue
-        if int(event.payload.get("owner", -1)) not in _RAW_VERIFIABLE_REST_SELECTION_OWNERS:
+        if (
+            int(event.payload.get("owner", -1))
+            not in _REST_SELECTION_OWNERS_WITH_TRACED_RAW_SAMPLES
+        ):
             raw_unverifiable += 1
             continue
         observations = [
@@ -2422,13 +2386,6 @@ def _breakaway_campaign_audits(
                 phase_start_ticks = _breakaway_campaign_phase_start_ticks(
                     commissioning_report, device_index, source_index, probe_plan_ticks
                 )
-                # Bounded to the campaign's own commissioning phase (see
-                # `_breakaway_campaign_phase_start_ticks`): an earlier phase's
-                # legitimate motion must not be misread as premature motion
-                # for this campaign. When no containing phase span is found
-                # (an incomplete or unusual capture), skip the check rather
-                # than guess a bound -- `None` disables it in
-                # `audit_breakaway_campaign`.
                 motion_timestamps = (
                     [
                         item.timestamp_ticks
@@ -2522,11 +2479,6 @@ def _outer_safety_timing_audits(states: dict[int, _DeviceState]) -> list[dict[st
 
 
 def _commissioning_event_source_index(payload: dict[str, object], header_source_index: int) -> int:
-    # An event frame's own header carries a fixed "not applicable" source
-    # index (`SOURCE_KIND_BOARD`/`SOURCE_INDEX_NA` in usb_trace.rs); the real
-    # per-motor source index commissioning events are tied to rides in
-    # `args[0]` instead (the same convention `commissioning.py`'s
-    # `observe_event` already relies on).
     args = payload.get("args")
     if isinstance(args, list) and args and payload.get("subsystem_id") == SUBSYSTEM_COMMISSIONING:
         return int(args[0])
@@ -2661,13 +2613,13 @@ def analyze_capture(
                 int(frame.payload["event_id"]) == EVENT_COMMISSION_OUTER_SAFETY_TIMING
                 and int(frame.payload["arg_count"]) >= 4
             ):
-                args = frame.payload["args"]
+                args = require_sequence(frame.payload["args"])
                 state.outer_safety_timing_markers.append(
                     (
                         header.timestamp_ticks,
-                        int(args[0]),  # type: ignore[index]
-                        int(args[2]),  # type: ignore[index]
-                        int(args[3]),  # type: ignore[index]
+                        require_int(args[0]),
+                        require_int(args[2]),
+                        require_int(args[3]),
                     )
                 )
             state.breakaway_frame_log.append(
