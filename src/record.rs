@@ -308,8 +308,6 @@ fn warmup(
     }
 
     let deadline = Instant::now() + Duration::from_secs_f64(warmup_s);
-    // Warmup drains devices serially; keep this scratch buffer local unless
-    // warmup is redesigned as a parallel read path.
     let mut scratch = vec![0u8; packet_size];
     while Instant::now() < deadline && !stop_requested.load(Ordering::SeqCst) {
         for device in devices.iter_mut() {

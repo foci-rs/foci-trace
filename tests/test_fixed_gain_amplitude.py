@@ -130,7 +130,7 @@ def test_amplitude_plan_digest_still_accepts_legacy_combined_identity() -> None:
     """Archived combined captures (Integral spans schema 8-13; the fixture
     baseline is 10) must keep decoding byte-identically alongside breakaway."""
     expected_digests = {
-        10: 0x2618_AA16_E7C5_77C3,  # matches the schema-10 baseline fixture
+        10: 0x2618_AA16_E7C5_77C3,
         13: 0xFBAC_7BDD_0EE2_262E,
     }
     for legacy, digest in expected_digests.items():

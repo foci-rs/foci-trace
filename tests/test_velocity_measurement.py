@@ -150,10 +150,6 @@ def test_recovery_geometry_and_deadlines_match_firmware_integer_arithmetic() -> 
             },
             None,
         ),
-        # A recovery that completed its move and ended outside the band is
-        # contained at runtime, not at plan time. Firmware reports
-        # ContainedDeadline/Deadline here with real timings, and the plan-time
-        # inputs cannot distinguish this from the Recovered case.
         (
             {
                 "closest_offset_counts": 900,
@@ -163,9 +159,6 @@ def test_recovery_geometry_and_deadlines_match_firmware_integer_arithmetic() -> 
             },
             None,
         ),
-        # Containment refused before motion because the start offset sat outside
-        # the outer-safety position window. Reported as
-        # ContainedDeadline/LocalTravel with no timings.
         (
             {
                 "closest_offset_counts": 8_458,
@@ -178,7 +171,6 @@ def test_recovery_geometry_and_deadlines_match_firmware_integer_arithmetic() -> 
             },
             None,
         ),
-        # A contained recovery that moved still has to be internally consistent.
         (
             {
                 "closest_offset_counts": 900,
@@ -305,8 +297,6 @@ def test_host_drift_ratio_matches_firmware_exactly() -> None:
     assert _drift_ratio_ppm(200_000, 2_000_000, 1_000_000) == 200_000
     assert _drift_ratio_ppm(200_001, 2_000_000, 1_000_000) == 200_001
     assert _drift_ratio_ppm(1, 3, 1_000_000) == 1
-    # This is the case that actually proves ceiling division: floor division
-    # gives 38_502.
     assert _drift_ratio_ppm(-8_823_529, 2 * 60_000, 13_750_000) == 38_503
 
 
@@ -320,8 +310,6 @@ def test_post_fit_exclusion_reports_the_statistic_that_failed() -> None:
     """
     from foci_trace.velocity_measurement import _stationary_suffix
 
-    # A steady ramp: the fit succeeds and the classifier rejects it, which is
-    # the post-fit path (the plateau and fit paths below have no statistics).
     result = _stationary_suffix([_observation(index) for index in range(64)])
 
     assert result["usable"] == 0
@@ -334,19 +322,11 @@ def test_post_fit_exclusion_reports_the_statistic_that_failed() -> None:
         "residual_magnitude_q2",
     ):
         assert field in detail, f"post-fit exclusion is missing {field}"
-    # Which gate actually failed, and which window bound: half the question
-    # when several suffixes are tested.
     assert detail["suffix_len"] == 64
     assert detail["slope_passed"] is False or detail["lag_one_passed"] is False
-    # The rate the refusal cost. Both were computed before the classification
-    # rejected the fit, so asking what admitting it would have meant is a
-    # question about this observation rather than a fabricated value.
     assert detail["would_be_rate_mean_q"] != 0
     assert detail["would_be_rate_half_width_q"] > 0
 
-    # Firmware zeroes these on its own excluded records, so they must stay out
-    # of the compared surface or the replay disagrees with the device it exists
-    # to verify. Keeping them nested is what makes that structural.
     for field in ("lag_one_q", "slope_q", "suffix_len"):
         assert field not in result, f"{field} must not join the compared fields"
 
@@ -361,7 +341,6 @@ def test_pre_fit_exclusions_report_no_statistics_they_never_computed() -> None:
     """
     from foci_trace.velocity_measurement import NO_REPORTABLE_DRIFT_RATIO_PPM, _stationary_suffix
 
-    # Too few samples for any declared suffix: nothing is ever fitted.
     result = _stationary_suffix([_observation(index) for index in range(8)])
 
     assert result["usable"] == 0
@@ -383,9 +362,6 @@ def test_rest_mode_keeps_the_significance_gate() -> None:
         _trunc_div,
     )
 
-    # A steady linear ramp: the fitted slope is large and unambiguous, so the
-    # significance test must reject it at rest even though its magnitude is
-    # far too small to trip the moving-mode drift bound.
     observations = [_observation(index) for index in range(64)]
     levels = [_Level() for _ in range(5)]
     for observation in observations:
@@ -425,8 +401,6 @@ def test_moving_mode_bypasses_drift_bound_when_settled_interval_contains_zero() 
         "lag_one_passed": True,
     }
 
-    # mean_rate_q's magnitude is within half_width_rate_q, so the interval
-    # contains zero: bypass fires even though the drift ratio is enormous.
     assert (
         _classify_stationarity(
             fit,
@@ -475,8 +449,6 @@ def test_moving_gate_keys_on_build_features() -> None:
         _classify_stationarity,
     )
 
-    # A huge drift ratio would reject under the drift bound, but a passing
-    # significance test must accept it when the drift bit is absent or unknown.
     passing_fit = {
         "drift_ratio_ppm": 999_999_999,
         "slope_passed": True,
@@ -495,8 +467,6 @@ def test_moving_gate_keys_on_build_features() -> None:
         is None
     )
 
-    # A tiny drift ratio would pass under the drift bound, but a failing
-    # significance test must still reject it when the drift bit is absent.
     failing_fit = {
         "drift_ratio_ppm": 1,
         "slope_passed": False,
@@ -515,9 +485,6 @@ def test_moving_gate_keys_on_build_features() -> None:
         == 2
     )
 
-    # With the drift bit declared the drift bound applies regardless of schema:
-    # the huge-drift fit rejects as ExcessiveDrift (5) and the tiny-drift fit,
-    # whose failing significance test the drift bound ignores, now passes.
     assert (
         _classify_stationarity(
             passing_fit,
@@ -554,13 +521,8 @@ def test_capture_rule_features_prefers_explicit_bits_then_reconstructs() -> None
         capture_rule_features,
     )
 
-    # A newer capture states build_features directly, returned verbatim
-    # at any schema revision -- this is the case schema gating got wrong.
     assert capture_rule_features({"build_features": 0xF, "schema_revision": 13}) == 0xF
 
-    # A legacy Integral capture reconstructs from its own plan schema_revision. At
-    # the suffix-walk floor the drift and suffix bits are set but rest-walk (16)
-    # is not, and no build_revision is needed to say so.
     features = capture_rule_features(
         {"schema_revision": INTEGRAL_SUFFIX_WALK_MIN_SCHEMA_REVISION},
     )
@@ -568,8 +530,6 @@ def test_capture_rule_features_prefers_explicit_bits_then_reconstructs() -> None
     assert features & BUILD_FEATURE_SUFFIX_WALK_CONTINUES
     assert not features & BUILD_FEATURE_REST_CHAIN_ON_EVIDENCE
 
-    # No signal at all -- no build_features, no schema -- means the legacy gate,
-    # reported as None, never a raise.
     assert capture_rule_features({}) is None
 
 
@@ -1030,9 +990,6 @@ def test_recovery_rest_distribution_uses_lower_middle_and_sorted_rows() -> None:
     assert [row["rung_index"] for row in summary["rows"]] == [0, 1, 2, 3]
 
 
-# --- Breakaway-seeded P ladder --------------------------------------------
-
-
 def _bw_tag(tag: int, fmt: str, *values: object) -> bytes:
     return bytes([tag]) + struct.pack("<" + fmt, *values)
 
@@ -1163,20 +1120,14 @@ def _bw_classifier_obs(slot: int, direction: int, **overrides) -> dict:
 
 
 def test_bw_classify_is_eligible_reproduces_the_firmware_cascade():
-    # Default is Eligible.
     assert _bw_classify_is_eligible(_bw_classifier_obs(0, 0)) is True
-    # Each gate independently excludes.
     assert _bw_classify_is_eligible(_bw_classifier_obs(0, 0, stationarity_code=3)) is False
     assert _bw_classify_is_eligible(_bw_classifier_obs(0, 0, disturbance_present=0)) is False
-    # predicted >= usable -> CurrentHeadroom.
     assert (
         _bw_classify_is_eligible(_bw_classifier_obs(0, 0, predicted_torque_target_abs=500)) is False
     )
-    # Not moving (forward settled interval no longer strictly positive) -> Inert.
     assert _bw_classify_is_eligible(_bw_classifier_obs(0, 0, settled_rate_low_q=0)) is False
-    # Deficit unresolved (forward deficit low not > 0).
     assert _bw_classify_is_eligible(_bw_classifier_obs(0, 0, deficit_low_q=0)) is False
-    # A reverse stroke with a mirrored eligible interval.
     assert _bw_classify_is_eligible(_bw_classifier_obs(1, 1)) is True
 
 
@@ -1188,16 +1139,11 @@ def test_bw_classify_is_inert_separates_no_motion_from_every_other_exclusion():
     but those are different failures with different remedies, and folding them
     in would inflate the number the done-criterion is judged on.
     """
-    # Moving and eligible: not inert.
     assert _bw_classify_is_inert(_bw_classifier_obs(0, 0)) is False
-    # Settled interval no longer strictly positive: this is the inert class.
     assert _bw_classify_is_inert(_bw_classifier_obs(0, 0, settled_rate_low_q=0)) is True
-    # Mirrored for a reverse stroke.
     assert _bw_classify_is_inert(_bw_classifier_obs(1, 1)) is False
     assert _bw_classify_is_inert(_bw_classifier_obs(1, 1, settled_rate_high_q=0)) is True
 
-    # Earlier arms of the cascade win over Inert, so a stroke that did not move
-    # but failed an earlier gate is not counted.
     assert (
         _bw_classify_is_inert(_bw_classifier_obs(0, 0, settled_rate_low_q=0, stationarity_code=3))
         is False
@@ -1210,8 +1156,6 @@ def test_bw_classify_is_inert_separates_no_motion_from_every_other_exclusion():
         )
         is False
     )
-    # Later arms do not: a stroke that moved but sat at the usable boundary is
-    # CurrentHeadroom, which is a ceiling problem, not a dead-zone one.
     assert _bw_classify_is_inert(_bw_classifier_obs(0, 0, predicted_torque_target_abs=500)) is False
 
 
@@ -1220,11 +1164,8 @@ def test_bw_discovery_inert_fraction_reports_gross_and_above_breakaway():
     check that the seed actually solved the dead zone."""
     ladder = [128, 181, 243]
     observations = (
-        # Floor rung, below breakaway: inert by design, counted only in gross.
         [_bw_classifier_obs(slot, 0, rung_index=0, settled_rate_low_q=0) for slot in range(4)]
-        # First rung at breakaway: moving.
         + [_bw_classifier_obs(slot, 0, rung_index=1) for slot in range(4)]
-        # A rung above breakaway with one inert stroke: this is the signal.
         + [_bw_classifier_obs(0, 0, rung_index=2, settled_rate_low_q=0)]
         + [_bw_classifier_obs(slot, 0, rung_index=2) for slot in range(1, 4)]
     )
@@ -1237,12 +1178,9 @@ def test_bw_discovery_inert_fraction_reports_gross_and_above_breakaway():
 
 
 def test_bw_directional_included_mask_reproduces_depth_three_exclusion():
-    # Four eligible, overlapping intervals -> all included.
     full = [_bw_classifier_obs(slot, 0) for slot in range(4)]
     assert _bw_directional_included_mask(full) == 0b1111
 
-    # One stationarity-excluded stroke -> three eligible, the single eligible
-    # triple forms one component, the three are included (the outlier is not).
     three_eligible = [
         _bw_classifier_obs(0, 0, stationarity_code=4),
         _bw_classifier_obs(1, 0),
@@ -1251,9 +1189,6 @@ def test_bw_directional_included_mask_reproduces_depth_three_exclusion():
     ]
     assert _bw_directional_included_mask(three_eligible) == 0b1110
 
-    # Four eligible but slot 3's disturbance interval is disjoint from the other
-    # three: the three overlapping slots form the single consensus component and
-    # the disjoint outlier is excluded from the included set.
     outlier_interval = [
         _bw_classifier_obs(0, 0),
         _bw_classifier_obs(1, 0),
@@ -1262,10 +1197,8 @@ def test_bw_directional_included_mask_reproduces_depth_three_exclusion():
     ]
     assert _bw_directional_included_mask(outlier_interval) == 0b0111
 
-    # Fewer than four collected slots -> IncompleteRung, nothing included.
     assert _bw_directional_included_mask(full[:3]) == 0
 
-    # Fewer than three eligible -> InsufficientConsensus, nothing included.
     two_eligible = [
         _bw_classifier_obs(0, 0, stationarity_code=4),
         _bw_classifier_obs(1, 0, stationarity_code=4),
@@ -1553,11 +1486,6 @@ class _BreakawayCampaignBuilder:
             self.ladder["gains"][self.ladder["gains"].index(self.breakaway_raw) + 1]
             - self.breakaway_raw
         )
-        # Tag 5's per-rung `breakaway_ladder_rung` fan-out is gone: the plan's
-        # own summary (floor/breakaway/ceiling/
-        # observations_per_direction/maximum_workflow_ms) is the only wire
-        # evidence for the ladder's shape now, plus `plan_digest` itself.
-        # `audit_breakaway_campaign` regenerates `gains[]` from that summary.
         planned = _bw_tag(
             3,
             "IHQQHHBHHBHHII",
@@ -1643,9 +1571,6 @@ class _BreakawayCampaignBuilder:
         if collected_count is None:
             collected_count = len(margins)
         nomination_multiplier = _confidence_multiplier(8)
-        # Each streamed record gets its own strictly increasing evidence_sequence
-        # (as firmware's next_sequence assigns), and its marker's sequence
-        # matches: raw observations first, then margins, then the terminal.
         raw_records: list[tuple[int, bytes]] = []
         margins_data: list[tuple[int, int, int, int, int, int, int]] = []
         streamed_seq = sequence
@@ -1867,8 +1792,6 @@ class _BreakawayCampaignBuilder:
             direction = direction_overrides.get(slot, 0 if slot < 4 else 1)
             relative_se = relative_ses[slot] / 1000.0
             if slot in unrepresentable_slots:
-                # A collected-but-unrepresentable stroke: zero mean. Its raw
-                # observation still streams (total), but no reduced record.
                 mean_rate_q, variance_of_mean_q2, target_rate_q = 0, 0, 1_000_000
             else:
                 mean_rate_q, variance_of_mean_q2, target_rate_q = _bw_synthetic_atom(
@@ -1894,7 +1817,7 @@ class _BreakawayCampaignBuilder:
                 )
                 raw_seq += 1
             if slot in unrepresentable_slots:
-                continue  # no reduced observation record for this stroke
+                continue
             interval = _bw_observation_interval_percent(
                 mean_rate_q,
                 variance_of_mean_q2,
@@ -1907,10 +1830,6 @@ class _BreakawayCampaignBuilder:
             assert interval is not None
             lower = _bw_percent_to_milli(interval[0])
             upper = _bw_percent_to_milli(interval[1])
-            # Recompute the reported SE from the actual (integer-rounded)
-            # atom fields, not the idealized `relative_se` float used to
-            # construct them, so this always matches what an independent
-            # recompute from the wire's raw evidence produces bit-for-bit.
             statistic = _bw_observation_statistic(
                 mean_rate_q, variance_of_mean_q2, target_rate_q, direction
             )
@@ -2042,7 +1961,6 @@ def test_breakaway_plan_additive_discovery_ladder_chooses_the_spec_worked_exampl
     assert best is not None
     assert best["rung_count"] == 32
     assert best["confidence_family_size"] == 128
-    # Exact worked-example ladder from spec section 5.
     assert best["gains"] == [
         181,
         256,
@@ -2534,8 +2452,6 @@ def test_audit_breakaway_collected_mask_counts_a_stroke_with_no_reduced_record()
             terminal_cause=15,
             observation_count=4,
             unrepresentable_slots={0},
-            # All four forward strokes collected; slot 0's zero mean is not
-            # eligible, and there is no reverse block.
             masks=(0b1111, 0b1110, 0, 0, 0, 0),
         ),
         builder.campaign_terminal_tick(accepted=0, terminal_cause=15, integral_plan_digest=0),
@@ -2551,7 +2467,7 @@ def test_audit_breakaway_rejects_a_ninth_duplicate_confirmation_stroke() -> None
     sequence but a duplicate slot violates the fixed eight-stroke schedule. It
     must be rejected, not hidden by the slot-keyed mask OR and per-slot dict."""
     builder = _BreakawayCampaignBuilder()
-    confirmation = builder.confirmation_ticks()  # eight raw ticks (160..167) + terminal
+    confirmation = builder.confirmation_ticks()
     atom = _bw_synthetic_atom(75.0, 0.01, 0)
     ninth = _bw_raw_observation(
         builder.run_sequence, 418, builder.confirmation_digest, 2, 0, 0, 0, *atom
@@ -2562,7 +2478,6 @@ def test_audit_breakaway_rejects_a_ninth_duplicate_confirmation_stroke() -> None
         "sequence": 418,
         "records": [_bw_record(ninth)],
     }
-    # Splice the ninth raw observation in before the confirmation terminal.
     confirmation = confirmation[:-1] + [ninth_tick] + confirmation[-1:]
     ticks = [
         builder.probe_plan_tick(),
@@ -2598,7 +2513,7 @@ def test_audit_breakaway_rejects_a_malformed_confirmation_aborted_before_its_ter
                         builder.confirmation_digest,
                         2,
                         0,
-                        0,  # both strokes claim slot 0
+                        0,
                         0,
                         *atom,
                     )
@@ -2683,7 +2598,6 @@ def test_audit_breakaway_binds_a_streamed_margin_to_the_campaign_run() -> None:
 def test_audit_breakaway_binds_a_streamed_record_sequence_to_its_marker() -> None:
     ticks = _bw_streamed_identity_campaign()
     index = _bw_first_marker_index(ticks, 160)
-    # Mutate only the record's evidence_sequence, leaving its marker's.
     ticks[index]["records"][0][1]["evidence_sequence"] += 1000
     with pytest.raises(ValueError, match="does not match its marker"):
         audit_breakaway_campaign(ticks)
@@ -2699,8 +2613,6 @@ def test_audit_breakaway_rejects_a_second_record_in_a_streamed_marker() -> None:
 
 def test_audit_breakaway_rejects_out_of_order_streamed_sequences() -> None:
     ticks = _bw_streamed_identity_campaign()
-    # Reorder the first two raw-observation marker ticks so their sequences
-    # descend in stream order.
     first = _bw_first_marker_index(ticks, 160)
     ticks[first], ticks[first + 1] = ticks[first + 1], ticks[first]
     with pytest.raises(ValueError, match="not strictly increasing"):
@@ -2720,7 +2632,7 @@ def test_audit_breakaway_campaign_ranks_a_raw_observation_marker_by_its_phase() 
         builder.discovery_plan_tick(),
         *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
-        _bw_raw_observation_tick(builder, 1),  # a discovery stroke, out of order
+        _bw_raw_observation_tick(builder, 1),
         *builder.confirmation_ticks(),
         builder.campaign_terminal_tick(),
     ]
@@ -2738,7 +2650,6 @@ def test_audit_breakaway_campaign_flags_a_workflow_duration_over_its_reserved_bu
         *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
         *builder.confirmation_ticks(),
-        # 500,000,000 ticks at 1 MHz is 500 s, past the 400 s reserved envelope.
         builder.campaign_terminal_tick(timestamp_ticks=500_001_000),
     ]
     result = audit_breakaway_campaign(ticks, clock_hz=1_000_000)
@@ -2754,7 +2665,7 @@ def test_audit_breakaway_campaign_rejects_reordered_phases() -> None:
         builder.probe_plan_tick(),
         *builder.probe_stream_ticks(),
         builder.discovery_plan_tick(),
-        builder.probe_result_tick(),  # probe result after discovery: reordered
+        builder.probe_result_tick(),
         *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
         *builder.confirmation_ticks(),
@@ -2983,7 +2894,6 @@ def test_audit_breakaway_campaign_rejects_integral_after_unsuccessful_confirmati
         *builder.discovery_ticks(),
         builder.confirmation_plan_tick(),
         *builder.confirmation_ticks(accepted=0, terminal_cause=15),
-        # Campaign terminal falsely claims accept despite the failed confirmation.
         builder.campaign_terminal_tick(accepted=1, terminal_cause=21),
     ]
     with pytest.raises(ValueError, match="does not trace back to an accepted confirmation"):
@@ -3004,7 +2914,6 @@ def test_audit_breakaway_campaign_allows_a_confirmed_integral_refusal() -> None:
         *builder.confirmation_ticks(accepted=1, terminal_cause=21),
         builder.campaign_terminal_tick(accepted=0, terminal_cause=26, integral_plan_digest=0),
     ]
-    # Must not raise.
     audit_breakaway_campaign(ticks)
 
 

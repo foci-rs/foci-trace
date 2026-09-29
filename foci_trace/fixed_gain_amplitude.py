@@ -45,9 +45,6 @@ def amplitude_plan_digest(plan: dict[str, Any]) -> int:
     encoded = bytearray()
     _append(encoded, int(plan["schema_revision"]), 2)
     _append(encoded, int(plan["channel"]), 1)
-    # A newer capture carries build_features (u16) where a legacy capture
-    # carried build_revision (u32); the firmware acceptance digest hashes the
-    # same field in place.
     if "build_features" in plan:
         _append(encoded, int(plan["build_features"]), 2)
     else:

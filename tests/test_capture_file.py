@@ -37,15 +37,11 @@ def test_unknown_record_type_is_skipped() -> None:
 
 
 def test_truncated_final_header_is_tolerated() -> None:
-    # A SIGTERM-terminated recorder can also cut the final record mid-HEADER:
-    # fewer than RECORD_HEADER_LEN bytes follow the last complete record. The
-    # reader must keep every complete record and stop cleanly rather than
-    # raising on the short header (mirrors the mid-payload case below).
     output = io.BytesIO()
     writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
     writer.write_firmware_frame(0, 120, b"frame")
     raw = bytearray(output.getvalue())
-    raw += struct.pack("<IB", 0x52525446, 1)  # 5 bytes of a 32-byte record header
+    raw += struct.pack("<IB", 0x52525446, 1)
 
     reader = CaptureReader(io.BytesIO(raw))
     records = list(reader.records())
@@ -56,9 +52,6 @@ def test_truncated_final_header_is_tolerated() -> None:
 
 
 def test_truncated_final_record_is_tolerated() -> None:
-    # A SIGTERM-terminated recorder can cut the final record mid-write: a valid
-    # header claiming more payload bytes than actually follow. The reader must
-    # keep every complete record and stop cleanly rather than discarding them.
     output = io.BytesIO()
     writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
     writer.write_firmware_frame(0, 120, b"frame")
@@ -66,7 +59,7 @@ def test_truncated_final_record_is_tolerated() -> None:
     truncated_header = struct.pack(
         "<IBBH H H Q I Q".replace(" ", ""), 0x52525446, 1, 2, 32, 0, 0, 130, 8, 0
     )
-    raw += truncated_header + b"ab"  # header claims 8 payload bytes; only 2 present
+    raw += truncated_header + b"ab"
 
     reader = CaptureReader(io.BytesIO(raw))
     records = list(reader.records())

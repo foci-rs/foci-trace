@@ -115,11 +115,6 @@ class CaptureReader:
             if header == b"":
                 return
             if len(header) != RECORD_HEADER_LEN:
-                # A SIGTERM-terminated (or otherwise killed) recorder can cut the
-                # final record mid-header, exactly as it can mid-payload below. A
-                # short header read means the stream ended, so stop cleanly and
-                # keep every complete record before it rather than discarding the
-                # whole capture.
                 self.truncated_tail_bytes = len(header)
                 return
             (
@@ -137,10 +132,6 @@ class CaptureReader:
                 raise ValueError("bad record magic")
             payload = self._source.read(payload_len)
             if len(payload) != payload_len:
-                # A SIGTERM-terminated recorder can cut the final record
-                # mid-write. A short payload read means the stream ended, so
-                # stop cleanly and keep every complete record before it rather
-                # than discarding the whole capture.
                 self.truncated_tail_bytes = len(header) + len(payload)
                 return
             if version != RECORD_VERSION or flags != 0:

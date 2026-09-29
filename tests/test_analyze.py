@@ -42,10 +42,6 @@ from foci_trace.protocol import (
     SUBSYSTEM_STEP_TIMER,
 )
 
-# FOCI-source status frames never populate dropped_event_log_count on the
-# firmware side; only board/USB carry the real counter. Not exported from
-# protocol.py (see SOURCE_KIND_BOARD/SOURCE_KIND_USB there) -- used here only
-# to construct an untrustworthy status observation for the regression tests.
 _SOURCE_KIND_FOCI = 1
 
 _BREAKAWAY_PROBE_CONTEXT = {
@@ -224,7 +220,7 @@ def _metadata_payload(serial: str) -> bytes:
         3,
         84_000_000,
         1000,
-        500,  # OpenFFBoard's configured control-detail trace rate.
+        500,
         10,
         2,
         2,
@@ -922,13 +918,6 @@ def _firmware_marker_capture_reports(marker_boot_id: int) -> list[DeviceReport]:
             0, timestamp, _header(FRAME_TYPE_CRITICAL, payload, seq, timestamp, 1, 0) + payload
         )
 
-    # Firmware markers: Accel->Cruise between the first and second samples,
-    # Cruise->Decel at the fourth sample's tick -- deliberately different
-    # split points than the kinematic reconstruction would pick, so the test
-    # can tell which path produced the report. The first marker must land
-    # strictly after start_tick (sample 1's tick, 0): the accel bucket is the
-    # half-open interval [start_tick, cruise_start_tick), so a marker AT
-    # start_tick would make that interval empty.
     marker_accel_cruise_tick = clock * 10 // 1000
     marker_accel_cruise = struct.pack("<BBHBxxxiiii", 1, 2, 12, 3, 0, 0, 1, 0)
     writer.write_firmware_frame(
@@ -962,10 +951,6 @@ def _firmware_marker_capture_reports(marker_boot_id: int) -> list[DeviceReport]:
         + marker_cruise_decel,
     )
 
-    # Confirming status frames straddling the window, both with zero drops.
-    # version=21 keeps the payload at _status_payload's pre-v22 40-byte
-    # shape; PROTOCOL_VERSION's default (23) would otherwise require the
-    # trace-deadline-pressure/max-spi-cycle fields this helper doesn't emit.
     status_before = _status_payload(drops=0, endpoint_pressure=0)
     writer.write_firmware_frame(
         0,
@@ -1027,15 +1012,10 @@ def test_motion_phase_report_prefers_firmware_markers_when_reliable() -> None:
     assert accel.kinematic_fallback is False
     assert cruise.kinematic_fallback is False
     assert decel.kinematic_fallback is False
-    # The marker-derived split lands exactly at sample 1 -> cruise, so accel
-    # has only the first sample.
     assert accel.critical_samples == 1
 
 
 def test_motion_phase_report_falls_back_to_kinematic_when_markers_missing() -> None:
-    # Re-run test_phase_split_follows_kinematics_not_a_fixed_window's capture
-    # (no EVENT_PHASE_BOUNDARY frames at all) and confirm the new field
-    # defaults to "kinematic" without changing any prior assertion.
     output = io.BytesIO()
     writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
     writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
@@ -1071,19 +1051,11 @@ def test_motion_phase_report_falls_back_to_kinematic_when_markers_missing() -> N
 
 
 def test_unreliable_markers_in_one_motion_window_do_not_affect_another() -> None:
-    # Two independent moves (separated by a gap exceeding motion_gap_s) on the
-    # same channel: window 1 has a clean, reliable marker pair; window 2's
-    # markers carry a drop-gap flag. Window 1 must still use firmware markers
-    # even though window 2 falls back.
     output = io.BytesIO()
     writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
     writer.write_device_table(0, 100, "1-50", "FOCI Ouroboros (trace)", "ABC", b"")
 
     clock = 84_000_000
-    # Move 1's last sample lands at 175ms; move 2 must start more than
-    # motion_gap_s (0.1s) later for _ordered_motion_groups to split them into
-    # two segments, so gap_ticks (move 2's base tick) needs a healthy margin
-    # past 175ms rather than sitting close to it.
     gap_ticks = int(0.5 * clock)
 
     def _write_move(base_tick: int, base_seq: int) -> None:
@@ -1114,7 +1086,6 @@ def test_unreliable_markers_in_one_motion_window_do_not_affect_another() -> None
     _write_move(0, 1)
     _write_move(gap_ticks, 10)
 
-    # Window 1 markers: clean, no drop-gap flag.
     m1 = struct.pack("<BBHBxxxiiii", 1, 2, 12, 3, 0, 0, 1, 0)
     writer.write_firmware_frame(0, 0, _header(FRAME_TYPE_EVENT, m1, 100, 0, 0, 0xFF) + m1)
     m2 = struct.pack("<BBHBxxxiiii", 1, 2, 12, 3, 0, 1, 2, 0)
@@ -1137,7 +1108,6 @@ def test_unreliable_markers_in_one_motion_window_do_not_affect_another() -> None
         + status_after_1,
     )
 
-    # Window 2 markers: the first one's frame carries the drop-gap flag.
     m3 = struct.pack("<BBHBxxxiiii", 1, 2, 12, 3, 0, 0, 1, 0)
     writer.write_firmware_frame(
         0, gap_ticks, _header(FRAME_TYPE_EVENT, m3, 104, gap_ticks, 0, 0xFF, flags=1) + m3
@@ -2933,10 +2903,6 @@ def test_analyze_capture_reconstructs_a_breakaway_campaign_from_ftrc_frames(
     )
 
     def bw_event_payload(event_id: int, sequence: int) -> bytes:
-        # Matches `request_commission_event`'s real wire packing:
-        # args = [source_index, engine_kind, event.payload[0], event.payload[1]],
-        # so a breakaway marker's `evidence_sequence` rides in args[2], not
-        # args[0] (see `assemble_breakaway_ticks`'s docstring).
         return struct.pack(
             "<BBHBxxxiiii", 1, SUBSYSTEM_COMMISSIONING, event_id, 4, 0, 1, sequence, 0
         )
@@ -3067,7 +3033,6 @@ def test_analyze_capture_rejects_in_phase_motion_before_the_breakaway_probe_plan
         0, 200, _header(FRAME_TYPE_EVENT, phase_start, 2, 200, 255, 255) + phase_start
     )
 
-    # Motion inside the same phase, before the probe plan below.
     feedback = _velocity_observation_payload(11, 6, elapsed_us=1_000, stroke_index=0, direction=1)
     writer.write_firmware_frame(
         0, 300, _header(FRAME_TYPE_VELOCITY_OBSERVATION, feedback, 3, 300, 1, 0) + feedback
@@ -3167,7 +3132,6 @@ def test_analyze_capture_does_not_flag_prior_phase_motion_as_premature() -> None
         0, 20, _header(FRAME_TYPE_EVENT, earlier_phase_start, 2, 20, 255, 255) + earlier_phase_start
     )
 
-    # Legitimate motion during the earlier phase (e.g. mechanical id).
     feedback = _velocity_observation_payload(11, 6, elapsed_us=1_000, stroke_index=0, direction=1)
     writer.write_firmware_frame(
         0, 50, _header(FRAME_TYPE_VELOCITY_OBSERVATION, feedback, 3, 50, 1, 0) + feedback
@@ -3252,7 +3216,6 @@ def test_analyze_capture_reports_tracking_lag_and_budget() -> None:
     seq = 3
     for i in range(400):
         payload = _critical_payload(-144, 0, 0, 0)
-        # _critical_payload fixes pid_velocity_actual at 20; patch the velocity slot to 75 RPM
         payload = payload[:16] + struct.pack("<i", 75) + payload[20:]
         writer.write_firmware_frame(
             0,
@@ -3320,38 +3283,24 @@ def test_marker_based_bounds_no_decel_in_window_extends_cruise_to_window_end() -
 
 
 def test_marker_based_bounds_uses_zero_width_cruise_when_cruise_never_entered() -> None:
-    # A triangular Accel -> Decel move with no plateau -- the case most in
-    # need of firmware markers, since it is the shortest and least sampled by
-    # the critical-frame stream. Must NOT fall back to kinematic.
     observations = [_pb(500, 0, 0, 2)]
     status = [_so(0, 0), _so(1000, 0)]
     assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) == (500, 500)
 
 
 def test_marker_based_bounds_falls_back_on_reverse_triangular_transition() -> None:
-    # Decel -> Accel with no Cruise (e.g. an overshoot correction) cannot be
-    # represented by _motion_phase_reports's fixed accel-then-decel bucket
-    # order -- the zero-width-cruise shortcut only applies to Accel -> Decel.
-    # Must fall back rather than mislabel the report.
     observations = [_pb(500, 0, 2, 0)]
     status = [_so(0, 0), _so(1000, 0)]
     assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
 
 
 def test_marker_based_bounds_falls_back_on_multi_transition_no_cruise_chain() -> None:
-    # Accel -> Decel -> Accel, never touching Cruise: more than one
-    # transition with no Cruise has no single split point the three-bucket
-    # model can represent. Must fall back rather than pick one arbitrarily.
     observations = [_pb(400, 0, 0, 2), _pb(600, 0, 2, 0)]
     status = [_so(0, 0), _so(1000, 0)]
     assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
 
 
 def test_marker_based_bounds_falls_back_on_accel_cruise_accel() -> None:
-    # A reliable, internally consistent chain that revisits Accel after
-    # Cruise -- the class sequence decreases (Cruise=1 -> Accel=0), so the
-    # fixed accel-then-decel bucket order would mislabel the second accel
-    # run as decel. Must fall back.
     observations = [_pb(300, 0, 0, 1), _pb(700, 0, 1, 0)]
     status = [_so(0, 0), _so(1000, 0)]
     assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
@@ -3364,19 +3313,12 @@ def test_marker_based_bounds_falls_back_on_decel_cruise_accel() -> None:
 
 
 def test_marker_based_bounds_window_starting_in_cruise() -> None:
-    # The window's first segment (no marker of its own -- load_move reports
-    # no transition for the first segment after reset/idle) was already
-    # Cruise; a single Cruise -> Decel transition is a valid, representable
-    # non-decreasing sequence.
     observations = [_pb(700, 0, 1, 2)]
     status = [_so(0, 0), _so(1000, 0)]
     assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) == (100, 700)
 
 
 def test_marker_based_bounds_none_on_drop_gap_flag_on_a_non_marker_event() -> None:
-    # The drop-gap flag on ANY event frame in the window is disqualifying,
-    # not just one on a phase-boundary frame -- PENDING_EVENTS is a shared
-    # queue across every event kind.
     observations = [_pb(300, 0, 0, 1), _pb(700, 0, 1, 2)]
     status = [_so(0, 0), _so(1000, 0)]
     assert _marker_based_phase_bounds(observations, status, [500], 0, 100, 900) is None
@@ -3389,20 +3331,18 @@ def test_marker_based_bounds_ignores_drop_gap_outside_the_window() -> None:
 
 
 def test_marker_based_bounds_none_on_broken_chain() -> None:
-    observations = [_pb(300, 0, 0, 1), _pb(700, 0, 0, 2)]  # chain break: expected old=1
+    observations = [_pb(300, 0, 0, 1), _pb(700, 0, 0, 2)]
     status = [_so(0, 0), _so(1000, 0)]
     assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
 
 
 def test_marker_based_bounds_none_on_drop_counter_change() -> None:
     observations = [_pb(300, 0, 0, 1), _pb(700, 0, 1, 2)]
-    status = [_so(0, 0), _so(1000, 1)]  # a drop happened somewhere in the window
+    status = [_so(0, 0), _so(1000, 1)]
     assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
 
 
 def test_marker_based_bounds_none_when_final_marker_dropped_before_status_confirms() -> None:
-    # Only the accel->cruise marker is present; the cruise->decel marker was
-    # dropped. A later status frame reveals the drop.
     observations = [_pb(300, 0, 0, 1)]
     status = [_so(0, 0), _so(1000, 1)]
     assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
@@ -3410,28 +3350,23 @@ def test_marker_based_bounds_none_when_final_marker_dropped_before_status_confir
 
 def test_marker_based_bounds_none_when_capture_ends_before_a_confirming_status_frame() -> None:
     observations = [_pb(300, 0, 0, 1), _pb(700, 0, 1, 2)]
-    status = [_so(0, 0)]  # nothing observed after the window
+    status = [_so(0, 0)]
     assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
 
 
 def test_marker_based_bounds_none_when_no_status_precedes_the_window() -> None:
-    # No baseline to compare the post-window count against, even though a
-    # confirming frame exists -- fail closed rather than guess.
     observations = [_pb(300, 0, 0, 1), _pb(700, 0, 1, 2)]
     status = [_so(1000, 0)]
     assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
 
 
 def test_marker_based_bounds_isolates_other_channels() -> None:
-    observations = [_pb(300, 1, 0, 1), _pb(700, 1, 1, 2)]  # channel 1, we ask for channel 0
+    observations = [_pb(300, 1, 0, 1), _pb(700, 1, 1, 2)]
     status = [_so(0, 0), _so(1000, 0)]
     assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
 
 
 def test_marker_based_bounds_none_on_invalid_new_class() -> None:
-    # Untrusted wire data (malformed capture, bit flip, future
-    # decoder/firmware mismatch) can carry a class code outside 0/1/2. Must
-    # fail closed rather than let it reach the monotonicity/lookup logic.
     observations = [_pb(300, 0, 0, 4)]
     status = [_so(0, 0), _so(1000, 0)]
     assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
@@ -3444,7 +3379,6 @@ def test_marker_based_bounds_none_on_invalid_old_class() -> None:
 
 
 def test_marker_based_bounds_none_on_single_no_op_marker() -> None:
-    # old_class == new_class: a malformed "transition" that changes nothing.
     observations = [_pb(300, 0, 0, 0)]
     status = [_so(0, 0), _so(1000, 0)]
     assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
@@ -3457,27 +3391,16 @@ def test_marker_based_bounds_none_on_no_op_marker_within_a_chain() -> None:
 
 
 def test_marker_based_bounds_ignores_zero_valued_foci_source_confirming_frame() -> None:
-    # A FOCI-source status frame (source_kind 1) never carries a real
-    # dropped_event_log_count -- the firmware builds it with
-    # ..StatusSample::default(), so it always reads 0 regardless of the
-    # actual drop count. A same-time board-source frame shows the real
-    # counter incremented. The FOCI-source zero must not be picked as the
-    # confirming observation and must not mask the real board-source drop.
     observations = [_pb(300, 0, 0, 1), _pb(700, 0, 1, 2)]
     status = [
         _so(0, 0),
         _so(1000, 0, source_kind=_SOURCE_KIND_FOCI),
-        _so(1000, 1),  # board-source: the real counter actually incremented
+        _so(1000, 1),
     ]
     assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
 
 
 def test_marker_based_bounds_skips_foci_source_baseline_for_earlier_board_baseline() -> None:
-    # A FOCI-source status frame closer to the window start must not be
-    # chosen as the baseline over an earlier, authoritative board-source
-    # frame -- both report 0 here, so the outcome only differs if the
-    # filter is applied; this pins that the filtered board-source frame is
-    # the one actually used.
     observations = [_pb(300, 0, 0, 1), _pb(700, 0, 1, 2)]
     status = [
         _so(0, 0),
@@ -3488,9 +3411,6 @@ def test_marker_based_bounds_skips_foci_source_baseline_for_earlier_board_baseli
 
 
 def test_marker_based_bounds_none_when_only_foci_source_baseline_available() -> None:
-    # No board/USB status frame precedes the window at all -- only a
-    # FOCI-source frame does. Must fail closed (no baseline) rather than
-    # fall back to using the untrustworthy FOCI-source frame as a baseline.
     observations = [_pb(300, 0, 0, 1), _pb(700, 0, 1, 2)]
     status = [_so(0, 0, source_kind=_SOURCE_KIND_FOCI), _so(1000, 0)]
     assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None

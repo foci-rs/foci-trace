@@ -29,10 +29,6 @@ asserting one.
 
 from foci_trace.velocity_measurement import _drift_ratio_ppm
 
-# rung, slot, slope_q, mean_rate_q -- recovered from the rejection diagnostics
-# of foc-192-stepper-y-rejection-slope-20260729-221033.bin (see module
-# docstring for how). Rate is the midpoint of the reported rejection
-# interval, since an excluded record zeroes rate_mean.
 CAPTURED_REJECTIONS = [
     (0, 3, -8_823_529, 13_750_000),
     (1, 7, -14_797_794, 13_546_875),
@@ -43,7 +39,6 @@ CAPTURED_REJECTIONS = [
     (8, 0, 5_974_265, -15_359_375),
 ]
 
-# A 64-sample suffix blocked at 2**level gives a span of (64 - 2**level) ms.
 POSSIBLE_SPANS_US = [(64 - 2**level) * 1000 for level in range(5)]
 
 
@@ -62,8 +57,6 @@ def test_every_captured_rejection_passes_at_every_possible_span():
             assert ratio <= 200_000, f"rung {rung} slot {slot} at span {span_us}"
             worst = max(worst, ratio)
 
-    # Pin the margin. If a future change to the bound or the arithmetic shrinks
-    # this, the failure should say so rather than passing quietly.
     assert worst == 68_818, worst
 
 

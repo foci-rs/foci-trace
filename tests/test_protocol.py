@@ -249,8 +249,6 @@ def test_decodes_version_nine_pptm_velocity_diagnostic() -> None:
 
 
 def test_decode_frame_rejects_a_version_beyond_the_supported_range() -> None:
-    # A version past the supported range is rejected; historical versions stay
-    # decodable so committed captures still replay.
     payload = bytes(88)
     with pytest.raises(DecodeError, match="unsupported protocol version 24"):
         decode_frame(_header(FRAME_TYPE_CRITICAL, payload, version=24) + payload)
@@ -752,13 +750,13 @@ def test_schema_seventeen_core_record_decodes_i_top_cap() -> None:
     core.extend(
         struct.pack(
             "<IIIIBBBiiii",
-            0x001C_0000,  # directional_memberships[0]
-            0x001C_0000,  # directional_memberships[1]
-            0x001C_0000,  # proportional_joint_membership (schema >= 7)
-            0x0004_0000,  # joint_membership
-            3,  # directional_validity[0] (schema >= 4)
-            3,  # directional_validity[1]
-            1,  # reduced_margin
+            0x001C_0000,
+            0x001C_0000,
+            0x001C_0000,
+            0x0004_0000,
+            3,
+            3,
+            1,
             17_000_000,
             18_000_000,
             -19_000_000,
@@ -767,8 +765,8 @@ def test_schema_seventeen_core_record_decodes_i_top_cap() -> None:
     )
     core.extend(struct.pack("<IiIIBHBHH", 4_394, 264, 25_000, 4_000, 13, 60, 15, 120, 2_816))
     core.extend(struct.pack("<H", 2_534))
-    core.append(1)  # limit_evidence_capability
-    core.extend(struct.pack("<H", 1_310))  # new: i_top_cap, schema >= 17 only
+    core.append(1)
+    core.extend(struct.pack("<H", 1_310))
 
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, core) + core)
 
@@ -777,9 +775,6 @@ def test_schema_seventeen_core_record_decodes_i_top_cap() -> None:
 
 
 def test_schema_sixteen_core_record_decodes_i_top_cap() -> None:
-    # Breakaway plans (schema 16) now also carry the trailing i_top_cap u16
-    # -- the rung participates in the live gain search, not only schema 17's
-    # ReproducedProportional/standalone characterization path.
     core = bytearray([0])
     core.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
     core.append(0)
@@ -797,8 +792,6 @@ def test_schema_sixteen_core_record_decodes_i_top_cap() -> None:
 
 
 def test_schema_sixteen_core_record_truncated_before_i_top_cap_raises() -> None:
-    # Same as the schema-16 test above, but the two i_top_cap bytes are cut
-    # off -- must raise, not decode with the field silently absent.
     core = bytearray([0])
     core.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
     core.append(0)
@@ -807,17 +800,12 @@ def test_schema_sixteen_core_record_truncated_before_i_top_cap_raises() -> None:
     core.extend(struct.pack("<IiIIBHBHH", 4_394, 264, 25_000, 4_000, 13, 60, 15, 120, 2_816))
     core.extend(struct.pack("<H", 2_534))
     core.append(1)
-    # i_top_cap bytes deliberately omitted.
 
     with pytest.raises(DecodeError):
         decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, core) + core)
 
 
 def test_schema_fifteen_core_record_has_no_i_top_cap_and_is_unaffected() -> None:
-    # An unrelated, adjacent schema value (neither 16 nor 17, but still
-    # >= 7 so every other schema-conditional field in this record decodes
-    # the same as the 16/17 fixtures) must stay byte-identical: no trailing
-    # i_top_cap bytes, and no key in the payload.
     core = bytearray([0])
     core.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
     core.append(0)
@@ -834,8 +822,6 @@ def test_schema_fifteen_core_record_has_no_i_top_cap_and_is_unaffected() -> None
 
 
 def test_schema_seventeen_core_record_truncated_before_i_top_cap_raises() -> None:
-    # Same as the schema-17 test above, but the two i_top_cap bytes are cut
-    # off -- must raise, not decode with the field silently absent.
     core = bytearray([0])
     core.extend(struct.pack("<IHII", 7, 0, 0x1122_3344, 0x5566_7788))
     core.append(0)
@@ -859,7 +845,6 @@ def test_schema_seventeen_core_record_truncated_before_i_top_cap_raises() -> Non
     core.extend(struct.pack("<IiIIBHBHH", 4_394, 264, 25_000, 4_000, 13, 60, 15, 120, 2_816))
     core.extend(struct.pack("<H", 2_534))
     core.append(1)
-    # i_top_cap bytes deliberately omitted.
 
     with pytest.raises(DecodeError):
         decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, core) + core)
@@ -1710,7 +1695,7 @@ def test_decode_metadata_strings_and_labels() -> None:
         3,
         84_000_000,
         1000,
-        500,  # OpenFFBoard's configured control-detail trace rate.
+        500,
         10,
         7,
         7000,
@@ -1918,8 +1903,8 @@ def test_decodes_gate_rejection_diagnostic_on_an_excluded_observation() -> None:
     payload.extend(struct.pack("<IHII", 7, 1, 0x1122_3344, 0x5566_7788))
     payload.extend(struct.pack("<BBHBBB", 3, 6, 512, 0, 4, 0))
     payload.extend(struct.pack("<iiiiiBH", 0, 0, 0, 0, 0, 0, 1_023))
-    payload.extend(bytes([3]))  # ResolvedSlope
-    payload.extend(bytes([1]))  # rejection present
+    payload.extend(bytes([3]))
+    payload.extend(bytes([1]))
     payload.extend(struct.pack("<HBBB", 256, 1, 0, 1))
     payload.extend(struct.pack("<qqqi", -8_773_356, -8_351_644, -2_389_706, 55_874))
     payload.extend(struct.pack("<qQ", -6_100_000, 3_710_294))
@@ -1937,7 +1922,6 @@ def test_decodes_gate_rejection_diagnostic_on_an_excluded_observation() -> None:
     assert frame.payload["rejection_settled_rate_interval_q"] == [-8_773_356, -8_351_644]
     assert frame.payload["rejection_slope_margin_q"] == -2_389_706
     assert frame.payload["rejection_lag_one_margin_q"] == 55_874
-    # A margin is half_width - |slope| and cannot recover either term.
     assert frame.payload["rejection_slope_q"] == -6_100_000
     assert frame.payload["rejection_slope_half_width_q"] == 3_710_294
 
@@ -1947,8 +1931,8 @@ def test_decodes_an_exclusion_that_never_reached_the_gates() -> None:
     payload.extend(struct.pack("<IHII", 7, 1, 0x1122_3344, 0x5566_7788))
     payload.extend(struct.pack("<BBHBBB", 3, 6, 512, 0, 4, 0))
     payload.extend(struct.pack("<iiiiiBH", 0, 0, 0, 0, 0, 0, 1_023))
-    payload.extend(bytes([1]))  # NoBlockingPlateau
-    payload.extend(bytes([0]))  # rejection absent
+    payload.extend(bytes([1]))
+    payload.extend(bytes([0]))
 
     frame = decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
 
@@ -2159,17 +2143,6 @@ def test_rejects_an_unusable_packed_order_byte() -> None:
             decode_frame(_header(FRAME_TYPE_VELOCITY_SWEEP_EVIDENCE, payload) + payload)
 
 
-# --- Breakaway-seeded P ladder: canonical evidence records ------------------
-#
-# Every payload below reproduces, byte for byte, the fixture values used by
-# the firmware's own golden tests
-# (`breakaway_trace_reporting_tests.rs::encode_*_has_stable_frame_layout`,
-# schema-15 Proportional / schema-14 Integral per `task-7b-report.md`). A field
-# reorder, width change, or dropped field in either `decode_breakaway_record`
-# or the firmware encoder breaks these tests -- that is the point of pinning
-# the exact hex literals rather than round-tripping through the decoder
-# itself.
-
 _BW_RUN_SEQUENCE = 0x1020_3040
 _BW_EVIDENCE_SEQUENCE = 0x5060
 _BW_PLAN_DIGEST = 0x1122_3344_5566_7788
@@ -2366,9 +2339,6 @@ def _bw_raw_observation_v13() -> bytes:
             -0x0102_0304_0506_0708,
         )
         + _BW_RAW_OBSERVATION_VARIANCE_OF_MEAN_Q2.to_bytes(16, "little")
-        # target_rate_q, then the frozen classify/consensus
-        # inputs: stationarity_code, settled-rate low/high, deficit low/high,
-        # predicted/usable/hard torque, disturbance present + Q16.16 bounds.
         + struct.pack(
             "<qBqqqqHHHBii",
             0x2122_2324_2526_2728,
@@ -2911,8 +2881,6 @@ def test_decode_breakaway_raw_observation_rejects_an_invalid_phase() -> None:
     from foci_trace.protocol import decode_breakaway_record
 
     payload = bytearray(_bw_raw_observation())
-    # Layout: tag(1) + run_sequence(4) + evidence_sequence(2) + plan_digest(8)
-    # puts `phase` at byte offset 15.
     payload[15] = 3
     with pytest.raises(DecodeError, match="phase is invalid"):
         decode_breakaway_record(bytes(payload))
@@ -3025,8 +2993,6 @@ def test_decode_breakaway_campaign_terminal_matches_the_firmware_golden_bytes() 
     assert decoded["terminal_cause"] == 21
     assert decoded["accepted"] == 1
     assert decoded["integral_plan_digest"] == _BW_PLAN_DIGEST
-    # A pre-error_code-field (18-byte) payload still decodes at the current
-    # protocol version -- "no error" and "field absent" stay distinct from 0.
     assert decoded["error_code"] is None
     assert decoded["error_code_name"] is None
 
@@ -3503,15 +3469,11 @@ def test_decode_breakaway_origin_mismatch_rejects_an_out_of_window_start() -> No
 def test_take_build_identity_reads_legacy_and_new_layouts() -> None:
     from foci_trace.protocol import _EvidenceCursor, _take_build_identity
 
-    # A u32 equal to a legacy build_revision constant (FNV of the crate version)
-    # decodes as the old single-field layout.
     legacy = struct.pack("<I", 0x05E21F75) + b"\xaa\xbb"
     cursor = _EvidenceCursor(legacy)
     assert _take_build_identity(cursor) == {"build_revision": 0x05E21F75}
     assert cursor.offset == 4
 
-    # Any other u32 is a new-layout record: build_features (u16) then
-    # build_identity (u32).
     new = struct.pack("<HI", 0x000F, 0xABCD1234)
     cursor = _EvidenceCursor(new)
     assert _take_build_identity(cursor) == {

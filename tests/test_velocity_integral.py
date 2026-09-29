@@ -47,10 +47,6 @@ from foci_trace.velocity_measurement import (
 LEGACY_Q8_8_BUILD = 0x75536758
 CURRENT_Q4_12_BUILD = 0x05E21F75
 
-# Direction index per slot for each declared order, transcribed from
-# IntegralSlotOrder in the firmware's integral_plan.rs. Kept as literal rows
-# rather than derived from slot_direction_index, so the tests below compare the
-# reconstruction against the schedule instead of against itself.
 _DECLARED_DIRECTIONS: dict[int, tuple[int, ...]] = {
     SLOT_ORDER_FORWARD_FIRST: (0, 1, 0, 1, 0, 1, 0, 1),
     SLOT_ORDER_REVERSE_FIRST: (1, 0, 1, 0, 1, 0, 1, 0),
@@ -233,33 +229,10 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
         plan["recovery_nominal_slot_us"] = 2_316_958
         plan["nominal_workflow_ms"] = 187_651
     if schema_revision >= 14:
-        # The breakaway-seeded campaign
-        # (`plan_breakaway_velocity_integral_response`, integral_plan.rs:1387).
-        # It has no Proportional sweep, so `IntegralAcquisitionAuthority::new_breakaway` zeroes
-        # every directional field; it passes `combined_selected_response: None`
-        # and `probe_constrained_test_point: false`; and it passes
-        # `append_exact_cap: false`, so the ladder is the plain
-        # `build_integral_ladder` one that stops at the last whole octave
-        # instead of the combined ladder's exact 1_310 cap. Because it is not a
-        # combined workflow, firmware neither reserves nor emits
-        # `slot_transition_allowance_us` (`integral_reporting.rs:316-321`) and
-        # does not add the recovery stabilization reserve
-        # (`integral_plan.rs:1544-1553`), which returns the workflow durations
-        # to their schema-5 values.
-        #
-        # Every value below is the value the real schema-14 plan in
-        # `foc213-transport-validated-20260803-192710.bin` carries, field for
-        # field, except for `requested_velocity_mrev_s` and the two position
-        # headrooms, which that capture reports as 6_666/7_025/7_025 and which
-        # nothing in the audit reconstructs.
         del plan["selected_response_intervals_q"]
         del plan["slot_transition_allowance_us"]
         plan.update(
             {
-                # `protocol.py` decodes a plan core with no trailing combined
-                # block as `combined_selected_response: False`, which is what
-                # the real capture reports, so the fixture models the decoded
-                # value rather than firmware's `Option::None`.
                 "combined_selected_response": False,
                 "fixed_p": 951,
                 "usable_torque_limit": 2_534,
@@ -282,20 +255,6 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
             }
         )
     if schema_revision >= 17:
-        # schema_revision >= 14 (Breakaway) ran first and zeroed Proportional
-        # authority, set fixed_p=951, and shrank the ladder back to 12
-        # unaugmented rungs (see that tier's comment). Schema 17 is the
-        # ReproducedProportional/standalone family, not Breakaway, so every field
-        # that tier changed must be restored to the schema-7 tier's values
-        # here, before applying the augmented 13-rung geometry on top.
-        # integral_plan_digest picks its hashed build representation by dict
-        # key presence ("build_features" in plan), not by schema_revision --
-        # a real schema-17 capture can only ever come from current
-        # firmware, which always hashes build_features
-        # (integral_plan.rs's `hash_value!(self.build_features)`, unconditional,
-        # first in the hash chain), never build_revision. Every earlier tier
-        # in this fixture models archived legacy-compatible captures and
-        # correctly keeps build_revision; schema 17 is new and must not.
         del plan["build_revision"]
         plan["build_features"] = BUILD_FEATURE_Q4_12_GAINS
         plan.update(
@@ -319,29 +278,12 @@ def _plan(schema_revision: int = 1) -> dict[str, object]:
                 "total_rung_count": 15,
                 "expected_observations": 120,
                 "i_top_cap": 1_310,
-                # `integral_plan.rs` always sets `recovery_slot_count:
-                # total_rung_count` (never independently derived), and the
-                # schema-14 tier above left this at its own 14-rung value; it
-                # must track this tier's 15-rung total_rung_count instead.
                 "recovery_slot_count": 15,
-                # slot_transition_allowance_us and the combined-only duration
-                # reserve do not apply to a non-combined (append_exact_cap:
-                # false) plan. The plan validator recomputes both durations
-                # offline, so these values must match its duration model.
                 "nominal_workflow_ms": 177_751,
                 "maximum_workflow_ms": 195_496,
             }
         )
     if schema_revision >= 18:
-        # Back to the breakaway-seeded campaign: same builder as the schema-14
-        # tier, so every Proportional authority field that tier zeroed is zeroed
-        # again here, undoing the ReproducedProportional restoration the schema-17
-        # tier applied. What schema 18 keeps from that tier is the half-octave
-        # geometry (it is a response-ladder schema) and `build_features`, since
-        # only current firmware can emit this revision at all. What
-        # separates it from schema 14 on the wire is neither of those: it is
-        # the recovery-rest grammar, which `_synthetic_complete_capture` reads
-        # from `integral_stabilized_recovery_rest`.
         plan.update(
             {
                 "fixed_p": 951,
@@ -589,9 +531,6 @@ def test_schema_seventeen_derives_the_half_octave_rung():
 
 
 def test_schema_sixteen_derive_integral_ladder_also_gets_the_half_octave_rung():
-    # Breakaway plans (schema 16) now also receive the half-octave insertion
-    # -- the rung participates in the live gain search, not only the
-    # ReproducedProportional/standalone (schema 17) characterization path.
     ladder = derive_integral_ladder(
         pwm_hz=25_000,
         moving_stroke_us=512_000,
@@ -619,8 +558,6 @@ def test_schema_sixteen_derive_integral_ladder_also_gets_the_half_octave_rung():
 
 
 def test_schema_fifteen_derive_integral_ladder_is_unaugmented():
-    # Confirms the widened gate is exact-match against {16, 17}, not a >= 15
-    # threshold -- an adjacent, unrelated schema value must stay unaugmented.
     ladder = derive_integral_ladder(
         pwm_hz=25_000,
         moving_stroke_us=512_000,
@@ -640,9 +577,6 @@ def test_schema_seventeen_plan_digest_hashes_i_top_cap() -> None:
 
 
 def test_schema_sixteen_plan_digest_also_hashes_i_top_cap() -> None:
-    # Reuses the schema-17 fixture's augmented-ladder shape (real i_top_cap,
-    # 13-rung positive_i) with schema_revision overridden to 16 -- the digest
-    # algorithm treats both schemas identically for this field.
     plan = {**_plan(schema_revision=17), "schema_revision": 16}
     baseline = integral_plan_digest(plan)
     assert integral_plan_digest({**plan, "i_top_cap": plan["i_top_cap"] + 1}) != baseline
@@ -656,11 +590,6 @@ def test_other_schema_revisions_still_ignore_i_top_cap_in_the_digest() -> None:
 
 
 def test_schema_seventeen_selects_transition_capable_prefix_independently() -> None:
-    # Mirrors the schema-7 standalone _validate_plan tests (e.g.
-    # test_schema_four_plan_reconstructs_exact_counts_and_duration above) with
-    # schema_revision=17 -- confirms _validate_plan runs the same independent
-    # Proportional test-point reconstruction for the new standalone/ReproducedProportional
-    # schema that it already runs for schema 7.
     plan = _plan(schema_revision=17)
     plan["plan_digest"] = integral_plan_digest(plan)
     mismatches: list[str] = []
@@ -695,18 +624,8 @@ def _plan_marker(plan: dict[str, object], sequence: int) -> tuple[bytes, dict[st
                 int(plan["usable_torque_limit"]),
             )
         )
-        # Mirrors `_compact_plan_marker`, which mirrors
-        # `encode_velocity_integral_plan_marker`
-        # (`integral_reporting.rs:454-471`): the presence byte and the four
-        # interval endpoints exist only for a combined workflow. A breakaway
-        # plan's marker ends after `usable_torque_limit` with no trailing byte
-        # at all -- not a byte carrying zero.
         if plan.get("combined_selected_response", False):
             raw.extend(struct.pack("<B", 1))
-            # Same fallback as `_compact_plan_marker`, so the forged capture
-            # built by `forge_standalone` (which strips the block a combined
-            # plan must have) still hashes the same bytes on both sides and is
-            # rejected on its own merits rather than on a digest mismatch.
             intervals = plan.get("selected_response_intervals_q") or ((0, 0), (0, 0))
             raw.extend(
                 struct.pack(
@@ -750,8 +669,6 @@ def _plan_records(plan: dict[str, object]) -> list[tuple[bytes, dict[str, object
         "positive_rung_count": plan["positive_rung_count"],
     }
     core_names = [
-        # A newer capture states build_features where an archived one
-        # states build_revision, exactly as `integral_plan_digest` selects it.
         "build_features" if "build_features" in plan else "build_revision",
         "schema_revision",
         "channel",
@@ -790,11 +707,6 @@ def _plan_records(plan: dict[str, object]) -> list[tuple[bytes, dict[str, object
         "positive_position_headroom_mrev",
         "max_duration_ms",
     ]
-    # Only a combined plan's schedule fragment carries the allowance on the
-    # wire (`integral_reporting.rs:316-321`); a breakaway schema-14 fragment
-    # ends without it, which is why `protocol.py` decodes it from the remaining
-    # byte count rather than from the schema. Emit whatever the plan carries,
-    # exactly as the encoder does.
     if "slot_transition_allowance_us" in plan:
         schedule_names.insert(4, "slot_transition_allowance_us")
     records = [
@@ -803,9 +715,6 @@ def _plan_records(plan: dict[str, object]) -> list[tuple[bytes, dict[str, object
             {
                 **common,
                 **{name: plan[name] for name in core_names},
-                # Firmware decodes this unconditionally on every schema revision
-                # (protocol.py's `integral_plan_core` branch defaults it False
-                # before the schema>=8 override below), so the fixture must too.
                 "combined_selected_response": False,
                 "record_kind": "integral_plan_core",
                 "plan_fragment": 0,
@@ -840,10 +749,6 @@ def _plan_records(plan: dict[str, object]) -> list[tuple[bytes, dict[str, object
         records[0][1]["directional_validity"] = plan["directional_validity"]
         records[0][1]["reduced_margin"] = plan["reduced_margin"]
     if bool(plan.get("combined_selected_response", False)):
-        # `encode_velocity_integral_plan_trace` appends this block only for
-        # `Some(selected)` (`integral_reporting.rs:289-301`), so a breakaway
-        # plan core keeps `protocol.py`'s decoded default of False and no
-        # interval key at all.
         records[0][1]["combined_selected_response"] = True
         records[0][1]["selected_response_intervals_q"] = plan["selected_response_intervals_q"]
     return records
@@ -919,17 +824,6 @@ def _moving_recovery_record(
         *values.values(),
     )
     return raw, {"record_kind": "rung_origin_recovery", **values}
-
-
-# Field order and widths below mirror `_decode_velocity_sweep_evidence`'s
-# `kind == 11` (78-byte, Event 151) and `kind == 10` (89-byte, Event 150)
-# branches in `foci_trace/protocol.py` exactly -- the only two shapes those
-# branches accept. `test_integral_evidence_helpers_round_trip_through_the_decoder`
-# decodes every record either helper builds and asserts the result equals
-# what the helper claims, so a field-order or field-count mistake here fails
-# immediately instead of silently building a dict `audit_velocity_integral`
-# accepts while the raw bytes it also hashes would be rejected by the real
-# firmware decoder.
 
 
 def _integral_rest_selection_record(
@@ -1146,9 +1040,6 @@ def _rest_boundary_record(
     positive_rung_index: int = 11,
     i_raw: int = 1_024,
 ) -> tuple[bytes, dict[str, object]]:
-    # The boundary sits at slot 0, whose travel direction is forward under
-    # forward-first and paired but reverse under reverse-first. The record
-    # carries signed travel, not a direction index.
     signed_direction = 1 if _DECLARED_DIRECTIONS[slot_order][0] == 0 else -1
     raw = bytearray([5])
     raw.extend(
@@ -1234,10 +1125,6 @@ def _rung_record(
     raw = bytearray((3,))
     raw += struct.pack("<IHQBH", 7, sequence, plan_digest, rung_index, i_raw)
     horizon: dict[str, int] = {}
-    # Mirrors `encode_rung` (`integral_reporting.rs:581`): the three horizon
-    # fields are appended only when `moving_horizon_us != 0`, and
-    # `integral_sweep.rs:2358` leaves that zero unless the plan is a combined
-    # workflow. A schema-14 breakaway rung therefore carries none of them.
     if (
         plan is not None
         and int(plan["schema_revision"]) >= 9
@@ -1289,13 +1176,6 @@ def _rung_record(
     }
 
 
-# Real, measured shape of a Breakaway (schema-16) plan after the ladder gate
-# widened to include it -- 13 positive rungs (the same half-octave insertion
-# ReproducedProportional plans already carried), captured from
-# `build_test_breakaway_plan()` in the Rust suite via a temporary print, not
-# hand-derived. The schema-14 archived-capture tier in `_plan()` stays
-# unaugmented (it pins a real historical capture predating this change), so
-# tests exercising the new shape apply this as an override instead.
 _BREAKAWAY_HALF_OCTAVE_OVERRIDES: dict[str, object] = {
     "i_top_cap": 1_310,
     "positive_rung_count": 13,
@@ -1339,16 +1219,7 @@ def _synthetic_complete_capture(
     if forge_standalone:
         plan["combined_selected_response"] = False
         plan.pop("selected_response_intervals_q", None)
-    # Below schema 12 the grammar never runs (its floor is 12) and no
-    # rest_selection/recovery_rest records are emitted, so the schedule below
-    # is inert and every existing schema-1-through-11 fixture is unaffected.
     integral_scored = schema_revision >= 12
-    # Firmware unified rung-origin recovery onto the stabilized rest schedule
-    # (`RecoveryRestSchedule`/`integral_recovery_rest_schedule` are gone), but
-    # that changed the evidence grammar, so it came with a schema bump. A
-    # fixture therefore emits the schedule its declared revision's firmware
-    # actually ran: the combined range and the unified-rest range carry a rest
-    # record per recovery, the breakaway and standalone ranges below do not.
     stabilized = integral_stabilized_recovery_rest(schema_revision)
     plan["plan_digest"] = integral_plan_digest(plan)
     records = _plan_records(plan)
@@ -1357,9 +1228,6 @@ def _synthetic_complete_capture(
     sequence += 1
     raw_observations: list[VelocityObservation] = []
     gains = [0, *plan["positive_i"], 0]
-    # The rung whose recovery is a completed moving return (outcome 1), used
-    # to exercise the rest-presence rule. Rung 0 and the last rung are the
-    # opening-anchor/closing-bookend pair; rung 1 is an ordinary positive rung.
     moving_recovery_rung = 1
     for rung_index, gain in enumerate(gains):
         direction_results: list[list[dict[str, object]]] = [[], []]
@@ -1383,9 +1251,6 @@ def _synthetic_complete_capture(
                 {"rung_index": rung_index, "slot": slot, "i_raw": gain},
                 plan,
             )
-            # Firmware emits the direction the schedule declares. Taking it from
-            # the reconstruction instead would make the audit below compare the
-            # reconstruction against itself, which passes however wrong it is.
             result["direction"] = direction
             direction_results[direction].append(result)
             records.append(_observation_record(result, sequence, int(plan["plan_digest"])))
@@ -1495,25 +1360,6 @@ def _synthetic_complete_capture(
             continue
         for byte in raw:
             digest = ((digest ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
-    # `plan.combined_workflow` (integral_plan.rs:508) is exactly
-    # `combined_selected_response.is_some()`. Reading it back off the plan
-    # dict here, rather than calling `integral_combined_workflow` a second
-    # time, keeps this an assertion about the fixture itself: the terminal is
-    # built from the same field the plan record publishes, so a `_plan()`
-    # revision that ever disagreed with its schema would show up as a
-    # falsified terminal instead of being papered over. Every schema-8-plus
-    # field the firmware
-    # derives from `combined_workflow` must follow it too, not just the
-    # combined-only tail: `outcome` itself is one of them --
-    # `integral_sweep.rs:1174-1177` reports `Complete` (1) for a sufficient
-    # combined run and `FirstRunRetained` (0) for a sufficient standalone
-    # one, so hardcoding 1 for every schema >= 8 run (as this fixture used
-    # to) claims a combined completion an immediate-scored run never
-    # reaches. The combined-only terminal encoding (`combined_workflow`/
-    # `fixed_p`/`target_status`/`target_terminus`, and the corresponding
-    # recovery_flags bits) must likewise not claim a combined workflow the
-    # plan does not have, or the fixture falsifies its own terminal to reach
-    # an empty mismatch list.
     plan_combined_workflow = bool(plan.get("combined_selected_response", False))
     records.append(
         (
@@ -1619,8 +1465,6 @@ def test_observation_role_is_the_fixed_out_and_back_alternation():
         for slot in range(8):
             assert observation_role(slot_order, slot) == slot % 2
 
-    # Accepts slot order for symmetry with slot_direction_index, and validates
-    # it, so a capture with an unknown schedule fails loudly here too.
     with pytest.raises(ValueError):
         observation_role(99, 0)
 
@@ -1651,16 +1495,12 @@ def test_slot_order_relates_role_and_direction_as_declared():
     ]
     assert all(role != direction for role, direction in reverse)
 
-    # The exact paired schedule, not merely "decorrelated" -- a wrong pattern
-    # can decorrelate too, and would silently produce a plausible analysis.
     assert _DECLARED_DIRECTIONS[SLOT_ORDER_PAIRED_OUT_AND_BACK] == (0, 1, 1, 0, 0, 1, 1, 0)
     paired = [
         (observation_role(SLOT_ORDER_PAIRED_OUT_AND_BACK, slot), direction)
         for slot, direction in enumerate(_DECLARED_DIRECTIONS[SLOT_ORDER_PAIRED_OUT_AND_BACK])
     ]
     assert paired == [(0, 0), (1, 1), (0, 1), (1, 0), (0, 0), (1, 1), (0, 1), (1, 0)]
-    # Every (direction, role) cell is populated, which is what makes the two
-    # effects separable.
     assert set(paired) == {(0, 0), (0, 1), (1, 0), (1, 1)}
 
 
@@ -1688,8 +1528,6 @@ def test_excluded_observation_carries_the_statistic_behind_its_refusal():
     plan = _plan(schema_revision=11)
 
     excluded = reconstruct_observation(
-        # Too few samples for any declared suffix: refused before any fit, so
-        # there is nothing to derive and nothing must be invented.
         raw[:8],
         {"rung_index": 0, "slot": 0, "i_raw": 0},
         plan,
@@ -1714,11 +1552,8 @@ def test_audit_emits_per_observation_records_with_slot_and_direction():
 
     observations = response["observations"]
     assert observations, "the audit must emit the observations it verified"
-    # Identity, geometry and the measured rate: what the role/direction
-    # separation needs, and what the aggregates cannot supply.
     for field in ("rung_index", "slot", "direction", "rate_low", "rate_mean", "rate_high"):
         assert field in observations[0], f"observation record is missing {field}"
-    # One per (rung, slot), no duplicates, in a deterministic order.
     keys = [(int(item["rung_index"]), int(item["slot"])) for item in observations]
     assert len(keys) == len(set(keys))
     assert keys == sorted(keys)
@@ -1741,8 +1576,6 @@ def test_audit_observation_directions_follow_a_paired_slot_order():
     for item in response["observations"]:
         slot = int(item["slot"])
         assert int(item["direction"]) == declared[slot], f"slot {slot} direction"
-    # Paired order decorrelates direction from slot parity; forward-first does
-    # not. Without that the experiment cannot separate role from direction.
     assert any(int(item["direction"]) != int(item["slot"]) & 1 for item in response["observations"])
 
 
@@ -1757,9 +1590,6 @@ def _synthetic_boundary_capture(
     if slot_order != SLOT_ORDER_FORWARD_FIRST:
         plan["flags"] = int(plan.get("flags", 0)) | (slot_order << _PLAN_SLOT_ORDER_SHIFT)
     plan["plan_digest"] = integral_plan_digest(plan)
-    # The capture ends at the last positive rung, whose records are dropped and
-    # replaced by the rest boundary. Rung 0 is the opening anchor, so positive
-    # rung ordinal n sits at rung index n + 1.
     positive_rung_count = int(plan["positive_rung_count"])
     boundary_positive_rung = positive_rung_count - 1
     dropped_rung_index = boundary_positive_rung + 1
@@ -1818,8 +1648,6 @@ def _synthetic_boundary_capture(
             "evidence_sequence": sequence,
             "digest": digest,
             "cause": 10,
-            # One rung's worth of observations and the rung record itself are
-            # gone, and the dropped rung's eligibility bit with them.
             "emitted_observations": 8 * (positive_rung_count + 1),
             "emitted_rungs": positive_rung_count + 1,
             "eligible_masks": [((1 << positive_rung_count) - 1) & ~(1 << boundary_positive_rung)]
@@ -1891,9 +1719,6 @@ def test_mirrored_rest_boundary_direction_follows_the_slot_order() -> None:
     Covered separately from the observation path because the boundary check is a
     third site with its own sign convention.
     """
-    # Schema 8, not 5: the plan flags carrying the slot order do not exist on
-    # the wire before schema 6, so a schema-5 capture is forward-first by
-    # construction and cannot exercise this at all.
     raw, records = _synthetic_boundary_capture(
         schema_revision=8, slot_order=SLOT_ORDER_REVERSE_FIRST
     )
@@ -2181,12 +2006,8 @@ def test_build_features_bit0_selects_integral_representation() -> None:
 
 
 def test_reconstruct_build_features_maps_legacy_captures_by_namespace() -> None:
-    # The legacy Q8.8 build predates every rule bit.
     assert reconstruct_build_features(LEGACY_Q8_8_BUILD, 4) == 0b0000
-    # Q4.12 combined Integral (schema 13) had only the drift bound, not the
-    # suffix walk (>=15) or the rest walk (>=16).
     assert reconstruct_build_features(CURRENT_Q4_12_BUILD, 13) == 0b0011
-    # Q4.12 breakaway Integral (schema 16) had all four rules.
     assert reconstruct_build_features(CURRENT_Q4_12_BUILD, 16) == 0b1111
 
 
@@ -2196,11 +2017,8 @@ def test_reconstruct_build_features_refuses_an_unknown_build() -> None:
 
 
 def test_capture_build_features_prefers_explicit_field_else_reconstructs() -> None:
-    # A newer capture states its rule contract directly.
     explicit = {"build_features": 0b1111, "schema_revision": 16}
     assert capture_build_features(explicit) == 0b1111
-    # A legacy capture reconstructs from build_revision (bit 0) and the schema
-    # thresholds: schema-13 combined had Q4.12 gains and the drift bound only.
     legacy = {"build_revision": CURRENT_Q4_12_BUILD, "schema_revision": 13}
     assert capture_build_features(legacy) == 0b0011
 
@@ -2651,11 +2469,6 @@ def test_reconstruct_observation_applies_drift_bound_at_integral_schema_thirteen
 
     result = reconstruct_observation(raw, {"rung_index": 0, "slot": 0, "i_raw": 0}, plan)
 
-    # This ramp's causal 64-sample tail drifts far more than 200,000 ppm of
-    # its settled rate, so the drift bound rejects it as ExcessiveDrift (5),
-    # giving stationarity_code 6 (5 + 1) -- not 3 (ResolvedSlope, 2 + 1),
-    # which the significance test below would produce for the identical raw
-    # samples.
     assert result["stationarity_code"] == 6
 
 
@@ -2750,8 +2563,6 @@ def test_mirrored_slot_order_is_reported_and_hashed_only_when_set() -> None:
     assert integral_plan_digest(forward_first) == baseline
     assert integral_plan_digest(reverse_first) != baseline
 
-    # Unlike the older flag bits, the slot order is hashed at every schema,
-    # because firmware records it without moving the Integral schema revision.
     for schema_revision in (1, 7):
         unmirrored = _plan(schema_revision)
         unmirrored["flags"] = 0
@@ -2772,7 +2583,6 @@ def test_every_slot_order_is_decoded_and_separates_the_digest() -> None:
         plan["flags"] = flags
         digests[slot_order] = integral_plan_digest(plan)
     assert len(set(digests.values())) == 3, "each order must have its own identity"
-    # Forward-first must hash as it did before the field existed.
     bare = _plan()
     bare["flags"] = 0
     assert digests[0] == integral_plan_digest(bare)
@@ -2851,7 +2661,7 @@ def test_renumber_integral_nonterminal_sequence_keeps_raw_and_decoded_in_sync() 
     from foci_trace.protocol import _decode_velocity_sweep_evidence
 
     _raw, records = _synthetic_complete_capture(schema_revision=18)
-    records.pop()  # terminal: carries no raw payload, excluded from renumbering
+    records.pop()
     removed_index = next(
         index
         for index, (_r, value) in enumerate(records)
@@ -2929,10 +2739,6 @@ def test_archived_schema_fourteen_capture_carrying_event_150_is_rejected() -> No
     )
     donor["plan_digest"] = plan["plan_digest"]
     terminal_raw, terminal = records.pop()
-    # Insert it exactly where the stabilized grammar puts it -- directly after
-    # the owner-5 selection -- so the stream is a perfectly formed schema-18
-    # capture wearing a schema-14 revision. Nothing but the revision gate can
-    # reject it, which is what makes this a test of the bump itself.
     selection_index = next(
         index
         for index, (_raw, value) in enumerate(records)
@@ -3004,8 +2810,6 @@ def test_breakaway_rung_carrying_a_response_horizon_is_rejected() -> None:
     )
     record_bytes, decoded = records[target]
     assert "tau_us" not in decoded
-    # kind(1) + run_sequence(4) + evidence_sequence(2) + plan_digest(8)
-    # + rung_index(1) + i_raw(2); the horizon follows immediately.
     header_len = 18
     horizon = {
         "tau_us": velocity_i_tau_us(
@@ -3034,15 +2838,6 @@ def test_breakaway_rung_carrying_a_response_horizon_is_rejected() -> None:
     audit = audit_velocity_integral(raw, records)
 
     assert audit["mismatches"] == ["rung 3 reports a response horizon outside a combined workflow"]
-
-
-# The four sabotage tests below isolate the recovery_flags workflow bit and
-# the decoded combined tail as two *independent* signals: a false terminal
-# can carry either one without the other (the reviewer reproduced exactly
-# that gap in round 1, where a sabotage test that always mutated both at
-# once never exercised the tail check on its own). Each test below flips
-# exactly one signal, in each direction, and leaves every other honest field
-# alone.
 
 
 def test_immediate_scored_terminal_claiming_the_combined_workflow_flag_is_rejected() -> None:
