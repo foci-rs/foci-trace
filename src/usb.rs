@@ -7,13 +7,17 @@ pub const TRACE_VENDOR_ID: u16 = 0x1d50;
 pub const TRACE_PRODUCT_ID: u16 = 0x614e;
 pub const TRACE_INTERFACE_CLASS: u8 = 0xff;
 const TRACE_PRODUCT_PREFIX: &str = "FOCI ";
-const TRACE_PRODUCT_SUFFIX: &str = " (trace)";
 
-fn is_trace_product(vendor_id: u16, product_id: u16, product: &str) -> bool {
+fn is_trace_device(
+    vendor_id: u16,
+    product_id: u16,
+    product: &str,
+    interface_classes: &[u8],
+) -> bool {
     vendor_id == TRACE_VENDOR_ID
         && product_id == TRACE_PRODUCT_ID
         && product.starts_with(TRACE_PRODUCT_PREFIX)
-        && product.ends_with(TRACE_PRODUCT_SUFFIX)
+        && interface_classes.contains(&TRACE_INTERFACE_CLASS)
 }
 
 #[derive(Debug, Error)]
@@ -79,7 +83,16 @@ fn open_if_trace_device(
     serial_filter: &[String],
 ) -> Result<Option<OpenTraceDevice>, UsbTraceError> {
     let product = device.product_string().unwrap_or_default().to_string();
-    if !is_trace_product(device.vendor_id(), device.product_id(), &product) {
+    let interface_classes: Vec<u8> = device
+        .interfaces()
+        .map(|interface| interface.class())
+        .collect();
+    if !is_trace_device(
+        device.vendor_id(),
+        device.product_id(),
+        &product,
+        &interface_classes,
+    ) {
         return Ok(None);
     }
 
@@ -132,48 +145,52 @@ fn trace_device_path(device: &DeviceInfo) -> String {
 mod tests {
     use super::*;
 
+    const CDC_ONLY: &[u8] = &[0x02, 0x0a];
+    const CDC_AND_TRACE: &[u8] = &[0x02, 0x0a, TRACE_INTERFACE_CLASS];
+
     #[test]
-    fn accepts_openffboard_trace_product() {
-        assert!(is_trace_product(
+    fn accepts_build_with_a_vendor_interface_and_the_plain_product() {
+        assert!(is_trace_device(
             TRACE_VENDOR_ID,
             TRACE_PRODUCT_ID,
-            "FOCI OpenFFBoard (trace)"
+            "FOCI Ouroboros",
+            CDC_AND_TRACE
+        ));
+        assert!(is_trace_device(
+            TRACE_VENDOR_ID,
+            TRACE_PRODUCT_ID,
+            "FOCI OpenFFBoard",
+            CDC_AND_TRACE
         ));
     }
 
     #[test]
-    fn accepts_ouroboros_trace_product() {
-        assert!(is_trace_product(
+    fn rejects_a_production_build_without_a_vendor_interface() {
+        assert!(!is_trace_device(
             TRACE_VENDOR_ID,
             TRACE_PRODUCT_ID,
-            "FOCI Ouroboros (trace)"
-        ));
-    }
-
-    #[test]
-    fn rejects_non_trace_product() {
-        assert!(!is_trace_product(
-            TRACE_VENDOR_ID,
-            TRACE_PRODUCT_ID,
-            "FOCI Ouroboros"
+            "FOCI Ouroboros",
+            CDC_ONLY
         ));
     }
 
     #[test]
     fn rejects_mismatched_vendor_id() {
-        assert!(!is_trace_product(
+        assert!(!is_trace_device(
             0x0000,
             TRACE_PRODUCT_ID,
-            "FOCI Ouroboros (trace)"
+            "FOCI Ouroboros",
+            CDC_AND_TRACE
         ));
     }
 
     #[test]
     fn rejects_mismatched_product_id() {
-        assert!(!is_trace_product(
+        assert!(!is_trace_device(
             TRACE_VENDOR_ID,
             0x0000,
-            "FOCI Ouroboros (trace)"
+            "FOCI Ouroboros",
+            CDC_AND_TRACE
         ));
     }
 }

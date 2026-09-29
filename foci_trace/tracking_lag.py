@@ -36,6 +36,8 @@ FLAG_DROP_GAP_BEFORE_THIS_FRAME = 1 << 0
 SAMPLE_FLAG_SPI_ERROR = 1 << 0
 
 BOARD_THRESHOLD_CYCLES = {
+    "FOCI OpenFFBoard": 120_000,
+    "FOCI Ouroboros": 372_000,
     "FOCI OpenFFBoard (trace)": 120_000,
     "FOCI Ouroboros (trace)": 372_000,
 }

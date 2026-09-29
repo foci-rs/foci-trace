@@ -3203,7 +3203,7 @@ def _status_payload_v22(pressure: int, max_cycles: int) -> bytes:
 def test_analyze_capture_reports_tracking_lag_and_budget() -> None:
     output = io.BytesIO()
     writer = CaptureWriter(output, start_unix_ns=10, start_mono_ns=20)
-    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard (trace)", "ABC", b"")
+    writer.write_device_table(0, 100, "1-50", "FOCI OpenFFBoard", "ABC", b"")
     meta = _metadata_payload("ABC")
     writer.write_firmware_frame(
         0, 110, _header(FRAME_TYPE_METADATA, meta, 1, 0, 0, 255, version=22) + meta
