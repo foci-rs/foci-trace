@@ -562,81 +562,6 @@ def _take_build_identity(cursor: _EvidenceCursor) -> dict[str, int]:
     return {"build_features": cursor.take("H"), "build_identity": cursor.take("I")}
 
 
-def _take_optional_interval(cursor: _EvidenceCursor) -> list[int] | None:
-    present = cursor.take("B")
-    if present not in (0, 1):
-        raise DecodeError("amplitude optional interval marker is invalid")
-    return [cursor.take("i"), cursor.take("i")] if present else None
-
-
-def _take_optional_i32(cursor: _EvidenceCursor) -> int | None:
-    present = cursor.take("B")
-    if present not in (0, 1):
-        raise DecodeError("amplitude optional value marker is invalid")
-    return cursor.take("i") if present else None
-
-
-def _take_fixed_gain_amplitude_direction(cursor: _EvidenceCursor) -> dict[str, Any]:
-    direction = {
-        "availability": cursor.take("B"),
-        "classification": cursor.take("B"),
-        "components": [[cursor.take("i"), cursor.take("i")] for _ in range(2)],
-        "component_count": cursor.take("B"),
-        "collected_mask": cursor.take("B"),
-        "eligible_mask": cursor.take("B"),
-        "included_mask": cursor.take("B"),
-        "signed_target_rate_q": cursor.take("i"),
-    }
-    if direction["availability"] > 6 or direction["classification"] > 3:
-        raise DecodeError("amplitude direction taxonomy is invalid")
-    if direction["component_count"] > 2:
-        raise DecodeError("amplitude direction has too many components")
-    for name in ("collected_mask", "eligible_mask", "included_mask"):
-        if direction[name] & ~0xF:
-            raise DecodeError("amplitude observation mask exceeds four slots")
-    direction["components"] = direction["components"][: direction["component_count"]]
-    direction["response_interval_q"] = _take_optional_interval(cursor)
-    direction["robust_location_q"] = _take_optional_i32(cursor)
-    direction["deficit_interval_q"] = _take_optional_interval(cursor)
-    direction["excluded_mask"] = cursor.take("B")
-    packed_blocking_levels = cursor.take("H")
-    direction["blocking_levels"] = [
-        (packed_blocking_levels >> (index * 4)) & 0xF for index in range(4)
-    ]
-    return direction
-
-
-def _try_decode_fixed_gain_amplitude(payload: bytes) -> dict[str, Any] | None:
-    if not 84 <= len(payload) <= 124:
-        return None
-    try:
-        cursor = _EvidenceCursor(payload)
-        if cursor.take("B") != 2:
-            return None
-        decoded = _take_fields(
-            cursor,
-            (
-                ("run_sequence", "I"),
-                ("evidence_sequence", "H"),
-                ("plan_digest", "Q"),
-                ("amplitude_index", "B"),
-                ("target_rpm", "i"),
-            ),
-        )
-        if decoded["amplitude_index"] >= 5 or decoded["target_rpm"] <= 0:
-            return None
-        decoded["directions"] = [
-            _take_fixed_gain_amplitude_direction(cursor),
-            _take_fixed_gain_amplitude_direction(cursor),
-        ]
-        cursor.finish()
-    except DecodeError:
-        return None
-    decoded["namespace"] = "fixed_gain_amplitude"
-    decoded["record_kind"] = "fixed_gain_amplitude_amplitude"
-    return decoded
-
-
 _INTEGRAL_OBSERVATION_LEGACY_LENGTHS = (46, 47, 77, 80, 96)
 
 _INTEGRAL_OBSERVATION_LENGTHS_WITH_DRIFT = (50, 51, 81, 84, 100)
@@ -651,111 +576,7 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
     kind = cursor.take("B")
     if kind in RETIRED_VELOCITY_SWEEP_EVIDENCE_KINDS:
         raise DecodeError(f"retired velocity-sweep evidence kind {kind}")
-    if kind == 0 and len(payload) in (43, 56, 72, 73, 75):
-        decoded = _take_fields(
-            cursor,
-            (
-                ("run_sequence", "I"),
-                ("evidence_sequence", "H"),
-                ("plan_digest", "Q"),
-                ("fragment", "B"),
-            ),
-        )
-        fragment = decoded["fragment"]
-        if fragment == 0 and len(payload) in (73, 75):
-            decoded.update(_take_fields(cursor, (("schema_revision", "H"), ("channel", "B"))))
-            decoded.update(_take_build_identity(cursor))
-            decoded.update(
-                _take_fields(
-                    cursor,
-                    (
-                        ("acceptance_schema_revision", "H"),
-                        ("acceptance_plan_digest", "Q"),
-                        ("order", "B"),
-                        ("selected_p", "H"),
-                        ("selected_i", "H"),
-                        ("qualifier_bits", "H"),
-                        ("pwm_hz", "I"),
-                        ("encoder_counts_per_rev", "I"),
-                    ),
-                )
-            )
-            decoded["target_rpm"] = [cursor.take("i") for _ in range(5)]
-            decoded.update(
-                _take_fields(
-                    cursor,
-                    (
-                        ("amplitude_count", "B"),
-                        ("expected_observations", "H"),
-                        ("family_size", "H"),
-                    ),
-                )
-            )
-        elif fragment == 1 and len(payload) in (56, 72):
-            decoded.update(
-                _take_fields(
-                    cursor,
-                    (
-                        ("moving_stroke_us", "I"),
-                        ("zero_settle_us", "I"),
-                        ("analysis_budget_us", "I"),
-                        ("nominal_workflow_ms", "I"),
-                        ("maximum_workflow_ms", "I"),
-                        ("recovery_origin_band_counts", "I"),
-                    ),
-                )
-            )
-            if len(payload) == 72:
-                decoded["recovery_lower_rate_q"] = [
-                    cursor.take("Q"),
-                    cursor.take("Q"),
-                ]
-            decoded.update(
-                _take_fields(
-                    cursor,
-                    (
-                        ("recovery_nominal_slot_us", "I"),
-                        ("recovery_maximum_slot_us", "I"),
-                        ("recovery_slot_count", "B"),
-                        ("hard_torque_limit", "H"),
-                        ("usable_torque_limit", "H"),
-                        ("limit_evidence_capability", "B"),
-                        ("recovery_quantization_exposed", "B"),
-                        ("probe_constrained_test_point", "B"),
-                    ),
-                )
-            )
-        elif (fragment, len(payload)) == (2, 43):
-            decoded.update(
-                _take_fields(
-                    cursor,
-                    (
-                        ("requested_velocity_mrev_s", "I"),
-                        ("machine_velocity_ceiling_mrev_s", "I"),
-                        ("requested_velocity_source", "B"),
-                        ("max_stroke_travel_mrev", "I"),
-                        ("settle_travel_reserve_mrev", "I"),
-                        ("negative_position_headroom_mrev", "I"),
-                        ("positive_position_headroom_mrev", "I"),
-                        ("max_duration_ms", "H"),
-                    ),
-                )
-            )
-        else:
-            raise DecodeError("amplitude plan fragment shape is invalid")
-        if "order" in decoded:
-            packed = int(decoded["order"])
-            amplitude_order = packed & 0x0F
-            slot_order = packed >> 4
-            if amplitude_order not in (1, 2):
-                raise DecodeError("amplitude plan amplitude order is invalid")
-            if slot_order not in (0, 1):
-                raise DecodeError("amplitude plan slot order is invalid")
-            decoded["amplitude_order"] = amplitude_order
-            decoded["slot_order"] = slot_order
-        decoded["namespace"] = "fixed_gain_amplitude"
-        decoded["record_kind"] = "fixed_gain_amplitude_plan"
-    elif kind == 0 and len(payload) in (65, 82, 98):
+    if kind == 0 and len(payload) == 65:
         decoded = _take_fields(
             cursor,
             (
@@ -782,19 +603,6 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
         )
         decoded["evidence_sequence"] = 1
         decoded["record_kind"] = "integral_plan_marker"
-        if len(payload) in (82, 98):
-            if cursor.take("B") != 1:
-                raise DecodeError("fixed-gain-amplitude plan marker is invalid")
-            digest_low = cursor.take("I")
-            decoded["acceptance_plan_digest"] = digest_low | (cursor.take("I") << 32)
-            decoded["qualifier_bits"] = cursor.take("i")
-            if cursor.take("i") != 0:
-                raise DecodeError("fixed-gain-amplitude plan marker is invalid")
-        if len(payload) == 98:
-            decoded["recovery_lower_rate_q"] = [
-                cursor.take("Q"),
-                cursor.take("Q"),
-            ]
     elif kind == 0:
         decoded = _take_fields(
             cursor,
@@ -913,8 +721,6 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             raise DecodeError(f"unknown velocity-integral plan fragment {fragment}")
         decoded["plan_fragment"] = fragment
         decoded["plan_digest"] = decoded["plan_digest_low"] | (decoded["plan_digest_high"] << 32)
-    elif kind == 2 and (amplitude := _try_decode_fixed_gain_amplitude(payload)) is not None:
-        return amplitude
     elif kind == 2 and len(payload) in (
         *_INTEGRAL_OBSERVATION_LEGACY_LENGTHS,
         *_INTEGRAL_OBSERVATION_LENGTHS_WITH_DRIFT,
@@ -1013,56 +819,6 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
                     raise DecodeError("a rejected tail cannot pass every gate")
         decoded["plan_digest"] = decoded["plan_digest_low"] | (decoded["plan_digest_high"] << 32)
         decoded["record_kind"] = "integral_observation"
-    elif kind == 3 and len(payload) == 67:
-        decoded = _take_fields(
-            cursor,
-            (
-                ("run_sequence", "I"),
-                ("evidence_sequence", "H"),
-                ("schema_revision", "H"),
-                ("acceptance_plan_digest", "Q"),
-                ("plan_digest", "Q"),
-                ("digest", "Q"),
-                ("outcome", "B"),
-                ("cause", "B"),
-            ),
-        )
-        decoded["attempted_masks"] = [cursor.take("B") for _ in range(2)]
-        decoded["eligible_masks"] = [cursor.take("B") for _ in range(2)]
-        decoded["current_terminus_masks"] = [cursor.take("B") for _ in range(2)]
-        decoded["unattempted_masks"] = [cursor.take("B") for _ in range(2)]
-        decoded.update(
-            _take_fields(
-                cursor,
-                (
-                    ("expected_observations", "H"),
-                    ("emitted_observations", "H"),
-                    ("expected_amplitudes", "B"),
-                    ("emitted_amplitudes", "B"),
-                    ("qualifier_bits", "H"),
-                    ("run_started_us", "Q"),
-                    ("run_completed_us", "Q"),
-                ),
-            )
-        )
-        decoded["outcome_name"] = {
-            0: "Complete",
-            1: "Inconclusive",
-            2: "Fault",
-            3: "Failed",
-        }.get(decoded["outcome"], "Unknown")
-        decoded["cause_name"] = {
-            0: "None",
-            1: "InsufficientSharedFloor",
-            2: "RecoveryUnavailable",
-            3: "MissingAcceptancePoint",
-            4: "AcceptancePointIdentityMismatch",
-            5: "AmplitudeOrderMismatch",
-            6: "EvidenceCapacity",
-            7: "EvidenceIntegrity",
-        }.get(decoded["cause"], "Unknown")
-        decoded["namespace"] = "fixed_gain_amplitude"
-        decoded["record_kind"] = "fixed_gain_amplitude_terminal"
     elif kind == 3 and len(payload) in (70, 71, 83, 84):
         decoded = _take_fields(
             cursor,

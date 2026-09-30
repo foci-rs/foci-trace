@@ -2590,37 +2590,6 @@ def test_velocity_integral_audit_is_added_only_when_present() -> None:
     assert "rest_boundary={'positive_rung_index': 3, 'slot': 5}" in format_analysis(analysis)
 
 
-def test_fixed_gain_amplitude_audit_keeps_its_namespace_in_output() -> None:
-    empty = velocity_analysis_to_json(CaptureAnalysis(devices=[]))
-    audit = {
-        "device_index": 0,
-        "source_index": 1,
-        "run_sequence": 9,
-        "matches_firmware": True,
-        "plan": {"order": 2, "selected_p": 1_024, "selected_i": 1_024},
-        "terminal": {
-            "outcome": 0,
-            "cause": 0,
-            "outcome_name": "Complete",
-            "cause_name": "None",
-        },
-        "cross_run_comparison": {
-            "maximum_observed_displacement_q": 35,
-            "maximum_displacement_kind": "observed_bound",
-        },
-    }
-    analysis = CaptureAnalysis(devices=[], fixed_gain_amplitude_audits=[audit])
-
-    encoded = velocity_analysis_to_json(analysis)
-    rendered = format_analysis(analysis)
-
-    assert "fixed_gain_amplitude_runs" not in empty
-    assert encoded["fixed_gain_amplitude_runs"] == [audit]
-    assert "namespace=fixed_gain_amplitude" in rendered
-    assert "outcome=Complete cause=None" in rendered
-    assert "observed_bound_q=35" in rendered
-
-
 def test_breakaway_campaign_audit_is_serialized_in_both_json_views() -> None:
     audit = {
         "matches_firmware": True,
@@ -2674,61 +2643,6 @@ def test_recovery_records_route_to_their_owning_stage(monkeypatch) -> None:
         "integral_rest_boundary",
         "integral_terminal",
     ]
-
-
-def test_amplitude_records_bypass_integral_replay(monkeypatch) -> None:
-    from foci_trace import analyze
-
-    state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
-    payloads = (
-        {
-            "namespace": "fixed_gain_amplitude",
-            "record_kind": "fixed_gain_amplitude_plan",
-            "run_sequence": 9,
-            "fragment": 0,
-        },
-        {"record_kind": "integral_observation", "run_sequence": 9},
-        {
-            "namespace": "fixed_gain_amplitude",
-            "record_kind": "fixed_gain_amplitude_amplitude",
-            "run_sequence": 9,
-        },
-        {"record_kind": "recovery_rest", "run_sequence": 9, "stage": 1},
-        {
-            "namespace": "fixed_gain_amplitude",
-            "record_kind": "fixed_gain_amplitude_terminal",
-            "run_sequence": 9,
-        },
-    )
-    state.velocity_sweep_evidence = [
-        analyze._VelocitySweepEvidenceFrame(index, 0, bytes((index,)), payload)
-        for index, payload in enumerate(payloads, 1)
-    ]
-    called = {"integral": False, "amplitude": False}
-
-    monkeypatch.setattr(
-        analyze,
-        "audit_velocity_integral",
-        lambda *_args: called.update(integral=True),
-    )
-
-    def amplitude(records):
-        called["amplitude"] = True
-        assert [value["record_kind"] for _raw, value in records] == [
-            "fixed_gain_amplitude_plan",
-            "integral_observation",
-            "fixed_gain_amplitude_amplitude",
-            "recovery_rest",
-            "fixed_gain_amplitude_terminal",
-        ]
-        return {"plan": None, "terminal": None}
-
-    monkeypatch.setattr(analyze, "audit_fixed_gain_amplitude", amplitude)
-
-    analyze._velocity_integral_audits({0: state})
-    analyze._fixed_gain_amplitude_audits({0: state})
-
-    assert called == {"integral": False, "amplitude": True}
 
 
 def test_event_151_is_verified_against_its_causal_raw_suffixes() -> None:
@@ -3417,67 +3331,6 @@ def test_marker_based_bounds_none_when_only_foci_source_baseline_available() -> 
     observations = [_pb(300, 0, 0, 1), _pb(700, 0, 1, 2)]
     status = [_so(0, 0, source_kind=_SOURCE_KIND_FOCI), _so(1000, 0)]
     assert _marker_based_phase_bounds(observations, status, [], 0, 100, 900) is None
-
-
-def test_reverse_slot_order_amplitude_runs_are_compared(monkeypatch) -> None:
-    from foci_trace import analyze
-
-    state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
-    state.velocity_sweep_evidence = [
-        analyze._VelocitySweepEvidenceFrame(
-            tick,
-            0,
-            b"",
-            {
-                "namespace": "fixed_gain_amplitude",
-                "record_kind": "fixed_gain_amplitude_plan",
-                "run_sequence": run_sequence,
-                "fragment": 0,
-            },
-        )
-        for tick, run_sequence in ((1, 10), (2, 11))
-    ]
-    plans = {
-        10: {"order": 0x11, "amplitude_order": 1, "slot_order": 1},
-        11: {"order": 0x12, "amplitude_order": 2, "slot_order": 1},
-    }
-
-    def amplitude(records):
-        run_sequence = int(records[0][1]["run_sequence"])
-        return {"plan": dict(plans[run_sequence]), "terminal": {"outcome": 0}}
-
-    monkeypatch.setattr(analyze, "audit_fixed_gain_amplitude", amplitude)
-    monkeypatch.setattr(analyze, "compare_amplitude_runs", lambda *_args: {"compared": True})
-
-    audits = analyze._fixed_gain_amplitude_audits({0: state})
-
-    assert audits[1]["cross_run_comparison"] == {"compared": True}
-
-
-def test_amplitude_run_that_changes_source_is_reported_not_raised() -> None:
-    from foci_trace import analyze
-
-    state = analyze._DeviceState(report=analyze.DeviceReport(device_index=0))
-    state.velocity_sweep_evidence = [
-        analyze._VelocitySweepEvidenceFrame(
-            tick,
-            source_index,
-            b"",
-            {
-                "namespace": "fixed_gain_amplitude",
-                "record_kind": "fixed_gain_amplitude_plan",
-                "run_sequence": 12,
-                "fragment": 0,
-            },
-        )
-        for tick, source_index in ((1, 0), (2, 1))
-    ]
-
-    (audit,) = analyze._fixed_gain_amplitude_audits({0: state})
-
-    assert audit["run_sequence"] == 12
-    assert audit["matches_firmware"] is False
-    assert audit["mismatches"] == ["fixed-gain-amplitude evidence changed source index"]
 
 
 def test_integral_run_that_changes_source_is_reported_not_raised() -> None:
