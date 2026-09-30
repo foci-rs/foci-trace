@@ -3237,7 +3237,10 @@ def test_analyze_capture_reports_tracking_lag_and_budget() -> None:
     assert report.budgets[0].bracketed and report.budgets[0].max_spi_sample_cycles == 95_000
     text = format_summary(analysis.devices, tracking_lag=report, mm_per_rev=40.0)
     assert "lag=-1.76ms" in text
-    assert "budget dev0 bracketed=True max_cycles=95000 threshold=120000 pressure_delta=0" in text
+    assert "budget dev0 bracketed=True" in text
+    assert "max_cycles=95000" in text
+    assert "pressure_delta=0" in text
+    assert "within_budget=True" in text
 
     full = format_analysis(analysis, mm_per_rev=40.0)
     assert "lag=-1.76ms" in full and "budget dev0 bracketed=True" in full

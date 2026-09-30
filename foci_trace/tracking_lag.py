@@ -92,6 +92,18 @@ class SamplerBudget:
     max_spi_sample_cycles: int | None
     pressure_delta: int | None
     threshold_cycles: int | None
+    max_before_motion: int | None = None
+
+    @property
+    def within_budget(self) -> bool | None:
+        """Whether no sample crossed the threshold during this capture.
+
+        ``max_spi_sample_cycles`` is a boot-lifetime maximum, so it can carry an earlier
+        capture's overrun; only the pressure-count delta is scoped to this capture.
+        """
+        if not self.bracketed or self.pressure_delta is None:
+            return None
+        return self.pressure_delta == 0
 
 
 @dataclass
@@ -447,6 +459,7 @@ def _sampler_budget(
             - before[0].payload["trace_deadline_pressure_count"]
         ),
         threshold_cycles=BOARD_THRESHOLD_CYCLES.get(product),
+        max_before_motion=before[0].payload["max_spi_sample_cycles"],
     )
 
 
@@ -528,8 +541,10 @@ def format_tracking_lag(report: TrackingLagReport, mm_per_rev: float | None = No
         (
             f"budget dev{budget.device_index} bracketed=True "
             f"max_cycles={budget.max_spi_sample_cycles} "
+            f"max_at_start={budget.max_before_motion} "
             f"threshold={budget.threshold_cycles} "
-            f"pressure_delta={budget.pressure_delta}"
+            f"pressure_delta={budget.pressure_delta} "
+            f"within_budget={budget.within_budget}"
         )
         if budget.bracketed
         else f"budget dev{budget.device_index} bracketed=False {budget.reason}"

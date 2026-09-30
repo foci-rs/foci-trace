@@ -284,6 +284,28 @@ def test_budget_reads_board_source_only_and_sees_late_pressure():
     assert b.max_spi_sample_cycles == 130_000
 
 
+def test_capture_inheriting_an_earlier_max_over_threshold_is_within_budget():
+    s = Stream()
+    s.status(0, pressure=1, max_cycles=130_000)
+    s.cruise(100, 450, 75, -144)
+    s.status(800, pressure=1, max_cycles=130_000)
+    report = s.run()
+    b = report.budgets[0]
+    assert b.pressure_delta == 0
+    assert b.max_before_motion == 130_000
+    assert b.within_budget is True
+    assert "within_budget=True" in "\n".join(tl.format_tracking_lag(report))
+
+
+def test_capture_with_new_pressure_events_is_not_within_budget():
+    s = Stream()
+    s.status(0, pressure=0, max_cycles=90_000)
+    s.cruise(100, 450, 75, -144)
+    s.status(800, pressure=1, max_cycles=130_000)
+    b = s.run().budgets[0]
+    assert b.within_budget is False
+
+
 def test_status_only_capture_yields_no_motion_budget_and_no_segments():
     s = Stream()
     s.status(0)
