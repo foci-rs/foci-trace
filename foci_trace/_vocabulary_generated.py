@@ -11,7 +11,6 @@ PHASE_NAMES: dict[int, str] = {
     8: "InnerDone",
     18: "BreakawayProportionalAcquisition",
     19: "IntegralGainResponseCharacterization",
-    20: "FixedGainAmplitudeValidation",
     21: "ReversalStandstillRobustnessGate",
     16: "EncoderAlign",
     17: "ClosedLoopActivation",

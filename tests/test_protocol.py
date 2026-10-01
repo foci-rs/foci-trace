@@ -1560,18 +1560,18 @@ def test_retired_velocity_sweep_evidence_kinds_are_reserved_not_reused() -> None
 def test_commission_phase_names_cover_live_wire_codes_only() -> None:
     """The outer block is a contiguous run of workflow-specific codes; codes
     9-15 (the retired `MechanicalId`/`VelocityTune`/`VelocityValidate` and the
-    pre-renumber outer block) and 22-25 (the retired `PositionTune`/
+    pre-renumber outer block), 20 (the retired fixed-gain amplitude validation)
+    and 22-25 (the retired `PositionTune`/
     `FilterTune`/`Commit`/`OuterDone`) are never reused; 26 and 27 are the
     inner-block `GainFloorMeasurement` and the live outer `PositionTune`
     added after that gap.
     """
-    live_codes = {1, 2, 3, 4, 5, 6, 7, 8, 16, 17, 18, 19, 20, 21, 26, 27}
+    live_codes = {1, 2, 3, 4, 5, 6, 7, 8, 16, 17, 18, 19, 21, 26, 27}
     assert set(PHASE_NAMES) == live_codes
     assert PHASE_NAMES[26] == "GainFloorMeasurement"
     assert PHASE_NAMES[27] == "PositionTune"
     assert PHASE_NAMES[18] == "BreakawayProportionalAcquisition"
     assert PHASE_NAMES[19] == "IntegralGainResponseCharacterization"
-    assert PHASE_NAMES[20] == "FixedGainAmplitudeValidation"
     assert PHASE_NAMES[21] == "ReversalStandstillRobustnessGate"
 
 
