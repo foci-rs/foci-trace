@@ -509,6 +509,27 @@ def _f32(value: float | int) -> float:
     return struct.unpack("<f", struct.pack("<f", value))[0]
 
 
+def _u128_to_f32(value: int) -> float:
+    """Convert a non-negative integer to single precision the way firmware's `as f32` does.
+
+    Rounds once, to nearest with ties to even, on the integer itself. Routing a
+    value wider than 53 bits through `float()` first would round twice.
+    """
+    bits = value.bit_length()
+    if bits <= 24:
+        return float(value)
+    shift = bits - 24
+    mantissa = value >> shift
+    remainder = value & ((1 << shift) - 1)
+    half = 1 << (shift - 1)
+    if remainder > half or (remainder == half and mantissa & 1):
+        mantissa += 1
+        if mantissa == 1 << 24:
+            mantissa >>= 1
+            shift += 1
+    return math.ldexp(mantissa, shift)
+
+
 FNV1A64_OFFSET = 0xCBF29CE484222325
 FNV1A64_PRIME = 0x100000001B3
 

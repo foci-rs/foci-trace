@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+import math
 from itertools import combinations
 from typing import Any
 
@@ -15,8 +16,11 @@ from .velocity_measurement import (
     UnsupportedIntegralRepresentationError,
     VelocityObservation,
     _confidence_half_width,
+    _confidence_multiplier,
     _encode_rate_values,
+    _f32,
     _stationary_suffix,
+    _u128_to_f32,
     _upper_bound_signed,
     _upper_bound_unsigned,
     audit_recovery_rest_geometry,
@@ -1003,6 +1007,69 @@ def _direction_consensus(
     )
 
 
+def pooled_deficit_interval(
+    intervals: list[tuple[int, int]], family_size: int, positive_rung_count: int
+) -> tuple[int, int]:
+    """Pool one direction's usable deficit intervals with firmware's arithmetic."""
+    count = len(intervals)
+    endpoint_sum = sum(low + high for low, high in intervals)
+    squared_width_sum = sum((high - low) ** 2 for low, high in intervals)
+    m_2k = _f32(_confidence_multiplier(2 * positive_rung_count))
+    m_family = _f32(_confidence_multiplier(family_size))
+    spread = _f32(math.sqrt(_u128_to_f32(squared_width_sum)))
+    half_width = math.ceil(_f32(_f32(m_2k * spread) / _f32(_f32(2.0 * count) * m_family)))
+    divisor = 2 * count
+    return (
+        endpoint_sum // divisor - half_width,
+        -((-endpoint_sum) // divisor) + half_width,
+    )
+
+
+def integral_response_reaches_target(
+    target_rpm: int,
+    encoder_counts_per_rev: int,
+    deficits: tuple[tuple[int, int], tuple[int, int]],
+) -> bool:
+    """Test whether signed deficit intervals prove at least the integral target response."""
+    if target_rpm <= 0 or encoder_counts_per_rev <= 0 or any(low > high for low, high in deficits):
+        raise ValueError("integral response target is undefined")
+    target_numerator = target_rpm * encoder_counts_per_rev * 1_000
+    target_floor = target_numerator * 98
+    (_forward_low, forward_high), (reverse_low, _reverse_high) = deficits
+    forward_response = (target_numerator - forward_high * 60) * 100
+    reverse_response = (target_numerator + reverse_low * 60) * 100
+    return forward_response >= target_floor and reverse_response >= target_floor
+
+
+def expected_target_terminus(
+    rung_observations: dict[int, list[list[dict[str, object]]]], plan: dict[str, object]
+) -> int | None:
+    """Return the first positive rung whose pooled intervals reach the target in both directions."""
+    family_size = int(plan["family_size"])
+    positive_rung_count = int(plan["positive_rung_count"])
+    for rung_index in range(1, positive_rung_count + 1):
+        directions = rung_observations.get(rung_index)
+        if directions is None:
+            continue
+        pooled: list[tuple[int, int]] = []
+        for observations in directions:
+            if int(_direction_consensus(observations)["classification"]) != 0:
+                break
+            usable = [
+                tuple(item["deficit_interval_q"])
+                for item in observations
+                if int(item["classification"]) == 0
+            ]
+            pooled.append(pooled_deficit_interval(usable, family_size, positive_rung_count))
+        if len(pooled) == 2 and integral_response_reaches_target(
+            int(plan["target_velocity_rpm"]),
+            int(plan["encoder_counts_per_rev"]),
+            (pooled[0], pooled[1]),
+        ):
+            return rung_index - 1
+    return None
+
+
 def _validate_plan(plan: dict[str, object], mismatches: list[str]) -> None:
     schema_revision = int(plan["schema_revision"])
     build_features = capture_build_features(plan)
@@ -1846,6 +1913,7 @@ def audit_velocity_integral(
         if observed_order[: len(expected_order)] != expected_order:
             mismatches.append("integral recovery causal order differs from the fixed schedule")
     rung_results: dict[int, list[dict[str, object]]] = {}
+    rung_observations: dict[int, list[list[dict[str, object]]]] = {}
     for record in rung_records:
         rung_index = int(record["rung_index"])
         if rung_index in rung_results:
@@ -1859,6 +1927,7 @@ def audit_velocity_integral(
                 f"rung {rung_index} reports a response horizon outside a combined workflow"
             )
         expected_directions: list[dict[str, object]] = []
+        direction_observations: list[list[dict[str, object]]] = []
         for direction in range(2):
             keys = [
                 (rung_index, slot_for_observation(plan_slot_order(plan), repeat, direction))
@@ -1870,6 +1939,7 @@ def audit_velocity_integral(
                 )
                 continue
             observations = [reconstructed[key] for key in keys]
+            direction_observations.append(observations)
             expected = _direction_consensus(observations)
             expected["direction"] = direction
             expected["kind"] = (
@@ -1903,6 +1973,23 @@ def audit_velocity_integral(
             expected_directions.append(expected)
         if len(expected_directions) == 2:
             rung_results[rung_index] = expected_directions
+            rung_observations[rung_index] = direction_observations
+    expected_terminus = expected_target_terminus(rung_observations, plan)
+    for record in rung_records:
+        if not record.get("target_terminus_present", False):
+            continue
+        rung_index = int(record["rung_index"])
+        expected_on_rung = (
+            expected_terminus
+            if expected_terminus is not None and rung_index - 1 >= expected_terminus
+            else None
+        )
+        reported_terminus = record.get("target_terminus")
+        if reported_terminus != expected_on_rung:
+            mismatches.append(
+                f"rung {rung_index} target terminus: firmware={reported_terminus} "
+                f"offline={expected_on_rung}"
+            )
 
     positive_count = int(plan["positive_rung_count"])
     outcome = int(terminal["outcome"])

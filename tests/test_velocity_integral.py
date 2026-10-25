@@ -21,13 +21,16 @@ from foci_trace.velocity_integral import (
     delta_e,
     depth_three_consensus,
     derive_integral_ladder,
+    expected_target_terminus,
     integral_numerator_for_build,
     integral_numerator_for_build_features,
     integral_plan_digest,
+    integral_response_reaches_target,
     integral_schema_is_known,
     integral_slot_transition,
     integral_stabilized_recovery_rest,
     observation_role,
+    pooled_deficit_interval,
     reconstruct_observation,
     recovery_quantization_exposed,
     select_transition_capable_test_point,
@@ -39,6 +42,7 @@ from foci_trace.velocity_measurement import (
     BUILD_FEATURE_Q4_12_GAINS,
     BUILD_FEATURE_STANDARD_METER_QUANTUM,
     VelocityObservation,
+    _u128_to_f32,
     audit_rung_origin_recovery,
     capture_build_features,
     reconstruct_build_features,
@@ -46,6 +50,9 @@ from foci_trace.velocity_measurement import (
 
 LEGACY_Q8_8_BUILD = 0x75536758
 CURRENT_Q4_12_BUILD = 0x05E21F75
+
+_BELOW_TARGET_SETTLED_COUNTS = 17
+_AT_TARGET_SETTLED_COUNTS = 18
 
 _DECLARED_DIRECTIONS: dict[int, tuple[int, ...]] = {
     SLOT_ORDER_FORWARD_FIRST: (0, 1, 0, 1, 0, 1, 0, 1),
@@ -1121,6 +1128,9 @@ def _rung_record(
     plan_digest: int,
     directions: list[dict[str, object]],
     plan: dict[str, object] | None = None,
+    *,
+    target_terminus: int | None = None,
+    carries_terminus: bool = True,
 ) -> tuple[bytes, dict[str, object]]:
     raw = bytearray((3,))
     raw += struct.pack("<IHQBH", 7, sequence, plan_digest, rung_index, i_raw)
@@ -1164,6 +1174,8 @@ def _rung_record(
             raw += struct.pack("<ii", *component)
         for _ in range(2 - len(components)):
             raw += struct.pack("<ii", 0, 0)
+    if carries_terminus:
+        raw += struct.pack("<B", 0 if target_terminus is None else target_terminus + 1)
     return bytes(raw), {
         "record_kind": "integral_rung",
         "run_sequence": 7,
@@ -1173,6 +1185,8 @@ def _rung_record(
         "i_raw": i_raw,
         **horizon,
         "directions": directions,
+        "target_terminus": target_terminus,
+        "target_terminus_present": carries_terminus,
     }
 
 
@@ -1195,6 +1209,8 @@ def _synthetic_complete_capture(
     *,
     forge_standalone: bool = False,
     overrides: dict[str, object] | None = None,
+    passing_from_rung: int | None = None,
+    carries_terminus: bool = True,
 ) -> tuple[list[VelocityObservation], list[tuple[bytes, dict[str, object]]]]:
     """Build a complete, internally consistent Integral capture.
 
@@ -1229,14 +1245,20 @@ def _synthetic_complete_capture(
     raw_observations: list[VelocityObservation] = []
     gains = [0, *plan["positive_i"], 0]
     moving_recovery_rung = 1
+    rung_observations: dict[int, list[list[dict[str, object]]]] = {}
     for rung_index, gain in enumerate(gains):
         direction_results: list[list[dict[str, object]]] = [[], []]
         ordinary_owner = 3 if rung_index in (0, len(gains) - 1) else 4
+        settled_counts = (
+            _AT_TARGET_SETTLED_COUNTS
+            if passing_from_rung is not None and rung_index >= passing_from_rung
+            else _BELOW_TARGET_SETTLED_COUNTS
+        )
         for slot in range(8):
             direction = _DECLARED_DIRECTIONS[slot_order][slot]
             raw = [
                 VelocityObservation(
-                    17 if direction == 0 else -17,
+                    settled_counts if direction == 0 else -settled_counts,
                     1_000,
                     direction,
                     rung_index * 8 + slot,
@@ -1285,6 +1307,7 @@ def _synthetic_complete_capture(
                     "observation_classes": [0, 0, 0, 0],
                 }
             )
+        rung_observations[rung_index] = direction_results
         records.append(
             _rung_record(
                 rung_index,
@@ -1293,6 +1316,8 @@ def _synthetic_complete_capture(
                 int(plan["plan_digest"]),
                 directions,
                 plan,
+                target_terminus=expected_target_terminus(rung_observations, plan),
+                carries_terminus=carries_terminus,
             )
         )
         sequence += 1
@@ -3064,3 +3089,98 @@ def test_faulted_terminal_preserving_wrong_anchor_masks_is_rejected() -> None:
         "terminal opening-anchor availability mask differs from replay",
         "terminal bookend availability mask differs from replay",
     ]
+
+
+def test_u128_to_f32_rounds_to_nearest_even_above_the_f64_mantissa() -> None:
+    assert _u128_to_f32(2**60 + 2**36) == float(2**60)
+    assert _u128_to_f32(2**60 + 2**36 + 1) == float(2**60 + 2**37)
+    assert _u128_to_f32(2**60 + 3 * 2**36) == float(2**60 + 2**38)
+    assert _u128_to_f32(2**24 - 1) == float(2**24 - 1)
+
+
+def test_pooled_interval_matches_firmware_floor_and_ceil() -> None:
+    assert pooled_deficit_interval([(3, 3), (4, 4), (6, 6)], 56, 12) == (4, 5)
+    assert pooled_deficit_interval([(-3, -3), (-4, -4), (-6, -6)], 56, 12) == (-5, -4)
+
+
+def test_pooled_half_width_follows_the_two_k_multiplier() -> None:
+    assert pooled_deficit_interval([(-500, 500)], 56, 12) == (-450, 450)
+    assert pooled_deficit_interval([(-500, 500)], 56, 6) == (-409, 409)
+
+
+def test_pooled_regression_pair_reaches_target_where_the_component_does_not() -> None:
+    forward = [(-369_600, 404_800), (-404_800, 404_800), (-440_000, 404_800), (-492_800, 422_400)]
+    reverse = [(-high, -low) for low, high in forward]
+    pooled = (
+        pooled_deficit_interval(forward, 56, 12),
+        pooled_deficit_interval(reverse, 56, 12),
+    )
+    assert integral_response_reaches_target(264, 4_000, pooled) is True
+    assert (
+        integral_response_reaches_target(264, 4_000, ((-369_600, 404_800), (-404_800, 369_600)))
+        is False
+    )
+
+
+def _rung_record_index(records: list[tuple[bytes, dict[str, object]]], rung_index: int) -> int:
+    return next(
+        index
+        for index, (_raw, value) in enumerate(records)
+        if value["record_kind"] == "integral_rung" and int(value["rung_index"]) == rung_index
+    )
+
+
+def test_complete_capture_audits_the_target_terminus_on_every_rung() -> None:
+    raw, records = _synthetic_complete_capture()
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["matches_firmware"] is True
+    assert all(
+        value["target_terminus"] is None
+        for _raw, value in records
+        if value["record_kind"] == "integral_rung"
+    )
+
+
+def test_passing_rung_capture_stamps_the_terminus_from_the_deciding_rung_onward() -> None:
+    raw, records = _synthetic_complete_capture(passing_from_rung=3)
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["matches_firmware"] is True
+    stamped = [
+        (int(value["rung_index"]), value["target_terminus"])
+        for _raw, value in records
+        if value["record_kind"] == "integral_rung"
+    ]
+    assert stamped == [(0, None), (1, None), (2, None), (3, 2), (4, 2), (5, 2), (6, 2)]
+
+
+def test_rung_record_with_an_early_target_terminus_is_a_mismatch() -> None:
+    raw, records = _synthetic_complete_capture()
+    records[_rung_record_index(records, 1)][1]["target_terminus"] = 0
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["matches_firmware"] is False
+    assert any("rung 1 target terminus" in item for item in audit["mismatches"])
+
+
+def test_rung_record_that_drops_a_recorded_terminus_is_a_mismatch() -> None:
+    raw, records = _synthetic_complete_capture(passing_from_rung=3)
+    records[_rung_record_index(records, 3)][1]["target_terminus"] = None
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["matches_firmware"] is False
+    assert any("rung 3 target terminus" in item for item in audit["mismatches"])
+
+
+def test_rung_records_without_the_terminus_byte_are_not_audited_for_it() -> None:
+    raw, records = _synthetic_complete_capture(passing_from_rung=3, carries_terminus=False)
+
+    audit = audit_velocity_integral(raw, records)
+
+    assert audit["matches_firmware"] is True
+    assert not any("target terminus" in item for item in audit["mismatches"])

@@ -867,8 +867,10 @@ def _decode_velocity_sweep_evidence(payload: bytes) -> dict[str, Any]:
             decoded["target_terminus"] = (
                 None if target_terminus_plus_one == 0 else target_terminus_plus_one - 1
             )
+            decoded["target_terminus_present"] = True
         else:
             decoded["target_terminus"] = None
+            decoded["target_terminus_present"] = False
         decoded["plan_digest"] = decoded["plan_digest_low"] | (decoded["plan_digest_high"] << 32)
         decoded["record_kind"] = "integral_rung"
     elif kind == 4 and len(payload) in (58, 59, 61, 62):
