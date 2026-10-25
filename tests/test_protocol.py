@@ -2688,6 +2688,21 @@ def test_breakaway_campaign_terminal_cause_26_rejected_below_protocol_19() -> No
         decode_breakaway_record(payload, protocol_version=18)
 
 
+def test_breakaway_campaign_terminal_cause_28_decodes_at_the_current_protocol() -> None:
+    from foci_trace.protocol import PROTOCOL_VERSION, decode_breakaway_record
+
+    base = bytes([12]) + struct.pack(
+        "<IHBBBQ", _BW_RUN_SEQUENCE, _BW_EVIDENCE_SEQUENCE, 2, 28, 0, 0
+    )
+    payload = base + bytes([0])
+
+    decoded = decode_breakaway_record(payload, protocol_version=PROTOCOL_VERSION)
+
+    assert decoded["record_kind"] == "breakaway_campaign_terminal"
+    assert decoded["terminal_cause_name"] == "confirmation_no_damped_candidate"
+    assert decoded["accepted"] == 0
+
+
 def test_breakaway_event_ids_match_the_firmware_trace_events_table() -> None:
     from foci_trace.protocol import (
         BREAKAWAY_CAMPAIGN_EVENT_IDS,
