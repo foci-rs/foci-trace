@@ -1283,6 +1283,7 @@ BREAKAWAY_TERMINAL_CAUSE_NAMES = {
     26: "confirmation_integral_plan_refused",
     27: "confirmation_no_transition_capable_candidate",
     28: "confirmation_no_damped_candidate",
+    29: "confirmation_no_rung_below_ceiling",
 }
 
 
@@ -1298,7 +1299,7 @@ def _breakaway_terminal_cause_is_valid(cause: object, protocol_version: int) -> 
     if not isinstance(cause, int):
         return False
     if protocol_version >= PROTOCOL_VERSION_CAMPAIGN_TERMINAL_ERROR_CODE:
-        return cause in (0, 1) or 5 <= cause <= 28
+        return cause in (0, 1) or 5 <= cause <= 29
     if protocol_version >= PROTOCOL_VERSION_RAW_OBSERVATION_PID_OUTPUT_PEAK:
         return cause in (0, 1) or 5 <= cause <= 25
     if protocol_version == PROTOCOL_VERSION_PHYSICAL_EXCURSION_PROBE:
