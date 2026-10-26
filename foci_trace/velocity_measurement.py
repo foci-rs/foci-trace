@@ -16,6 +16,8 @@ RATE_Q_SCALE = 1_000
 RECOVERY_MOVING_ALLOWANCE_US = 512_000
 RECOVERY_ZERO_SETTLE_US = 500_000
 RECOVERY_ANALYSIS_BUDGET_US = 236_000
+RECOVERY_STABILIZATION_US = 500_000
+RECOVERY_RECENTER_DIVISOR = 6
 MIN_SELECTED_BLOCKS = 16
 MAX_MOVING_DRIFT_PPM = 200_000
 NO_REPORTABLE_DRIFT_RATIO_PPM = 0xFFFFFFFF
@@ -327,6 +329,13 @@ def recovery_return_distance_counts(start_offset_counts: int, origin_band_counts
     return max(0, abs(start_offset_counts) - origin_band_counts)
 
 
+def recovery_recenter_target_counts(origin_band_counts: int) -> int:
+    """Return the offset a drifted-but-in-band axis is re-centered to."""
+    if origin_band_counts <= 0:
+        raise ValueError("recovery origin band must be positive")
+    return origin_band_counts // RECOVERY_RECENTER_DIVISOR
+
+
 def recovery_runtime_us(
     return_distance_counts: int, lower_rate_q: int, primitive_cap_us: int
 ) -> int:
@@ -334,7 +343,7 @@ def recovery_runtime_us(
     if return_distance_counts < 0 or lower_rate_q <= 0 or primitive_cap_us <= 0:
         raise ValueError("recovery deadline inputs are invalid")
     measured_return_us = _div_ceil(return_distance_counts * 1_000_000 * RATE_Q_SCALE, lower_rate_q)
-    runtime_us = _recovery_allowance_us(measured_return_us)
+    runtime_us = _recovery_allowance_us(measured_return_us) + RECOVERY_STABILIZATION_US
     if runtime_us > primitive_cap_us:
         raise ValueError("recovery deadline exceeds primitive cap")
     return runtime_us
@@ -388,9 +397,12 @@ def audit_rung_origin_recovery(
     ):
         mismatches.append("recovery peak torque reached the usable limit")
     return_distance = recovery_return_distance_counts(start, origin_band)
+    recenter_target = recovery_recenter_target_counts(origin_band)
+    if return_distance == 0 and abs(start) > recenter_target:
+        return_distance = abs(start) - recenter_target
     expected: tuple[tuple[int, int], ...]
     runtime_us: int | None = None
-    if return_distance == 0:
+    if abs(start) <= recenter_target:
         expected = ((0, 0),)
     elif lower_rate_q == 0:
         expected = ((2, 2),)

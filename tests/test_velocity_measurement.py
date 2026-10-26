@@ -32,6 +32,7 @@ from foci_trace.velocity_measurement import (
     breakaway_replay_upward_probe,
     breakaway_required_relative_se_permille,
     plan_rung_origin_recovery,
+    recovery_recenter_target_counts,
     recovery_return_distance_counts,
     recovery_runtime_us,
     summarize_recovery_rest_diagnostics,
@@ -102,7 +103,7 @@ def test_recovery_geometry_and_deadlines_match_firmware_integer_arithmetic() -> 
     assert recovery_return_distance_counts(8_458, 1_000) == 7_458
     with pytest.raises(ValueError, match="primitive cap"):
         recovery_runtime_us(7_458, 3_150_000, 3_000_000)
-    assert recovery_runtime_us(7_458, 6_300_000, 3_000_000) == 2_431_810
+    assert recovery_runtime_us(7_458, 6_300_000, 3_000_000) == 2_931_810
 
 
 @pytest.mark.parametrize(
@@ -112,9 +113,9 @@ def test_recovery_geometry_and_deadlines_match_firmware_integer_arithmetic() -> 
         ({"binding_source": 5}, None),
         (
             {
-                "start_offset_counts": 900,
-                "closest_offset_counts": 900,
-                "final_offset_counts": 900,
+                "start_offset_counts": 100,
+                "closest_offset_counts": 100,
+                "final_offset_counts": 100,
                 "lower_rate_q": 0,
                 "moving_duration_us": 0,
                 "settle_duration_us": 0,
@@ -221,6 +222,109 @@ def test_recovery_audit_classifies_success_containment_and_fault_paths(
     else:
         assert audit["matches_firmware"] is False
         assert any(expected_mismatch in item for item in audit["mismatches"])
+
+
+def _middle_zone_record(**changes: int) -> dict[str, int]:
+    record = {
+        "stage": 1,
+        "rung_index": 4,
+        "velocity_p": 1_448,
+        "planned_velocity_mrev_s": 4_394,
+        "start_offset_counts": 233,
+        "closest_offset_counts": 120,
+        "final_offset_counts": 100,
+        "origin_band_counts": 1_000,
+        "lower_rate_q": 6_300_000,
+        "moving_duration_us": 300_000,
+        "settle_duration_us": 750_000,
+        "total_duration_us": 1_050_000,
+        "peak_torque_target_abs": 1_000,
+        "binding_source": 1,
+        "outcome": 1,
+    }
+    record.update(changes)
+    return record
+
+
+_MIDDLE_ZONE_PLAN = {
+    "planned_velocity_mrev_s": 4_394,
+    "recovery_origin_band_counts": 1_000,
+    "recovery_maximum_slot_us": 3_000_000,
+    "usable_torque_limit": 2_534,
+}
+
+
+def test_recenter_target_is_a_sixth_of_the_origin_band() -> None:
+    assert recovery_recenter_target_counts(1_000) == 166
+    assert recovery_recenter_target_counts(5) == 0
+
+
+def test_recovery_audit_expects_recenter_inside_the_band_beyond_the_recenter_target() -> None:
+    audit = audit_rung_origin_recovery(_middle_zone_record(), _MIDDLE_ZONE_PLAN)
+
+    assert audit["matches_firmware"] is True
+
+
+@pytest.mark.parametrize("start", (-991, -233, 167, 1_000))
+def test_recovery_audit_rejects_already_centered_for_a_drifted_start(start: int) -> None:
+    record = _middle_zone_record(
+        start_offset_counts=start,
+        closest_offset_counts=start,
+        final_offset_counts=0,
+        lower_rate_q=0,
+        moving_duration_us=0,
+        settle_duration_us=0,
+        total_duration_us=0,
+        binding_source=0,
+        outcome=0,
+    )
+
+    audit = audit_rung_origin_recovery(record, _MIDDLE_ZONE_PLAN)
+
+    assert audit["matches_firmware"] is False
+    assert any("outcome/binding" in item for item in audit["mismatches"])
+
+
+@pytest.mark.parametrize("start", (0, 100, 166, -166))
+def test_recovery_audit_expects_no_motion_at_or_inside_the_recenter_target(start: int) -> None:
+    record = _middle_zone_record(
+        start_offset_counts=start,
+        closest_offset_counts=start,
+        final_offset_counts=start,
+        lower_rate_q=0,
+        moving_duration_us=0,
+        settle_duration_us=0,
+        total_duration_us=0,
+        binding_source=0,
+        outcome=0,
+    )
+
+    audit = audit_rung_origin_recovery(record, _MIDDLE_ZONE_PLAN)
+
+    assert audit["matches_firmware"] is True
+
+
+def test_recovery_audit_rejects_recenter_without_settled_rate_in_the_drifted_zone() -> None:
+    record = _middle_zone_record(lower_rate_q=0)
+
+    audit = audit_rung_origin_recovery(record, _MIDDLE_ZONE_PLAN)
+
+    assert audit["matches_firmware"] is False
+    assert any("outcome/binding" in item for item in audit["mismatches"])
+
+
+def test_recovery_audit_bounds_recenter_duration_by_the_reconstructed_deadline() -> None:
+    deadline_us = recovery_runtime_us(233 - 166, 6_300_000, 3_000_000)
+    record = _middle_zone_record(
+        moving_duration_us=deadline_us - 750_000 + 1,
+        settle_duration_us=750_000,
+        total_duration_us=deadline_us + 1,
+    )
+
+    audit = audit_rung_origin_recovery(record, _MIDDLE_ZONE_PLAN)
+
+    assert audit["matches_firmware"] is False
+    assert any("exceeds reconstructed deadline" in item for item in audit["mismatches"])
 
 
 def test_golden_vector_records_every_level_moment() -> None:
