@@ -338,6 +338,59 @@ def test_recovery_audit_bounds_recenter_duration_by_the_reconstructed_deadline()
     assert any("exceeds reconstructed deadline" in item for item in audit["mismatches"])
 
 
+def _headroom_record(**changes: int) -> dict[str, int]:
+    return _middle_zone_record(
+        start_offset_counts=8_458,
+        closest_offset_counts=2_000,
+        final_offset_counts=2_000,
+        moving_duration_us=100_000,
+        settle_duration_us=500_000,
+        total_duration_us=600_000,
+        peak_torque_target_abs=2_534,
+        binding_source=6,
+        outcome=4,
+        **changes,
+    )
+
+
+_HEADROOM_PLAN = {**_MIDDLE_ZONE_PLAN, "schema_revision": 6}
+
+
+def test_recovery_audit_accepts_current_headroom_contact_during_a_moving_recovery() -> None:
+    audit = audit_rung_origin_recovery(_headroom_record(), _HEADROOM_PLAN)
+
+    assert audit["matches_firmware"] is True
+
+
+@pytest.mark.parametrize("outcome", (4, 5))
+@pytest.mark.parametrize(
+    "start_and_rate",
+    (
+        pytest.param({"lower_rate_q": 0}, id="no-settled-rate"),
+        pytest.param({"lower_rate_q": 3_150_000}, id="deadline-over-cap"),
+        pytest.param(
+            {
+                "start_offset_counts": 100,
+                "closest_offset_counts": 100,
+                "final_offset_counts": 100,
+            },
+            id="already-centered",
+        ),
+    ),
+)
+def test_recovery_audit_rejects_current_headroom_contact_without_a_moving_recovery(
+    outcome: int, start_and_rate: dict[str, int]
+) -> None:
+    record = _headroom_record()
+    record.update(start_and_rate)
+    record["outcome"] = outcome
+
+    audit = audit_rung_origin_recovery(record, _HEADROOM_PLAN)
+
+    assert audit["matches_firmware"] is False
+    assert any("outcome/binding" in item for item in audit["mismatches"])
+
+
 def test_golden_vector_records_every_level_moment() -> None:
     golden = json.loads(FIXTURE.read_text())
     observations = [VelocityObservation(**item) for item in golden["observations"]]

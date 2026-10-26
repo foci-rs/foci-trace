@@ -2225,6 +2225,7 @@ def test_schema_six_reconstructs_bounded_recovery_contact_lifecycle(
             "start_offset_counts": 1_834,
             "closest_offset_counts": 998,
             "final_offset_counts": final_offset,
+            "lower_rate_q": 6_300_000,
             "moving_duration_us": 100_000,
             "settle_duration_us": 500_000,
             "total_duration_us": 600_000,

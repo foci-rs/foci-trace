@@ -417,7 +417,7 @@ def audit_rung_origin_recovery(
             expected = ((1, 1), (1, 5), (3, 3), (3, 4))
     if historical_schema_five_contact:
         expected = ((4, 6),)
-    elif schema_six_contact:
+    elif schema_six_contact and runtime_us is not None:
         expected = ((outcome, 6),)
     if (outcome, binding) not in expected:
         mismatches.append(
