@@ -311,6 +311,8 @@ def plan_rung_origin_recovery(
     ):
         raise ValueError("recovery geometry is invalid")
     origin_band_counts = _div_ceil(settle_travel_reserve_mrev * encoder_counts_per_rev, 1_000)
+    if recovery_recenter_target_counts(origin_band_counts) == 0:
+        raise ValueError("recovery origin band is too small to recenter")
     travel_us = _div_ceil(max_stroke_travel_mrev * 1_000_000, planned_velocity_mrev_s)
     nominal_slot_us = _recovery_allowance_us(travel_us)
     if nominal_slot_us > primitive_cap_us:

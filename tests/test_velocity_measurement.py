@@ -259,6 +259,17 @@ def test_recenter_target_is_a_sixth_of_the_origin_band() -> None:
     assert recovery_recenter_target_counts(5) == 0
 
 
+def test_recovery_plan_rejects_an_origin_band_too_small_to_recenter() -> None:
+    with pytest.raises(ValueError, match="recenter"):
+        plan_rung_origin_recovery(
+            max_stroke_travel_mrev=2_500,
+            settle_travel_reserve_mrev=1,
+            encoder_counts_per_rev=4_000,
+            planned_velocity_mrev_s=4_394,
+            primitive_cap_us=3_000_000,
+        )
+
+
 def test_recovery_audit_expects_recenter_inside_the_band_beyond_the_recenter_target() -> None:
     audit = audit_rung_origin_recovery(_middle_zone_record(), _MIDDLE_ZONE_PLAN)
 
